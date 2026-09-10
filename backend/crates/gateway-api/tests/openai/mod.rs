@@ -125,7 +125,10 @@ pub(super) fn authenticated_client_for_provider(
         RuntimeSnapshotHandle::new(snapshot(plaintext, provider_name)),
         Arc::new(UnusedExecutionStore),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(IgnoredClientApiKeyUsage),
@@ -149,7 +152,10 @@ pub(super) fn authenticated_client_with_min_versions(
         RuntimeSnapshotHandle::new(snapshot),
         Arc::new(UnusedExecutionStore),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(IgnoredClientApiKeyUsage),
@@ -352,5 +358,24 @@ impl NativeContinuationPort for UnusedContinuation {
         _: NativeContinuationPin,
     ) -> BoxFuture<'a, Result<(), NativeContinuationStoreError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
+    }
+}
+
+#[derive(Default)]
+struct AllowedSourceAdmissions;
+impl gateway_core::engine::source_admission::SourceAdmissionPort for AllowedSourceAdmissions {
+    fn acquire(
+        &self,
+        _: gateway_core::engine::source_admission::SourceAdmissionRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<
+            Box<dyn gateway_core::engine::provider::ResourceLease>,
+            gateway_core::engine::source_admission::SourceAdmissionError,
+        >,
+    > {
+        Box::pin(async {
+            Ok(Box::new(()) as Box<dyn gateway_core::engine::provider::ResourceLease>)
+        })
     }
 }

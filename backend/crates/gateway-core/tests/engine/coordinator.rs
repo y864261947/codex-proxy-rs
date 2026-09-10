@@ -648,7 +648,13 @@ fn pool_source(index: u8) -> gateway_core::routing::source::SourceId {
 }
 
 fn pool_plan(operation: &Operation) -> RoutingPlan {
-    use gateway_core::policy::RateLimits;
+    pool_plan_with_limits(operation, gateway_core::policy::RateLimits::unlimited())
+}
+
+fn pool_plan_with_limits(
+    operation: &Operation,
+    limits: gateway_core::policy::RateLimits,
+) -> RoutingPlan {
     use gateway_core::routing::{
         SourceRoutingTarget,
         source::{AllowedSources, SourceId, SourcePolicy, SourcePreference},
@@ -705,7 +711,7 @@ fn pool_plan(operation: &Operation) -> RoutingPlan {
                     true,
                     SourcePreference::new(u16::try_from(index + 1).expect("priority"), 1)
                         .expect("preference"),
-                    RateLimits::unlimited(),
+                    limits,
                     None,
                 )
                 .expect("source")
@@ -903,7 +909,11 @@ fn coordinator_with_store(
     registry
         .register(provider.clone())
         .expect("register provider");
-    let engine = GatewayEngine::new(store.clone(), registry.build());
+    let engine = GatewayEngine::new(
+        store.clone(),
+        registry.build(),
+        Arc::new(super::execution::AllowedSourceAdmissions),
+    );
     (AttemptCoordinator::new(engine), store, provider)
 }
 
@@ -3709,4 +3719,218 @@ fn deadline_before_first_event_records_no_provider_circuit_failure() {
     assert_eq!(state.attempts.len(), 1);
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Failed);
     assert!(!state.finalizations[0].committed);
+}
+
+#[derive(Default)]
+struct RecordingSourceAdmissions {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    requests: Mutex<Vec<gateway_core::engine::source_admission::SourceAdmissionRequest>>,
+    rejected: BTreeSet<gateway_core::routing::source::SourceId>,
+    unavailable: bool,
+}
+
+struct RecordedSourceLease(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for RecordedSourceLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl gateway_core::engine::source_admission::SourceAdmissionPort for RecordingSourceAdmissions {
+    fn acquire(
+        &self,
+        request: gateway_core::engine::source_admission::SourceAdmissionRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<
+            Box<dyn gateway_core::engine::provider::ResourceLease>,
+            gateway_core::engine::source_admission::SourceAdmissionError,
+        >,
+    > {
+        Box::pin(async move {
+            let rejected = self.rejected.contains(&request.source);
+            self.requests.lock().expect("requests").push(request);
+            if self.unavailable {
+                return Err(
+                    gateway_core::engine::source_admission::SourceAdmissionError::Unavailable,
+                );
+            }
+            if rejected {
+                return Err(gateway_core::engine::source_admission::SourceAdmissionError::Capacity);
+            }
+            self.active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(RecordedSourceLease(self.active.clone()))
+                as Box<dyn gateway_core::engine::provider::ResourceLease>)
+        })
+    }
+}
+
+fn coordinator_with_source_admissions(
+    scripts: Vec<Script>,
+    admissions: Arc<RecordingSourceAdmissions>,
+) -> (
+    AttemptCoordinator<FakeStore>,
+    Arc<FakeStore>,
+    Arc<ScriptedProvider>,
+) {
+    let store = Arc::new(FakeStore::default());
+    let provider = Arc::new(ScriptedProvider::new(scripts));
+    let registry =
+        ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).expect("registry");
+    let engine = GatewayEngine::new(store.clone(), registry, admissions);
+    (AttemptCoordinator::new(engine), store, provider)
+}
+
+#[test]
+fn full_source_skips_provider_and_next_source_releases_before_downstream_commit() {
+    let admissions = Arc::new(RecordingSourceAdmissions {
+        rejected: BTreeSet::from([pool_source(1)]),
+        ..Default::default()
+    });
+    let operation = generate_operation();
+    let limits = gateway_core::policy::RateLimits {
+        max_concurrency: 7,
+        requests_per_minute: 60,
+    };
+    let plan = pool_plan_with_limits(&operation, limits);
+    let deadline = SystemTime::now() + Duration::from_secs(30);
+    let (coordinator, store, provider) = coordinator_with_source_admissions(
+        vec![Script::Stream {
+            account_id: "acct_two",
+            items: complete_stream(None),
+        }],
+        admissions.clone(),
+    );
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, deadline),
+        operation,
+        plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("session");
+    block_on(session.collect_uncommitted()).expect("fallback succeeds");
+    let requests = admissions.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].source, pool_source(1));
+    assert_eq!(requests[1].source, pool_source(2));
+    assert_eq!(requests[1].limits, limits);
+    assert_eq!(requests[1].deadline, deadline);
+    assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+    assert_eq!(
+        admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(
+        !session.is_finalized(),
+        "upstream capacity releases independently of downstream commit"
+    );
+    let state = store.state.lock().expect("state");
+    assert_eq!(state.created, 1);
+    assert_eq!(state.attempts.len(), 1);
+    assert!(
+        session
+            .provider_attempt_outcomes()
+            .iter()
+            .all(|outcome| !matches!(outcome, ProviderAttemptOutcome::Failed { .. }))
+    );
+}
+
+#[test]
+fn source_lease_releases_on_prepare_failure_cancellation_and_session_drop() {
+    for ending in ["prepare_failure", "cancel", "drop"] {
+        let admissions = Arc::new(RecordingSourceAdmissions::default());
+        let operation = generate_operation();
+        let plan = pool_plan(&operation);
+        let script = if ending == "prepare_failure" {
+            Script::Error(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            ))
+        } else {
+            Script::HangingStream {
+                account_id: "acct_one",
+                items: vec![Ok(GatewayEvent::Started(ResponseMeta::new(
+                    "response", "gpt-5",
+                )))],
+            }
+        };
+        let (coordinator, _, _) =
+            coordinator_with_source_admissions(vec![script], admissions.clone());
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("session");
+        if ending == "prepare_failure" {
+            assert!(block_on(session.collect_uncommitted()).is_err());
+        } else {
+            assert!(block_on(session.next_event()).expect("event").is_some());
+            assert_eq!(
+                admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            if ending == "cancel" {
+                block_on(session.cancel_and_finalize()).expect("cancel");
+            } else {
+                drop(session);
+            }
+        }
+        assert_eq!(
+            admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{ending}"
+        );
+    }
+}
+
+#[test]
+fn native_pin_cannot_escape_source_capacity_and_infrastructure_failure_sends_nothing() {
+    for unavailable in [false, true] {
+        let admissions = Arc::new(RecordingSourceAdmissions {
+            rejected: BTreeSet::from([pool_source(1)]),
+            unavailable,
+            ..Default::default()
+        });
+        let operation = generate_operation();
+        let plan = pool_plan(&operation);
+        let continuation = NativeContinuationPin::new(
+            PreviousResponseId::new("previous"),
+            PreviousResponseId::new("upstream"),
+            ClientApiKeyId::new("key_client_1").expect("key"),
+            ProviderKind::new("openai").expect("provider"),
+            ProviderAccountId::new("acct_shared").expect("account"),
+        )
+        .with_source(pool_source(1));
+        let (coordinator, store, provider) =
+            coordinator_with_source_admissions(Vec::new(), admissions.clone());
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            plan,
+            None,
+            Some(ContinuationBinding::Pinned(continuation)),
+            CancellationToken::new(),
+        ))
+        .expect("session");
+        let error = block_on(session.collect_uncommitted()).expect_err("source denied");
+        let error = gateway_error_from_engine(&error);
+        assert_eq!(
+            error.kind(),
+            if unavailable {
+                GatewayErrorKind::ProviderInfrastructureUnavailable
+            } else {
+                GatewayErrorKind::SourceCapacityUnavailable
+            }
+        );
+        assert_eq!(admissions.requests.lock().expect("requests").len(), 1);
+        assert!(provider.contexts.lock().expect("contexts").is_empty());
+        assert_eq!(store.state.lock().expect("state").created, 0);
+        assert!(session.provider_attempt_outcomes().is_empty());
+    }
 }

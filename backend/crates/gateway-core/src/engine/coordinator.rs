@@ -632,6 +632,9 @@ where
                     }
                 }
                 PollBoundary::Item(None) => {
+                    if let Some(current) = self.current.as_mut() {
+                        current.stream.close();
+                    }
                     self.record_current_provider_success();
                     self.upstream_complete = true;
                     return Ok(PullOutcome::End);
@@ -758,6 +761,7 @@ where
         );
         let provider_request = ProviderRequest::new(self.operation.clone(), candidate.clone());
         let stream = match poll_provider(
+            Arc::clone(self.engine.source_admissions()),
             provider,
             provider_request,
             context,
@@ -786,7 +790,8 @@ where
                     }
                     if matches!(
                         error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
+                        ProviderErrorKind::SourceCapacityUnavailable
+                            | ProviderErrorKind::AccountCapacityUnavailable
                             | ProviderErrorKind::NoEligibleAccount
                             | ProviderErrorKind::ProviderInfrastructureUnavailable
                     ) && error.send_state() == UpstreamSendState::NotSent
@@ -800,7 +805,8 @@ where
                     }
                     if matches!(
                         error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
+                        ProviderErrorKind::SourceCapacityUnavailable
+                            | ProviderErrorKind::AccountCapacityUnavailable
                             | ProviderErrorKind::NoEligibleAccount
                     ) && let Some(last_failure) = self.last_retryable_failure.take()
                     {
@@ -819,7 +825,8 @@ where
                     }
                     if !(matches!(
                         error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
+                        ProviderErrorKind::SourceCapacityUnavailable
+                            | ProviderErrorKind::AccountCapacityUnavailable
                             | ProviderErrorKind::NoEligibleAccount
                             | ProviderErrorKind::ProviderInfrastructureUnavailable
                     ) && error.send_state() == UpstreamSendState::NotSent)
@@ -1471,6 +1478,9 @@ where
     }
 
     async fn finish_interruption(&mut self, error: EngineError) -> Result<(), EngineError> {
+        if let Some(current) = self.current.as_mut() {
+            current.stream.close();
+        }
         let (outcome, gateway_error) = match error {
             EngineError::Cancelled => (
                 ExecutionOutcome::Cancelled,
@@ -1817,6 +1827,7 @@ async fn poll_retry_delay(
 }
 
 async fn poll_provider(
+    source_admissions: Arc<dyn super::source_admission::SourceAdmissionPort>,
     provider: Arc<dyn Provider>,
     request: ProviderRequest,
     context: AttemptContext,
@@ -1826,7 +1837,49 @@ async fn poll_provider(
     let Ok(remaining) = deadline.duration_since(SystemTime::now()) else {
         return ProviderBoundary::Deadline;
     };
-    let execution = provider.execute(request, context).fuse();
+    let execution = async move {
+        let lease = if let Some(source) = request.candidate().source() {
+            let controls = request.candidate().source_controls();
+            // 共享配额必须先解析为冻结配置，未解析的引用不能退化为不限额。
+            if controls.quota_scope_id().is_some() {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProviderInfrastructureUnavailable,
+                    UpstreamSendState::NotSent,
+                ));
+            }
+            Some(
+                source_admissions
+                    .acquire(super::source_admission::SourceAdmissionRequest {
+                        source: source.clone(),
+                        limits: controls.limits(),
+                        shared_quota: None,
+                        deadline,
+                    })
+                    .await
+                    .map_err(|error| {
+                        ProviderError::new(
+                            match error {
+                                super::source_admission::SourceAdmissionError::Capacity => {
+                                    ProviderErrorKind::SourceCapacityUnavailable
+                                }
+                                super::source_admission::SourceAdmissionError::Unavailable => {
+                                    ProviderErrorKind::ProviderInfrastructureUnavailable
+                                }
+                            },
+                            UpstreamSendState::NotSent,
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        let stream = provider.execute(request, context).await?;
+        Ok(match lease {
+            Some(lease) => stream.with_additional_lease(lease),
+            None => stream,
+        })
+    }
+    .fuse();
     let cancelled = cancellation.cancelled().fuse();
     let timeout = Delay::new(remaining).fuse();
     pin_mut!(execution, cancelled, timeout);

@@ -352,6 +352,20 @@ impl ProviderStream {
         }
     }
 
+    /// Core 来源租约与 Provider 自有账号租约共同持有，不替换实际账号占用。
+    #[must_use]
+    pub fn with_additional_lease(mut self, lease: Box<dyn ResourceLease>) -> Self {
+        self._lease = Box::new((self._lease, lease));
+        self
+    }
+
+    /// 已完成或被 Core 取消时关闭传输并归还容量，保留调用事实供交付与历史读取。
+    pub(super) fn close(&mut self) {
+        self.events = Box::pin(futures::stream::empty());
+        self._lease = Box::new(());
+        self.terminated = true;
+    }
+
     /// 让公共 stream 边界统一回灌账号成功率与首个有效输出延迟。
     #[must_use]
     pub fn with_account_feedback(mut self, stats: Arc<AccountFeedbackStats>) -> Self {

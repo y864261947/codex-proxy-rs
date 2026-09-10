@@ -267,15 +267,26 @@ impl DefaultExecutionService {
         snapshots: RuntimeSnapshotHandle,
         execution: Arc<dyn ExecutionStore>,
         providers: ProviderRegistry,
-        admissions: Arc<dyn ClientAdmissionPort>,
+        (admissions, source_admissions): (
+            Arc<dyn ClientAdmissionPort>,
+            Arc<dyn super::source_admission::SourceAdmissionPort>,
+        ),
         circuits: Arc<dyn ProviderCircuitPort>,
         continuation: Arc<dyn NativeContinuationPort>,
         client_api_key_usage: Arc<dyn ClientApiKeyUsageSink>,
     ) -> Self {
         let observations = Arc::clone(&execution);
-        let engine = GatewayEngine::<dyn ExecutionStore>::new(execution, providers.clone());
+        let engine = GatewayEngine::<dyn ExecutionStore>::new(
+            execution,
+            providers.clone(),
+            source_admissions.clone(),
+        );
         let transient: Arc<dyn ExecutionStore> = Arc::new(TransientExecutionStore);
-        let probe_engine = GatewayEngine::<dyn ExecutionStore>::new(transient, providers.clone());
+        let probe_engine = GatewayEngine::<dyn ExecutionStore>::new(
+            transient,
+            providers.clone(),
+            source_admissions,
+        );
         Self {
             snapshots,
             traffic: TrafficMonitor::default(),

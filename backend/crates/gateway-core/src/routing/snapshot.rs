@@ -776,6 +776,7 @@ impl RuntimeSnapshot {
                 Ok(plan) => {
                     candidates.extend(plan.candidates().iter().cloned().map(|mut candidate| {
                         candidate.source = Some(policy.snapshot());
+                        candidate.source_controls = policy.controls().clone();
                         candidate
                     }))
                 }
@@ -923,6 +924,11 @@ impl RuntimeSnapshot {
             };
             candidates.push(ProviderCandidate {
                 channel: model.channel.clone(),
+                source_controls: self
+                    .source_policy(source)
+                    .expect("validated source policy")
+                    .controls()
+                    .clone(),
                 source: self
                     .source_policy(source)
                     .map(super::source::SourcePolicy::snapshot),
@@ -1204,6 +1210,7 @@ impl RuntimeSnapshot {
             candidates.push(ProviderCandidate {
                 channel: None,
                 source: None,
+                source_controls: super::source::SourceControls::default(),
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
                 emulated_features,
@@ -1255,6 +1262,7 @@ impl RuntimeSnapshot {
         let candidate = ProviderCandidate {
             channel: None,
             source: None,
+            source_controls: super::source::SourceControls::default(),
             provider: provider.clone(),
             upstream_model: None,
             emulated_features: BTreeSet::new(),

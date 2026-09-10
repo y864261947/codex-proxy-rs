@@ -7,6 +7,7 @@ pub mod execution;
 mod observation;
 pub mod probe;
 pub mod provider;
+pub mod source_admission;
 pub mod traffic;
 
 pub use coordinator::{AttemptCoordinator, ResponseExecutionSession};
@@ -789,12 +790,21 @@ pub enum EngineError {
 pub struct GatewayEngine<S: ?Sized> {
     store: Arc<S>,
     providers: provider::ProviderRegistry,
+    source_admissions: Arc<dyn source_admission::SourceAdmissionPort>,
 }
 
 impl<S: ?Sized> GatewayEngine<S> {
     #[must_use]
-    pub const fn new(store: Arc<S>, providers: provider::ProviderRegistry) -> Self {
-        Self { store, providers }
+    pub const fn new(
+        store: Arc<S>,
+        providers: provider::ProviderRegistry,
+        source_admissions: Arc<dyn source_admission::SourceAdmissionPort>,
+    ) -> Self {
+        Self {
+            store,
+            providers,
+            source_admissions,
+        }
     }
 
     #[must_use]
@@ -805,5 +815,10 @@ impl<S: ?Sized> GatewayEngine<S> {
     #[must_use]
     pub const fn providers(&self) -> &provider::ProviderRegistry {
         &self.providers
+    }
+
+    #[must_use]
+    pub const fn source_admissions(&self) -> &Arc<dyn source_admission::SourceAdmissionPort> {
+        &self.source_admissions
     }
 }

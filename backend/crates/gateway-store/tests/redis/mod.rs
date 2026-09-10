@@ -9,6 +9,7 @@ mod oauth_pending;
 mod provider_circuit;
 mod provider_session_affinity;
 mod provider_session_exclusion;
+mod source_admission;
 mod worker_lease;
 
 use chrono::Utc;

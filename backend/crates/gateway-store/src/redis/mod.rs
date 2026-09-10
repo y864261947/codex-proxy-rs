@@ -20,6 +20,7 @@ mod provider_circuit;
 mod provider_session_affinity;
 mod provider_session_exclusion;
 mod runtime_change;
+mod source_admission;
 pub(crate) mod worker_lease;
 
 pub use admin_account_runtime::*;
@@ -35,6 +36,7 @@ pub use provider_circuit::*;
 pub use provider_session_affinity::*;
 pub use provider_session_exclusion::*;
 pub use runtime_change::*;
+pub use source_admission::*;
 
 use crate::{StoreError, StoreResult, redis_unavailable, require_nonempty};
 

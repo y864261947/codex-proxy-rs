@@ -200,6 +200,11 @@ impl SourcePolicy {
     }
 
     #[must_use]
+    pub const fn controls(&self) -> &SourceControls {
+        &self.controls
+    }
+
+    #[must_use]
     pub const fn limits(&self) -> RateLimits {
         self.controls.limits()
     }

@@ -74,7 +74,10 @@ fn account_probe_should_not_write_to_the_persistent_execution_store() {
         RuntimeSnapshotHandle::new(probe_snapshot()),
         store.clone(),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -111,7 +114,10 @@ fn probe_failures_should_be_observable_without_a_model_request_row() {
         RuntimeSnapshotHandle::new(probe_snapshot()),
         store.clone(),
         providers,
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -154,7 +160,10 @@ fn provider_local_probe_failure_should_remain_distinct_from_upstream() {
         RuntimeSnapshotHandle::new(probe_snapshot()),
         store,
         providers,
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -185,7 +194,10 @@ fn probe_observation_store_failure_preserves_the_provider_error() {
         RuntimeSnapshotHandle::new(probe_snapshot()),
         store.clone(),
         providers,
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -325,7 +337,10 @@ fn successful_authentication_should_record_client_key_usage() {
         RuntimeSnapshotHandle::new(client_snapshot()),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         usage.clone(),
@@ -353,7 +368,10 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
             requested_model: model.map(|model| PublicModelId::new(model).expect("model")),
         }) as Arc<dyn Provider>])
         .expect("provider registry"),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -409,7 +427,10 @@ fn circuit_store_failure_should_fail_open_during_request_start() {
         RuntimeSnapshotHandle::new(start_snapshot()),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(FailingDecisionCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -447,7 +468,10 @@ fn slow_circuit_store_should_time_out_and_fail_open_during_request_start() {
         RuntimeSnapshotHandle::new(start_snapshot()),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(PendingDecisionCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -486,7 +510,10 @@ fn cancelling_request_preparation_releases_realtime_concurrency() {
         RuntimeSnapshotHandle::new(start_snapshot()),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(PendingDecisionCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -520,7 +547,10 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
         RuntimeSnapshotHandle::new(start_snapshot()),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -558,7 +588,10 @@ fn continuation_owned_by_another_client_api_key_should_fail_closed() {
         RuntimeSnapshotHandle::new(start_snapshot()),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(RejectedContinuation::OwnershipMismatch),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -586,7 +619,10 @@ fn invalid_continuation_record_should_not_be_forwarded_as_an_external_handle() {
         RuntimeSnapshotHandle::new(start_snapshot()),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(RejectedContinuation::InvalidData),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -842,7 +878,10 @@ fn global_capacity_rejections_are_distinct_from_downstream_limits_and_do_not_sta
             RuntimeSnapshotHandle::new(start_snapshot()),
             store.clone(),
             ProviderRegistry::default(),
-            Arc::new(RejectingAdmissions::new(reason)),
+            (
+                Arc::new(RejectingAdmissions::new(reason)),
+                Arc::new(AllowedSourceAdmissions),
+            ),
             Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
@@ -1172,7 +1211,10 @@ fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoin
         RuntimeSnapshotHandle::new(snapshot),
         store.clone(),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -1337,7 +1379,10 @@ fn channel_only_access_groups_list_and_route_only_explicit_sources_and_public_mo
             RuntimeSnapshotHandle::new(snapshot),
             Arc::new(TrackingExecutionStore::default()),
             ProviderRegistry::default(),
-            Arc::new(UnusedAdmissions),
+            (
+                Arc::new(UnusedAdmissions),
+                Arc::new(AllowedSourceAdmissions),
+            ),
             Arc::new(UnusedCircuits),
             Arc::new(UnusedContinuation),
             Arc::new(RecordingClientApiKeyUsage::default()),
@@ -1401,7 +1446,7 @@ fn each_websocket_generation_rechecks_current_limits_permissions_and_snapshot_av
         snapshots.clone(),
         Arc::new(TrackingExecutionStore::default()),
         ProviderRegistry::default(),
-        admissions.clone(),
+        (admissions.clone(), Arc::new(AllowedSourceAdmissions)),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(RecordingClientApiKeyUsage::default()),
@@ -1501,4 +1546,23 @@ fn start_operation_for_model(model: &str) -> Operation {
         ProtocolPayload::json_object("openai", body.as_object().expect("request object").clone())
             .expect("OpenAI payload"),
     ))
+}
+
+#[derive(Default)]
+pub(super) struct AllowedSourceAdmissions;
+impl gateway_core::engine::source_admission::SourceAdmissionPort for AllowedSourceAdmissions {
+    fn acquire(
+        &self,
+        _: gateway_core::engine::source_admission::SourceAdmissionRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<
+            Box<dyn gateway_core::engine::provider::ResourceLease>,
+            gateway_core::engine::source_admission::SourceAdmissionError,
+        >,
+    > {
+        Box::pin(async {
+            Ok(Box::new(()) as Box<dyn gateway_core::engine::provider::ResourceLease>)
+        })
+    }
 }

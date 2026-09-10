@@ -147,6 +147,12 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
     let (client_key_usage, client_key_usage_writer) =
         postgres::PgClientApiKeyUsageSink::new(pool.clone());
     let retention = Arc::new(postgres::PgRetentionRepository::new(pool.clone()));
+    let source_repository = Arc::new(redis::RedisClientAdmissionRepository::new(
+        redis_connection.clone(),
+        REDIS_NAMESPACE,
+    )?);
+    let (source_admissions, source_admission_worker) =
+        redis::RedisSourceAdmissionPort::new(source_repository);
     let admissions: Arc<dyn gateway_core::engine::admission::ClientAdmissionPort> = Arc::new(
         redis::RedisClientAdmissionRepository::new(redis_connection.clone(), REDIS_NAMESPACE)?,
     );
@@ -183,6 +189,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
             )?),
         ),
         Arc::new(client_key_usage),
+        Arc::new(source_admissions),
     );
 
     let provider_ports = ProviderStorePorts::new(
@@ -219,6 +226,7 @@ pub async fn initialize(mut config: StoreConfig) -> StoreResult<StoreBundle> {
         admission_release_writer,
         circuit_feedback_writer,
         retention,
+        source_admission_worker,
     )?;
     Ok(StoreBundle {
         admin_ports,

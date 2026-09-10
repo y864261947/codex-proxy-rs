@@ -9,6 +9,7 @@ pub(crate) fn store_worker_contributions(
     admission_release_writer: redis::ClientAdmissionReleaseWriter,
     circuit_feedback_writer: redis::ProviderCircuitFeedbackWriter,
     retention: Arc<postgres::PgRetentionRepository>,
+    source_admission_worker: redis::SourceAdmissionWorker,
 ) -> StoreResult<Vec<WorkerContribution>> {
     let stale_id = WorkerId::try_new(WorkerKind::StaleModelRequestRecovery, "postgres")
         .map_err(worker_definition_error)?;
@@ -26,7 +27,19 @@ pub(crate) fn store_worker_contributions(
     let ops_flush_restart =
         DaemonRestartPolicy::try_new(Duration::from_secs(1), Duration::from_secs(60))
             .map_err(worker_definition_error)?;
+    let source_admission_id = WorkerId::try_new(WorkerKind::OpsFlush, "redis_source_admission")
+        .map_err(worker_definition_error)?;
     Ok(vec![
+        WorkerContribution::Registration(
+            WorkerRegistration::try_new(
+                source_admission_id,
+                WorkerRunnable::Daemon {
+                    restart: ops_flush_restart,
+                    task: Box::new(source_admission_worker),
+                },
+            )
+            .map_err(worker_definition_error)?,
+        ),
         WorkerContribution::Registration(scheduled_worker(
             stale_id,
             Duration::from_secs(30),

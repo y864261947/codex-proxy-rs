@@ -507,6 +507,7 @@ pub enum SourceRoutingTarget<'a> {
 pub struct ProviderCandidate {
     channel: Option<ChannelBinding>,
     source: Option<source::SourceSnapshot>,
+    source_controls: source::SourceControls,
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
     emulated_features: BTreeSet<Feature>,
@@ -544,6 +545,11 @@ impl ProviderCandidate {
     #[must_use]
     pub const fn source_snapshot(&self) -> Option<&source::SourceSnapshot> {
         self.source.as_ref()
+    }
+
+    #[must_use]
+    pub const fn source_controls(&self) -> &source::SourceControls {
+        &self.source_controls
     }
 
     #[must_use]
