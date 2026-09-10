@@ -43,3 +43,7 @@
 先在现有 OpenAI Provider crate 内增加独立的 API 渠道适配器，复用该 owner 的 Responses 协议解析；使用独立的 ProviderKind 与 API Key 认证，不进入 Codex OAuth 账号选择。当前网关客户端入口是 Responses；Chat Completions、Anthropic、Gemini 的转换按后续协议批次分别验证。
 
 2026-09-10 核对官方资料：[模型列表](https://developers.openai.com/api/reference/resources/models/methods/list) 返回模型 ID、归属和生命周期等基本信息，不能据此推断价格或完整能力；[流式响应](https://developers.openai.com/api/docs/guides/streaming-responses) 使用 SSE 及具名生命周期事件。初始 API 渠道显式配置 Responses 模型集合，自动发现与能力确认在第三批处理。
+
+首个实现按具体渠道版本读取配置，HTTP Client 禁止重定向；凭据仅来自渠道，不传递下游认证或 Codex OAuth 画像。Provider 在 Core 已记录 attempt 后首次 poll 才发送一次请求，收到响应头前的取消按发送不确定处理，收到头后的截断按已发送处理。客户端 JSON/SSE/WS 仍由现有 API 适配层消费同一 Responses 流。
+
+该阶段 API 渠道保留 usage 而不沿用 OAuth 模型估算价，价格必须由后续价格版本明确归属。原生 previous-response/conversation 尚无渠道级续接 owner，暂时拒绝；`background: true` 也必须等待异步任务租约实现，不能返回排队状态后提前释放逻辑容量。

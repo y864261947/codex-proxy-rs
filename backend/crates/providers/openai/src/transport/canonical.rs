@@ -49,6 +49,7 @@ pub struct CodexCanonicalDecoder {
     web_search_pricing: Option<WebSearchPricing>,
     timing_signals: ResponseEventSignals,
     raw_sse_passthrough: bool,
+    calculate_catalog_cost: bool,
 }
 
 /// 上游 Responses 事件的两类失败：协议损坏，或上游明确报告业务失败。
@@ -146,6 +147,7 @@ impl CodexCanonicalDecoder {
             web_search_pricing: None,
             timing_signals: ResponseEventSignals::default(),
             raw_sse_passthrough: false,
+            calculate_catalog_cost: true,
         }
     }
 
@@ -155,6 +157,13 @@ impl CodexCanonicalDecoder {
     #[must_use]
     pub fn with_raw_sse_passthrough(mut self) -> Self {
         self.raw_sse_passthrough = true;
+        self
+    }
+
+    /// API 渠道保留真实用量；其价格由渠道价格版本决定，不能套用 OAuth 目录价格。
+    #[must_use]
+    pub fn with_usage_only(mut self) -> Self {
+        self.calculate_catalog_cost = false;
         self
     }
 
@@ -867,6 +876,7 @@ impl CodexCanonicalDecoder {
             .or(self.requested_service_tier.as_deref());
         let tool_calls = billable_tool_calls(response);
         if let Some(breakdown) = usage
+            .filter(|_| self.calculate_catalog_cost)
             .filter(|usage| billable_usage_is_complete(response, *usage))
             .and_then(|usage| {
                 let (web_search_calls, file_search_calls) = tool_calls?;

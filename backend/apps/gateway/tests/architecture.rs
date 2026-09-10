@@ -71,6 +71,7 @@ fn core_value_owners_do_not_depend_on_execution_or_routing() {
             "upstream.rs" => Some(&["validation"]),
             "event.rs" => Some(&["metering", "operation", "upstream", "validation"]),
             "account/store.rs" => Some(&["account", "error", "identity", "validation"]),
+            "policy/access.rs" => Some(&["account", "identity", "policy", "validation"]),
             path if path.starts_with("policy/") => Some(&["account", "policy", "validation"]),
             path if path.starts_with("account/") => Some(&["account", "identity", "validation"]),
             _ => None,

@@ -9,6 +9,35 @@ use serde_json::json;
 const METADATA_PREFIX_FIXTURE: &str = include_str!("fixtures/metadata_only_prefix.sse");
 
 #[test]
+fn usage_only_channels_do_not_inherit_catalog_cost_estimates() {
+    let body = concat!(
+        "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_usage_only\",\"model\":\"gpt-5.4\"}}\n\n",
+        "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_usage_only\",\"model\":\"gpt-5.4\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":10,\"input_tokens_details\":{\"cached_tokens\":4},\"output_tokens\":2,\"output_tokens_details\":{\"reasoning_tokens\":0},\"total_tokens\":12}}}\n\n",
+    );
+    for usage_only in [false, true] {
+        let decoder = CodexCanonicalDecoder::new("gpt-5.4");
+        let mut decoder = if usage_only {
+            decoder.with_usage_only()
+        } else {
+            decoder
+        };
+        let events = decoder.push(body.as_bytes()).expect("response");
+        let facts = canonical_facts(&events);
+        assert!(
+            facts
+                .iter()
+                .any(|event| matches!(event, GatewayEvent::Usage(_)))
+        );
+        assert_eq!(
+            facts
+                .iter()
+                .any(|event| matches!(event, GatewayEvent::CalculatedCost(_))),
+            !usage_only
+        );
+    }
+}
+
+#[test]
 fn decoder_should_not_forward_codex_rate_limit_metadata_fixture_as_openai_wire() {
     let events = CodexCanonicalDecoder::new("fallback")
         .with_raw_sse_passthrough()

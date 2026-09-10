@@ -70,7 +70,13 @@ pub async fn run() -> Result<(), BootstrapError> {
     host.report_startup_ready("OpenAI Provider");
     let mut xai = provider_xai::initialize(xai, provider_ports).await?;
     host.report_startup_ready("xAI Provider");
-    let providers = ProviderRegistry::new([openai.core_provider(), xai.core_provider()])?;
+    let api_channels = provider_openai::api::provider::ApiChannelProvider::new(store.channels())
+        .map_err(|_| provider_openai::OpenAiInitializeError::Transport)?;
+    let providers = ProviderRegistry::new([
+        openai.core_provider(),
+        xai.core_provider(),
+        std::sync::Arc::new(api_channels),
+    ])?;
     let mut core = gateway_core::initialize(store.core_ports(), providers).await?;
     host.report_startup_ready("Core");
     let mut admin = gateway_admin::initialize(

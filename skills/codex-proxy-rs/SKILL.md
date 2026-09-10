@@ -37,7 +37,7 @@ README 保持用户导向；不要把上游 URL、重试常量、数据库字段
 - Provider 的一次 `execute` 只选择一个 credential。换号、业务 retry 和跨 Provider fallback 只能由 Core
   在发送/交付边界内决定。
 - PostgreSQL 是持久化权威；Redis 只保存可重建、可过期的协调状态。
-- 当前只有 `openai` 与 `xai`，不存在 Provider Instance 层；Client Key 绑定账号分组而不是 Provider。
+- 现有 OAuth 适配器为 `openai` 与 `xai`；API 渠道使用独立 `openai_api` 及 `ChannelId`。接入分组显式授权号池/渠道与模型，旧 Key 保留原账号分组范围。具体渠道不能仅由 ProviderKind 标识。
 - 已应用迁移按字节冻结；schema 变化新增编号迁移，并同步 `.frozen-sha256`。
 - 真实 secret 不进入普通日志、Debug、fixture、audit details 或文档示例；明文 Admin 响应只能出现在
   账号导出、Key reveal、备份设置等明确敏感合同中。
