@@ -6,7 +6,7 @@ import DashboardHeartbeat from '@/views/dashboard/components/DashboardHeartbeat.
 import RequestHealthTimelineCard from '@/views/dashboard/components/RequestHealthTimelineCard.vue'
 import { useDashboard } from '@/views/dashboard/composables/useDashboard'
 
-const { accountUsage, poolSummary, capacityInfo, rotationStrategy, healthTimeline, lastRefreshedAt } = useDashboard()
+const { accountUsage, poolSummary, capacityInfo, rotationStrategy, healthTimeline, lastRefreshedAt, trendError } = useDashboard()
 </script>
 
 <template>
@@ -17,6 +17,9 @@ const { accountUsage, poolSummary, capacityInfo, rotationStrategy, healthTimelin
         <DashboardHeartbeat :updated-at="lastRefreshedAt" />
       </template>
     </BasePageHeader>
+    <p v-if="trendError" role="status" class="mt-4 text-sm text-cp-error-text">
+      号池与健康统计更新失败：{{ trendError }}。请以最近成功采样时间为准。
+    </p>
     <RealtimeTrafficCard class="mt-6" />
     <AccountOverviewCard
       class="mt-6"
