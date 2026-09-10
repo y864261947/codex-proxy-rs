@@ -51,6 +51,7 @@ const CLIENT_API_KEY_LAST_USED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientApiKeySnapshot {
+    pub customer: Option<gateway_core::policy::CustomerPolicy>,
     pub id: ClientApiKeyId,
     pub plaintext_key: PlaintextClientApiKey,
     pub group_ids: Vec<AccountGroupId>,
@@ -67,6 +68,7 @@ impl ClientApiKeySnapshot {
     ) -> StoreResult<Self> {
         Ok(Self {
             id: ClientApiKeyId::new(id).map_err(|_| invalid("persisted key ID is invalid"))?,
+            customer: None,
             plaintext_key: PlaintextClientApiKey::new(key)
                 .map_err(|_| invalid("persisted plaintext key is invalid"))?,
             group_ids: group_ids

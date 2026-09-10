@@ -521,6 +521,7 @@ pub struct NewModelRequest {
     pub id: ModelRequestId,
     pub client_api_key_id: Option<ClientApiKeyId>,
     pub client_api_key_ref: ClientApiKeyId,
+    pub customer_ref: Option<crate::policy::CustomerId>,
     pub config_revision: ConfigRevision,
     pub routing: crate::routing::AccountRoutingSnapshot,
     pub protocol: String,

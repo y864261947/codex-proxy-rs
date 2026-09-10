@@ -162,7 +162,7 @@ impl ClientAdmissionRequest {
             redis_integer(scope.limits.max_concurrency, "maximum concurrency")?;
             redis_integer(scope.limits.requests_per_minute, "requests per minute")?;
         }
-        if self.lease_ttl.is_zero() {
+        if self.lease_ttl.as_millis() == 0 {
             return Err(invalid("lease TTL must be positive"));
         }
         redis_duration_millis(self.lease_ttl)?;

@@ -14,6 +14,8 @@ use uuid::Uuid;
 fn client_admission_rejects_zero_ttl() {
     let request = admission_request("request-1", "key-1", Duration::ZERO);
     assert!(request.validate().is_err());
+    let request = admission_request("request-1", "key-1", Duration::from_nanos(1));
+    assert!(request.validate().is_err());
 }
 
 #[test]

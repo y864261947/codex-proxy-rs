@@ -26,6 +26,10 @@ fn customer_disable_denies_enabled_keys_and_keeps_independent_limits() {
     )
     .with_customer(Some(customer.clone()));
     assert!(policy.authorize().is_err());
+    assert!(
+        !policy.enabled(),
+        "disabled customers must be excluded from the authentication snapshot"
+    );
     let scopes = policy.admission_scopes();
     assert_eq!(scopes.len(), 2);
     assert_eq!(scopes[0].limits.max_concurrency, 3);

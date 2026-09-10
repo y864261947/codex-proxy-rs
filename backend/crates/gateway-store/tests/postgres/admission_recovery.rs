@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use gateway_core::policy::{AdmissionScopeId, ClientApiKeyId, CustomerId};
 use gateway_store::postgres::{
     ClientAdmissionRecentRequest, ClientAdmissionRecovery, ClientAdmissionRecoveryRepository,
     ClientAdmissionRunningRequest, PgClientAdmissionRecoveryRepository,
@@ -54,7 +55,7 @@ async fn recovery_loads_precise_window_and_running_request_facts() {
         .await
         .expect("load precise admission recovery facts");
     let expected = vec![ClientAdmissionRecovery {
-        client_api_key_ref: "key-recovery".to_owned(),
+        scope_id: AdmissionScopeId::Key(ClientApiKeyId::new("key-recovery").expect("key ID")),
         recent_requests: vec![
             ClientAdmissionRecentRequest {
                 model_request_id: "recent-complete".to_owned(),
@@ -109,4 +110,67 @@ async fn seed_request(
     .execute(pool)
     .await
     .expect("seed model request recovery fact");
+}
+
+#[tokio::test]
+async fn recovery_aggregates_frozen_customer_refs_after_key_reassignment_and_deletion() {
+    let Some(database) = TestDatabase::create("customer_admission_recovery").await else {
+        return;
+    };
+    let now = Utc::now();
+    sqlx::raw_sql(
+        "insert into customers (id, name) values ('cust_original', 'Original'), ('cust_new', 'New');
+         insert into client_api_keys (id, name, key, customer_id)
+         values ('key-recovery', 'first', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'cust_original');"
+    ).execute(&database.pool).await.expect("seed customer and key");
+    let error = sqlx::query("delete from customers where id = 'cust_original'")
+        .execute(&database.pool)
+        .await
+        .expect_err("cannot delete a customer with keys");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503")
+    );
+    seed_request(
+        &database.pool,
+        "req_first_customer",
+        now,
+        now + Duration::seconds(60),
+        "running",
+    )
+    .await;
+    seed_request(
+        &database.pool,
+        "req_second_customer",
+        now,
+        now + Duration::seconds(60),
+        "running",
+    )
+    .await;
+    sqlx::raw_sql(
+        "update model_requests set customer_ref = 'cust_original';
+         update model_requests set client_api_key_ref = 'key-other' where id = 'req_second_customer';
+         update client_api_keys set customer_id = 'cust_new' where id = 'key-recovery';
+         delete from customers where id = 'cust_original';
+         delete from client_api_keys where id = 'key-recovery';"
+    ).execute(&database.pool).await.expect("change live ownership and remove original records");
+    let recoveries = PgClientAdmissionRecoveryRepository::new(database.pool.clone())
+        .load_client_admission_recovery(now - Duration::seconds(60))
+        .await
+        .expect("load frozen recovery");
+    assert_eq!(recoveries.len(), 3);
+    let original =
+        AdmissionScopeId::Customer(CustomerId::new("cust_original").expect("customer ID"));
+    let customer = recoveries
+        .iter()
+        .find(|recovery| recovery.scope_id == original)
+        .expect("original customer recovery");
+    assert_eq!(customer.recent_requests.len(), 2);
+    assert_eq!(customer.running_requests.len(), 2);
+    assert!(!recoveries.iter().any(|recovery| recovery.scope_id
+        == AdmissionScopeId::Customer(CustomerId::new("cust_new").expect("customer ID"))));
+    database.close().await;
 }

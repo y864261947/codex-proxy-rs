@@ -279,6 +279,45 @@ fn compiler(store: Arc<dyn SnapshotStorePort>) -> RuntimeSnapshotCompiler {
     RuntimeSnapshotCompiler::new(store, ProviderRegistry::default())
 }
 
+#[test]
+fn compiled_snapshot_excludes_keys_of_disabled_customers() {
+    use gateway_core::policy::{CustomerId, CustomerPolicy};
+    let policies = [true, false]
+        .into_iter()
+        .map(|enabled| {
+            SnapshotClientPolicyFacts::new(
+                ClientApiKeyId::new(format!("key_{enabled}")).expect("key ID"),
+                PlaintextClientApiKey::new(format!("sk_{enabled}")).expect("key"),
+                Vec::new(),
+                RateLimits::unlimited(),
+            )
+            .with_customer(Some(CustomerPolicy {
+                id: CustomerId::new(format!("cust_{enabled}")).expect("customer ID"),
+                enabled,
+                limits: RateLimits {
+                    max_concurrency: 4,
+                    requests_per_minute: 90,
+                },
+            }))
+        })
+        .collect();
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        SnapshotSettingsFacts::new(3, 50, "smart", BTreeMap::new(), None, None),
+        policies,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+    );
+    let snapshot = block_on(compiler(Arc::new(TestSnapshotStore::new(Ok(facts)))).compile())
+        .expect("compile customer policies");
+    let policies = snapshot.client_policies().collect::<Vec<_>>();
+    assert_eq!(policies.len(), 1);
+    assert_eq!(policies[0].key_id().as_str(), "key_true");
+    assert_eq!(policies[0].admission_scopes()[1].limits.max_concurrency, 4);
+}
+
 fn revision(value: u64) -> ConfigRevision {
     ConfigRevision::new(value).expect("positive revision")
 }

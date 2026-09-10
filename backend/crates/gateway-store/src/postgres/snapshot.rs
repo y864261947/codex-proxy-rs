@@ -158,6 +158,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                         key.group_ids,
                         key.limits,
                     )
+                    .with_customer(key.customer)
                 })
                 .collect();
             let account_groups = data
@@ -261,22 +262,59 @@ async fn load_settings(
 async fn load_client_keys(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<Vec<ClientApiKeySnapshot>> {
-    let rows = sqlx::query_as::<_, (String, String, Vec<String>, i64, i64)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Vec<String>,
+            i64,
+            i64,
+            Option<String>,
+            Option<bool>,
+            Option<i64>,
+            Option<i64>,
+        ),
+    >(
         "select k.id, k.key,
                 coalesce(array_agg(kg.account_group_id order by kg.account_group_id)
                   filter (where kg.account_group_id is not null), '{}') as group_ids,
-                k.max_concurrency, k.requests_per_minute
+                k.max_concurrency, k.requests_per_minute,
+                c.id, c.enabled, c.max_concurrency, c.requests_per_minute
          from client_api_keys k
          left join client_api_key_groups kg on kg.client_api_key_id = k.id
+         left join customers c on c.id = k.customer_id
          where k.enabled
-         group by k.id
+         group by k.id, c.id
          order by k.id",
     )
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("load snapshot client policies"))?;
     rows.into_iter()
-        .map(|row| ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4))
+        .map(|row| {
+            let mut key = ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4)?;
+            key.customer = row
+                .5
+                .map(|id| {
+                    Ok::<_, StoreError>(gateway_core::policy::CustomerPolicy {
+                        id: gateway_core::policy::CustomerId::new(id)
+                            .map_err(|_| invalid("invalid customer ID"))?,
+                        enabled: row.6.ok_or_else(|| invalid("missing customer status"))?,
+                        limits: gateway_core::policy::RateLimits {
+                            max_concurrency: to_u64(
+                                row.7
+                                    .ok_or_else(|| invalid("missing customer concurrency"))?,
+                            )?,
+                            requests_per_minute: to_u64(
+                                row.8.ok_or_else(|| invalid("missing customer RPM"))?,
+                            )?,
+                        },
+                    })
+                })
+                .transpose()?;
+            Ok(key)
+        })
         .collect()
 }
 

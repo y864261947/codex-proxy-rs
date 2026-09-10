@@ -167,6 +167,10 @@ impl ClientPolicy {
     #[must_use]
     pub const fn enabled(&self) -> bool {
         self.enabled
+            && match &self.customer {
+                Some(customer) => customer.enabled,
+                None => true,
+            }
     }
 
     #[must_use]

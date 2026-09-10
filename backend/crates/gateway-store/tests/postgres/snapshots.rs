@@ -972,6 +972,7 @@ fn new_request(id: &str, started_at: DateTime<Utc>) -> NewModelRequest {
         id: id.to_owned(),
         client_api_key_id: None,
         client_api_key_ref: "key_snapshot".to_owned(),
+        customer_ref: None,
         config_revision: 1,
         protocol: "openai".to_owned(),
         operation: "responses".to_owned(),

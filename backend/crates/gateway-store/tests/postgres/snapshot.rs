@@ -8,6 +8,7 @@ use super::TestDatabase;
 #[test]
 fn snapshot_client_policy_contains_only_common_limits() {
     let policy = ClientApiKeySnapshot {
+        customer: None,
         id: ClientApiKeyId::new("key-1").expect("client key ID"),
         plaintext_key: PlaintextClientApiKey::new("sk_snapshot_secret").expect("plaintext key"),
         group_ids: Vec::new(),
@@ -47,5 +48,56 @@ async fn runtime_snapshot_loads_enabled_plaintext_key_without_debug_exposure() {
         plaintext
     );
     assert!(!format!("{snapshot:?}").contains(&plaintext));
+    database.close().await;
+}
+
+#[tokio::test]
+async fn snapshot_freezes_customer_status_and_limits_without_changing_key_limits() {
+    let Some(database) = TestDatabase::create("customer_snapshot").await else {
+        return;
+    };
+    sqlx::raw_sql(
+        "insert into customers (id, name, max_concurrency, requests_per_minute)
+         values ('cust_snapshot', 'Customer', 5, 120);
+         insert into client_api_keys (id, name, key, customer_id, max_concurrency, requests_per_minute)
+         values ('key_snapshot', 'first', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'cust_snapshot', 2, 30);"
+    ).execute(&database.pool).await.expect("seed customer and assigned key");
+    let repository = PgRuntimeSnapshotRepository::new(database.pool.clone());
+    let snapshot = repository
+        .load_runtime_snapshot()
+        .await
+        .expect("customer snapshot");
+    let key = &snapshot.client_api_keys[0];
+    assert_eq!(key.limits.max_concurrency, 2);
+    let customer = key.customer.as_ref().expect("frozen customer");
+    assert_eq!(customer.id.as_str(), "cust_snapshot");
+    assert!(customer.enabled);
+    assert_eq!(
+        customer.limits,
+        RateLimits {
+            max_concurrency: 5,
+            requests_per_minute: 120
+        }
+    );
+    sqlx::query(
+        "update customers set enabled = false, max_concurrency = 1 where id = 'cust_snapshot'",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("disable customer");
+    let next = repository
+        .load_runtime_snapshot()
+        .await
+        .expect("updated snapshot");
+    let updated = next.client_api_keys[0]
+        .customer
+        .as_ref()
+        .expect("customer still bound");
+    assert!(!updated.enabled);
+    assert_eq!(updated.limits.max_concurrency, 1);
+    assert!(
+        customer.enabled,
+        "already frozen requests retain their policy"
+    );
     database.close().await;
 }
