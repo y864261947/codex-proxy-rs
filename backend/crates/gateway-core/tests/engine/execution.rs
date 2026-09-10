@@ -21,7 +21,7 @@ use gateway_core::engine::continuation::{
 use gateway_core::engine::execution::{
     ClientApiKeyUsageSink, ClientTransport, DefaultExecutionService, ExecutionRequestMetadata,
     ExecutionService, ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
-    StartExecution, StartProviderExecution, provider_failure_affects_circuit,
+    ProviderCircuitScope, StartExecution, StartProviderExecution, provider_failure_affects_circuit,
 };
 use gateway_core::engine::probe::{AccountProbe, AccountProbeErrorSource, AccountProbeRequest};
 use gateway_core::engine::provider::{
@@ -930,21 +930,21 @@ struct UnusedCircuits;
 impl ProviderCircuitPort for UnusedCircuits {
     fn decision<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
         Box::pin(async { Ok(ProviderCircuitDecision::Allow) })
     }
 
     fn observe_failure<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { Ok(()) })
     }
 
     fn observe_success<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { Ok(()) })
     }
@@ -955,21 +955,21 @@ struct FailingDecisionCircuits;
 impl ProviderCircuitPort for FailingDecisionCircuits {
     fn decision<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
         Box::pin(async { Err(ProviderCircuitError) })
     }
 
     fn observe_failure<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { Ok(()) })
     }
 
     fn observe_success<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { Ok(()) })
     }
@@ -980,21 +980,21 @@ struct PendingDecisionCircuits;
 impl ProviderCircuitPort for PendingDecisionCircuits {
     fn decision<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
         Box::pin(futures::future::pending())
     }
 
     fn observe_failure<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { Ok(()) })
     }
 
     fn observe_success<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { Ok(()) })
     }
@@ -1565,4 +1565,484 @@ impl gateway_core::engine::source_admission::SourceAdmissionPort for AllowedSour
             Ok(Box::new(()) as Box<dyn gateway_core::engine::provider::ResourceLease>)
         })
     }
+}
+
+#[derive(Default)]
+struct SourceCircuits {
+    blocked: Mutex<BTreeSet<ProviderCircuitScope>>,
+    decisions: Mutex<Vec<ProviderCircuitScope>>,
+    feedback: Mutex<Vec<(ProviderCircuitScope, bool)>>,
+}
+
+struct FixedSourceContinuation(NativeContinuationPin);
+
+impl NativeContinuationPort for FixedSourceContinuation {
+    fn resolve<'a>(
+        &'a self,
+        _: &'a ClientApiKeyId,
+        _: &'a PreviousResponseId,
+    ) -> BoxFuture<'a, Result<Option<NativeContinuationPin>, NativeContinuationStoreError>> {
+        Box::pin(async { Ok(Some(self.0.clone())) })
+    }
+    fn record<'a>(
+        &'a self,
+        _: NativeContinuationPin,
+    ) -> BoxFuture<'a, Result<(), NativeContinuationStoreError>> {
+        Box::pin(async { Ok(()) })
+    }
+}
+
+impl ProviderCircuitPort for SourceCircuits {
+    fn decision<'a>(
+        &'a self,
+        scope: &'a ProviderCircuitScope,
+    ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
+        Box::pin(async move {
+            self.decisions
+                .lock()
+                .expect("decisions")
+                .push(scope.clone());
+            Ok(if self.blocked.lock().expect("blocked").contains(scope) {
+                ProviderCircuitDecision::BlockedUntil(SystemTime::now() + Duration::from_secs(30))
+            } else {
+                ProviderCircuitDecision::Allow
+            })
+        })
+    }
+    fn observe_failure<'a>(
+        &'a self,
+        scope: &'a ProviderCircuitScope,
+    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
+        Box::pin(async move {
+            self.feedback
+                .lock()
+                .expect("feedback")
+                .push((scope.clone(), false));
+            self.blocked.lock().expect("blocked").insert(scope.clone());
+            Ok(())
+        })
+    }
+    fn observe_success<'a>(
+        &'a self,
+        scope: &'a ProviderCircuitScope,
+    ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
+        Box::pin(async move {
+            self.feedback
+                .lock()
+                .expect("feedback")
+                .push((scope.clone(), true));
+            self.blocked.lock().expect("blocked").remove(scope);
+            Ok(())
+        })
+    }
+}
+
+fn health_channel(id: &str) -> gateway_core::routing::source::SourceId {
+    gateway_core::routing::source::SourceId::Channel(
+        gateway_core::identity::ChannelId::new(id).expect("channel"),
+    )
+}
+
+fn health_snapshot(authorized: &[&str]) -> RuntimeSnapshot {
+    use gateway_core::{
+        channel::{ChannelBinding, ChannelRevision},
+        identity::{ChannelId, QuotaScopeId},
+        policy::{AccessGroupId, AccessGroupPolicy},
+        routing::source::{QuotaScopePolicy, SourcePolicy, SourcePreference},
+    };
+    let provider = ProviderKind::new("openai").expect("provider");
+    let quota = QuotaScopeId::new("quota_health").expect("quota");
+    RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        AccountSelectionPolicy::new(
+            RotationStrategy::Smart,
+            std::num::NonZeroU32::new(1).expect("concurrency"),
+            Duration::from_millis(1),
+        ),
+        vec![provider.clone()],
+        ["chan_a", "chan_b", "chan_hidden"]
+            .into_iter()
+            .map(|id| {
+                ProviderModel::new(
+                    provider.clone(),
+                    UpstreamModelId::new("gpt-start").expect("model"),
+                    ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000)),
+                )
+                .with_channel(ChannelBinding::new(
+                    ChannelId::new(id).expect("id"),
+                    ChannelRevision::new(1).expect("revision"),
+                ))
+            })
+            .collect(),
+        vec![
+            ClientPolicy::new(
+                ClientApiKeyId::new("key_health").expect("key"),
+                PlaintextClientApiKey::new("sk_health").expect("secret"),
+                Arc::new(FrozenAccountScope::new(
+                    Arc::new(RuntimeAccountDirectory::default()),
+                    ClientRoutingScope::no_accounts(),
+                )),
+                true,
+                RateLimits::unlimited(),
+            )
+            .with_access_group(Some(AccessGroupPolicy {
+                id: AccessGroupId::new("access_health").expect("group"),
+                name: "Health tests".to_owned(),
+                enabled: true,
+                allowed_models: BTreeSet::from(["gpt-start".to_owned()]),
+                pool_group_ids: BTreeSet::new(),
+                channel_ids: authorized
+                    .iter()
+                    .map(|id| ChannelId::new(*id).expect("channel"))
+                    .collect(),
+                limits: RateLimits::unlimited(),
+            })),
+        ],
+    )
+    .expect("snapshot")
+    .with_source_policies(
+        ["chan_a", "chan_b", "chan_hidden"]
+            .into_iter()
+            .map(|id| {
+                SourcePolicy::new(
+                    health_channel(id),
+                    true,
+                    SourcePreference::default(),
+                    RateLimits::unlimited(),
+                    Some(quota.clone()),
+                )
+                .expect("policy")
+            })
+            .collect(),
+    )
+    .expect("policies")
+    .with_quota_policies(vec![
+        QuotaScopePolicy::new(
+            quota,
+            true,
+            RateLimits {
+                max_concurrency: 4,
+                requests_per_minute: 100,
+            },
+        )
+        .expect("quota"),
+    ])
+    .expect("quota snapshot")
+}
+
+#[derive(Default)]
+struct HealthProvider {
+    failure: Option<ProviderErrorKind>,
+    fail_during_stream: bool,
+    calls: Mutex<Vec<gateway_core::routing::source::SourceId>>,
+}
+
+#[async_trait]
+impl Provider for HealthProvider {
+    fn name(&self) -> &'static str {
+        "openai"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::default()
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(Vec::new())
+    }
+    async fn execute(
+        &self,
+        request: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        use gateway_core::{
+            event::{GatewayEvent, ProviderEvent, ResponseMeta},
+            routing::source::SourceId,
+        };
+        let candidate = request.candidate();
+        let source = candidate.source().expect("source").clone();
+        self.calls.lock().expect("calls").push(source.clone());
+        let failure = (source == health_channel("chan_a"))
+            .then_some(self.failure)
+            .flatten();
+        if let Some(kind) = failure
+            && !self.fail_during_stream
+        {
+            return Err(ProviderError::new(kind, UpstreamSendState::NotSent));
+        }
+        let metadata = match source {
+            SourceId::Channel(_) => ProviderCallMetadata::for_channel(
+                candidate.provider().clone(),
+                candidate.upstream_model().cloned(),
+                candidate.channel_binding().expect("channel").clone(),
+                UpstreamTransport::new("http_sse").expect("transport"),
+            ),
+            SourceId::AccountPool(_) => ProviderCallMetadata::new(
+                candidate.provider().clone(),
+                candidate.upstream_model().expect("model").clone(),
+                ProviderAccountId::new("acct_start").expect("account"),
+                UpstreamTransport::new("http_sse").expect("transport"),
+            ),
+        };
+        let events = match failure {
+            Some(kind) => vec![Err(ProviderError::new(kind, UpstreamSendState::Sent))],
+            None => vec![
+                Ok(ProviderEvent::canonical(GatewayEvent::Started(
+                    ResponseMeta::new("resp_health", "gpt-start"),
+                ))),
+                Ok(ProviderEvent::canonical(GatewayEvent::Completed(
+                    ResponseMeta::new("resp_health", "gpt-start"),
+                ))),
+            ],
+        };
+        Ok(ProviderStream::new(
+            metadata,
+            futures::stream::iter(events),
+            (),
+        ))
+    }
+}
+
+fn health_service(
+    snapshots: RuntimeSnapshotHandle,
+    provider: Arc<HealthProvider>,
+    circuits: Arc<dyn ProviderCircuitPort>,
+) -> DefaultExecutionService {
+    DefaultExecutionService::new(
+        snapshots,
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::new([provider as Arc<dyn Provider>]).expect("registry"),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
+        circuits,
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    )
+}
+
+fn health_request(service: &DefaultExecutionService, key: &str) -> StartExecution {
+    StartExecution {
+        client: service.authenticate(key).expect("authenticate"),
+        public_model: PublicModelId::new("gpt-start").expect("model"),
+        operation: start_operation(),
+        metadata: ExecutionRequestMetadata {
+            protocol: "openai".to_owned(),
+            endpoint: "/v1/responses".to_owned(),
+            transport: ClientTransport::HttpJson,
+            stream: false,
+            client_ip: None,
+            user_agent: None,
+            previous_response_id: None,
+        },
+    }
+}
+
+#[test]
+fn source_health_blocks_only_the_failed_channel_even_when_quota_and_adapter_are_shared() {
+    for fail_during_stream in [false, true] {
+        let snapshots = RuntimeSnapshotHandle::new(health_snapshot(&["chan_a"]));
+        let circuits = Arc::new(SourceCircuits::default());
+        let provider = Arc::new(HealthProvider {
+            failure: Some(ProviderErrorKind::Transport),
+            fail_during_stream,
+            ..Default::default()
+        });
+        let service = health_service(snapshots.clone(), provider.clone(), circuits.clone());
+        let mut started =
+            block_on(service.start(health_request(&service, "sk_health"))).expect("start A");
+        block_on(started.session.collect_uncommitted()).expect_err("A transport failed");
+        let a = ProviderCircuitScope::Source(health_channel("chan_a"));
+        assert_eq!(
+            *circuits.feedback.lock().expect("feedback"),
+            [(a.clone(), false)]
+        );
+        snapshots.publish(health_snapshot(&["chan_a", "chan_b"]));
+        circuits.decisions.lock().expect("decisions").clear();
+        let mut started =
+            block_on(service.start(health_request(&service, "sk_health"))).expect("start B");
+        block_on(started.session.collect_uncommitted()).expect("B healthy");
+        assert_eq!(
+            *provider.calls.lock().expect("calls"),
+            [health_channel("chan_a"), health_channel("chan_b")]
+        );
+        let b = ProviderCircuitScope::Source(health_channel("chan_b"));
+        assert_eq!(
+            circuits
+                .decisions
+                .lock()
+                .expect("decisions")
+                .iter()
+                .cloned()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([a.clone(), b.clone()])
+        );
+        assert_eq!(
+            *circuits.feedback.lock().expect("feedback"),
+            [(a.clone(), false), (b, true)]
+        );
+        assert_eq!(
+            *circuits.blocked.lock().expect("blocked"),
+            BTreeSet::from([a])
+        );
+    }
+}
+
+#[test]
+fn all_authorized_sources_blocked_should_not_use_an_unauthorized_channel_or_clear_health() {
+    let circuits = Arc::new(SourceCircuits::default());
+    for id in ["chan_a", "chan_b"] {
+        circuits
+            .blocked
+            .lock()
+            .expect("blocked")
+            .insert(ProviderCircuitScope::Source(health_channel(id)));
+    }
+    let provider = Arc::new(HealthProvider::default());
+    let service = health_service(
+        RuntimeSnapshotHandle::new(health_snapshot(&["chan_a", "chan_b"])),
+        provider.clone(),
+        circuits.clone(),
+    );
+    assert!(block_on(service.start(health_request(&service, "sk_health"))).is_err());
+    assert!(provider.calls.lock().expect("calls").is_empty());
+    assert!(circuits.feedback.lock().expect("feedback").is_empty());
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
+    block_on(circuits.observe_success(&ProviderCircuitScope::Source(health_channel("chan_b"))))
+        .expect("recovered B");
+    let mut started =
+        block_on(service.start(health_request(&service, "sk_health"))).expect("B reopened");
+    block_on(started.session.collect_uncommitted()).expect("B completes");
+    assert_eq!(
+        *provider.calls.lock().expect("calls"),
+        [health_channel("chan_b")]
+    );
+}
+
+#[test]
+fn source_capacity_local_coordination_and_client_failures_should_not_change_upstream_health() {
+    for kind in [
+        ProviderErrorKind::SourceCapacityUnavailable,
+        ProviderErrorKind::AccountCapacityUnavailable,
+        ProviderErrorKind::ProviderInfrastructureUnavailable,
+        ProviderErrorKind::Cancelled,
+        ProviderErrorKind::RateLimited,
+        ProviderErrorKind::InvalidRequest,
+    ] {
+        let circuits = Arc::new(SourceCircuits::default());
+        let service = health_service(
+            RuntimeSnapshotHandle::new(health_snapshot(&["chan_a"])),
+            Arc::new(HealthProvider {
+                failure: Some(kind),
+                ..Default::default()
+            }),
+            circuits.clone(),
+        );
+        let mut started =
+            block_on(service.start(health_request(&service, "sk_health"))).expect("start");
+        block_on(started.session.collect_uncommitted()).expect_err("failed");
+        assert!(
+            circuits.feedback.lock().expect("feedback").is_empty(),
+            "{kind:?}"
+        );
+    }
+}
+
+#[test]
+fn source_circuit_read_errors_and_timeouts_should_fail_open_with_one_total_budget() {
+    for circuits in [
+        Arc::new(FailingDecisionCircuits) as Arc<dyn ProviderCircuitPort>,
+        Arc::new(PendingDecisionCircuits),
+    ] {
+        let provider = Arc::new(HealthProvider::default());
+        let service = health_service(
+            RuntimeSnapshotHandle::new(health_snapshot(&["chan_a", "chan_b"])),
+            provider.clone(),
+            circuits,
+        );
+        let start = Instant::now();
+        let mut started =
+            block_on(service.start(health_request(&service, "sk_health"))).expect("fail open");
+        assert!(start.elapsed() < Duration::from_secs(1));
+        block_on(started.session.collect_uncommitted()).expect("healthy source remains available");
+        assert_eq!(provider.calls.lock().expect("calls").len(), 1);
+    }
+}
+
+#[test]
+fn pool_health_is_independent_from_other_pools_and_legacy_provider_health() {
+    use gateway_core::{
+        policy::{AccessGroupId, AccessGroupPolicy},
+        routing::{AccountGroupId, source::SourceId},
+    };
+    let pools: Vec<_> = (1..=2)
+        .map(|index| AccountGroupId::new(format!("grp_{index:032x}")).expect("pool"))
+        .collect();
+    let snapshots =
+        RuntimeSnapshotHandle::new(start_snapshot_with_access_group(Some(AccessGroupPolicy {
+            id: AccessGroupId::new("access_health_pool").expect("group"),
+            name: "Pools".to_owned(),
+            enabled: true,
+            allowed_models: BTreeSet::from(["gpt-start".to_owned()]),
+            pool_group_ids: pools.iter().cloned().collect(),
+            channel_ids: BTreeSet::new(),
+            limits: RateLimits::unlimited(),
+        })));
+    let circuits = Arc::new(SourceCircuits::default());
+    let legacy = ProviderCircuitScope::Provider(ProviderKind::new("openai").expect("provider"));
+    let pool_a = ProviderCircuitScope::Source(SourceId::AccountPool(pools[0].clone()));
+    circuits
+        .blocked
+        .lock()
+        .expect("blocked")
+        .extend([legacy.clone(), pool_a]);
+    let provider = Arc::new(HealthProvider::default());
+    let service = health_service(snapshots.clone(), provider.clone(), circuits.clone());
+    let mut started = block_on(service.start(health_request(&service, "sk_start_test")))
+        .expect("pool B available");
+    block_on(started.session.collect_uncommitted()).expect("pool B completes");
+    assert_eq!(
+        *provider.calls.lock().expect("calls"),
+        [SourceId::AccountPool(pools[1].clone())]
+    );
+    assert!(
+        !circuits
+            .decisions
+            .lock()
+            .expect("decisions")
+            .contains(&legacy)
+    );
+    let pin = NativeContinuationPin::new(
+        PreviousResponseId::new("resp_previous"),
+        PreviousResponseId::new("resp_upstream"),
+        ClientApiKeyId::new("key_start_test").expect("key"),
+        ProviderKind::new("openai").expect("provider"),
+        ProviderAccountId::new("acct_start").expect("account"),
+    )
+    .with_source(SourceId::AccountPool(pools[0].clone()));
+    let pinned_service = DefaultExecutionService::new(
+        snapshots.clone(),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).expect("registry"),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
+        circuits.clone(),
+        Arc::new(FixedSourceContinuation(pin)),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let mut request = health_request(&pinned_service, "sk_start_test");
+    request.metadata.previous_response_id = Some(PreviousResponseId::new("resp_previous"));
+    assert!(
+        block_on(pinned_service.start(request)).is_err(),
+        "native continuation may not escape a blocked pool"
+    );
+    assert_eq!(provider.calls.lock().expect("calls").len(), 1);
+    snapshots.publish(start_snapshot());
+    circuits.decisions.lock().expect("decisions").clear();
+    assert!(block_on(service.start(health_request(&service, "sk_start_test"))).is_err());
+    assert_eq!(*circuits.decisions.lock().expect("decisions"), [legacy]);
+    assert_eq!(provider.calls.lock().expect("calls").len(), 1);
 }

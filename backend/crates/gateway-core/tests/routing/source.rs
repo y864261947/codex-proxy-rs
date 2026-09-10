@@ -733,6 +733,30 @@ fn shared_quota_is_required_enabled_and_frozen_for_each_channel_candidate() {
         assert_eq!(candidate.shared_quota(), Some(&quota));
         assert_eq!(candidate.source_controls().limits().max_concurrency, 7);
     }
+    let healthy = enabled
+        .plan_channels(
+            &model,
+            &super::operation(),
+            enabled.all_account_scope(),
+            &RoutingContext {
+                blocked_sources: std::collections::BTreeSet::from([SourceId::Channel(
+                    ChannelId::new("chan_a").expect("channel"),
+                )]),
+                ..RoutingContext::default()
+            },
+            &allowed,
+        )
+        .expect("B keeps its independent health despite sharing quota");
+    assert_eq!(healthy.candidates().len(), 1);
+    assert_eq!(
+        healthy.candidates()[0].source(),
+        Some(&SourceId::Channel(ChannelId::new("chan_b").expect("B")))
+    );
+    assert_eq!(
+        frozen.candidates().len(),
+        2,
+        "a health observation cannot mutate an active plan"
+    );
     let changed = enabled
         .clone()
         .with_quota_policies(vec![

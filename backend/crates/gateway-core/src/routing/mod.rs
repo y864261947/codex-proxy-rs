@@ -493,6 +493,7 @@ pub struct RoutingContext {
     /// 管理端 connection test 显式限制的 Provider；普通请求留空。
     pub required_provider: Option<ProviderKind>,
     pub blocked_providers: BTreeSet<ProviderKind>,
+    pub blocked_sources: BTreeSet<source::SourceId>,
 }
 
 /// 统一来源计划仍保留模型端点与 Provider 自有端点的能力边界。

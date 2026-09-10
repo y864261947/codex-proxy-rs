@@ -770,6 +770,7 @@ impl RuntimeSnapshot {
         let order = super::source::selection_order(
             allowed
                 .iter()
+                .filter(|source| !context.blocked_sources.contains(*source))
                 .filter_map(|source| {
                     self.source_policy(source)
                         .filter(|policy| self.source_is_available(policy))
@@ -944,6 +945,9 @@ impl RuntimeSnapshot {
         let mapped = self.mapped_model(public_model.as_str());
         let mut candidates = Vec::new();
         for source in allowed.iter() {
+            if context.blocked_sources.contains(source) {
+                continue;
+            }
             let super::source::SourceId::Channel(channel) = source else {
                 continue;
             };

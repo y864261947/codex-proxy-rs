@@ -9,7 +9,7 @@ use gateway_core::engine::admission::{
     ClientAdmissionRequest, ClientAdmissionRestoreResult,
 };
 use gateway_core::engine::execution::{
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
+    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort, ProviderCircuitScope,
 };
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::policy::{AdmissionScopeId, ClientApiKeyId};
@@ -19,6 +19,7 @@ use gateway_store::redis::{BufferedClientAdmissionPort, BufferedProviderCircuitP
 #[derive(Default)]
 struct RecordingCoordination {
     operations: Mutex<Vec<&'static str>>,
+    circuit_scopes: Mutex<Vec<(ProviderCircuitScope, bool)>>,
 }
 
 impl RecordingCoordination {
@@ -67,16 +68,20 @@ impl ClientAdmissionPort for RecordingCoordination {
 impl ProviderCircuitPort for RecordingCoordination {
     fn decision<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
         Box::pin(async { Ok(ProviderCircuitDecision::Allow) })
     }
 
     fn observe_failure<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async move {
+            self.circuit_scopes
+                .lock()
+                .expect("scopes")
+                .push((scope.clone(), false));
             self.record("circuit_failure");
             Ok(())
         })
@@ -84,9 +89,13 @@ impl ProviderCircuitPort for RecordingCoordination {
 
     fn observe_success<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async move {
+            self.circuit_scopes
+                .lock()
+                .expect("scopes")
+                .push((scope.clone(), true));
             self.record("circuit_success");
             Ok(())
         })
@@ -106,7 +115,7 @@ async fn full_recoverable_coordination_queues_should_drop_writes_without_waiting
     );
     let client = ClientApiKeyId::new("key_buffer_test").expect("client key");
     let request = ModelRequestId::new("req_buffer_test").expect("request ID");
-    let provider = ProviderKind::new("openai").expect("provider");
+    let provider = ProviderCircuitScope::Provider(ProviderKind::new("openai").expect("provider"));
 
     tokio::time::timeout(Duration::from_millis(50), async {
         admissions
@@ -134,6 +143,7 @@ async fn full_recoverable_coordination_queues_should_drop_writes_without_waiting
 
 #[tokio::test]
 async fn redis_coordination_writers_should_flush_each_side_effect() {
+    use gateway_core::{identity::ChannelId, routing::source::SourceId};
     let inner = Arc::new(RecordingCoordination::default());
     let (admissions, admission_writer) = BufferedClientAdmissionPort::with_capacity(
         inner.clone(),
@@ -145,7 +155,7 @@ async fn redis_coordination_writers_should_flush_each_side_effect() {
     );
     let client = ClientApiKeyId::new("key_writer_test").expect("client key");
     let request = ModelRequestId::new("req_writer_test").expect("request ID");
-    let provider = ProviderKind::new("openai").expect("provider");
+    let provider = ProviderCircuitScope::Provider(ProviderKind::new("openai").expect("provider"));
     admissions
         .release(&[AdmissionScopeId::Key(client.clone())], &request)
         .await
@@ -154,6 +164,18 @@ async fn redis_coordination_writers_should_flush_each_side_effect() {
         .observe_success(&provider)
         .await
         .expect("enqueue circuit feedback");
+    let channel_a =
+        ProviderCircuitScope::Source(SourceId::Channel(ChannelId::new("chan_a").expect("A")));
+    let channel_b =
+        ProviderCircuitScope::Source(SourceId::Channel(ChannelId::new("chan_b").expect("B")));
+    circuits
+        .observe_failure(&channel_a)
+        .await
+        .expect("enqueue A failure");
+    circuits
+        .observe_success(&channel_b)
+        .await
+        .expect("enqueue B success");
     let cancellation = CancellationToken::new();
     let tasks = [
         spawn_writer(Arc::new(admission_writer), cancellation.clone()),
@@ -161,7 +183,7 @@ async fn redis_coordination_writers_should_flush_each_side_effect() {
     ];
     tokio::time::timeout(Duration::from_secs(1), async {
         loop {
-            if inner.operations().len() == 2 {
+            if inner.operations().len() == 4 {
                 break;
             }
             tokio::task::yield_now().await;
@@ -178,7 +200,19 @@ async fn redis_coordination_writers_should_flush_each_side_effect() {
 
     let mut operations = inner.operations();
     operations.sort_unstable();
-    assert_eq!(operations, ["admission", "circuit_success"]);
+    assert_eq!(
+        operations,
+        [
+            "admission",
+            "circuit_failure",
+            "circuit_success",
+            "circuit_success"
+        ]
+    );
+    assert_eq!(
+        *inner.circuit_scopes.lock().expect("scopes"),
+        [(provider, true), (channel_a, false), (channel_b, true)]
+    );
 }
 
 fn spawn_writer<T>(

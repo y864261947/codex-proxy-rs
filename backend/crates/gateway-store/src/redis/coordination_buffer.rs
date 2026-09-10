@@ -13,11 +13,10 @@ use gateway_core::engine::admission::{
     ClientAdmissionRequest, ClientAdmissionRestoreResult,
 };
 use gateway_core::engine::execution::{
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
+    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort, ProviderCircuitScope,
 };
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::policy::AdmissionScopeId;
-use gateway_core::routing::ProviderKind;
 use gateway_core::task::{DaemonTask, WorkerTaskError};
 use tokio::sync::{Mutex, mpsc};
 
@@ -192,31 +191,31 @@ impl BufferedProviderCircuitPort {
 impl ProviderCircuitPort for BufferedProviderCircuitPort {
     fn decision<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        self.inner.decision(provider_kind)
+        self.inner.decision(scope)
     }
 
     fn observe_failure<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        self.enqueue(CircuitFeedback::Failure(provider_kind.clone()));
+        self.enqueue(CircuitFeedback::Failure(scope.clone()));
         Box::pin(ready(Ok(())))
     }
 
     fn observe_success<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        self.enqueue(CircuitFeedback::Success(provider_kind.clone()));
+        self.enqueue(CircuitFeedback::Success(scope.clone()));
         Box::pin(ready(Ok(())))
     }
 }
 
 enum CircuitFeedback {
-    Failure(ProviderKind),
-    Success(ProviderKind),
+    Failure(ProviderCircuitScope),
+    Success(ProviderCircuitScope),
 }
 
 pub struct ProviderCircuitFeedbackWriter {

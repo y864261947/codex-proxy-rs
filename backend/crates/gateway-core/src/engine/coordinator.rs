@@ -831,7 +831,11 @@ where
                             | ProviderErrorKind::ProviderInfrastructureUnavailable
                     ) && error.send_state() == UpstreamSendState::NotSent)
                     {
-                        self.record_provider_failure(candidate.provider().clone(), error.kind());
+                        self.record_provider_failure(
+                            candidate.provider().clone(),
+                            candidate.source().cloned(),
+                            error.kind(),
+                        );
                     }
                     self.finish_provider_error(&error).await?;
                     return Err(provider_engine_error(error));
@@ -839,7 +843,6 @@ where
             },
         };
         if !stream.metadata().confirms(&candidate) {
-            self.record_provider_failure(candidate.provider().clone(), ProviderErrorKind::Protocol);
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
                 "provider metadata did not match the frozen candidate",
@@ -1089,7 +1092,11 @@ where
         record_trace_error(&self.trace.attempt(self.attempts), &error);
         let mut atomic_client_events = error.take_atomic_client_events();
         let current = self.current.take().ok_or(EngineError::NoActiveAttempt)?;
-        self.record_provider_failure(current.metadata.provider().clone(), error.kind());
+        self.record_provider_failure(
+            current.metadata.provider().clone(),
+            current.source.as_ref().map(|source| source.id().clone()),
+            error.kind(),
+        );
         // attempt_send_state 是本 attempt 自身的发送事实，驱动重试门；
         // 持久化与终态用请求级水位，二者不可混用（水位会把早先 attempt 的
         // sent 传染给本 attempt，从而错误放行/拦截重试）。
@@ -1691,24 +1698,25 @@ where
     }
 
     fn record_current_provider_success(&mut self) {
-        let provider_kind = self
-            .current
-            .as_ref()
-            .map(|current| current.metadata.provider().clone());
-        if let Some(provider_kind) = provider_kind {
+        if let Some(current) = &self.current {
             self.provider_attempt_outcomes
-                .push(ProviderAttemptOutcome::Succeeded { provider_kind });
+                .push(ProviderAttemptOutcome::Succeeded {
+                    provider_kind: current.metadata.provider().clone(),
+                    source: current.source.as_ref().map(|source| source.id().clone()),
+                });
         }
     }
 
     fn record_provider_failure(
         &mut self,
         provider_kind: crate::identity::ProviderKind,
+        source: Option<crate::routing::source::SourceId>,
         error_kind: ProviderErrorKind,
     ) {
         self.provider_attempt_outcomes
             .push(ProviderAttemptOutcome::Failed {
                 provider_kind,
+                source,
                 error_kind,
             });
     }

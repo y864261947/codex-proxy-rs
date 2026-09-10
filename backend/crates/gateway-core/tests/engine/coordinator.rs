@@ -987,6 +987,7 @@ fn success_updates_one_model_request_and_persists_usage() {
     assert_eq!(
         session.provider_attempt_outcomes(),
         &[ProviderAttemptOutcome::Succeeded {
+            source: None,
             provider_kind: ProviderKind::new("openai").expect("provider"),
         }]
     );
@@ -2223,6 +2224,7 @@ fn required_account_disables_account_retry_after_stream_creation() {
     assert_eq!(
         session.provider_attempt_outcomes(),
         &[ProviderAttemptOutcome::Failed {
+            source: None,
             provider_kind: ProviderKind::new("openai").expect("provider"),
             error_kind: ProviderErrorKind::Unavailable,
         }]
@@ -3547,6 +3549,7 @@ fn structural_event_before_replay_safe_failure_should_switch_account_before_comm
     assert_eq!(
         session.provider_attempt_outcomes(),
         &[ProviderAttemptOutcome::Failed {
+            source: None,
             provider_kind: ProviderKind::new("openai").expect("provider"),
             error_kind: ProviderErrorKind::Transport,
         }]
@@ -3933,4 +3936,39 @@ fn native_pin_cannot_escape_source_capacity_and_infrastructure_failure_sends_not
         assert_eq!(store.state.lock().expect("state").created, 0);
         assert!(session.provider_attempt_outcomes().is_empty());
     }
+}
+
+#[test]
+fn mismatched_source_metadata_is_a_local_contract_error_and_releases_the_source_lease() {
+    let admissions = Arc::new(RecordingSourceAdmissions::default());
+    let operation = generate_operation();
+    let plan = pool_plan(&operation);
+    let (coordinator, _, provider) = coordinator_with_source_admissions(
+        vec![Script::Stream {
+            account_id: "acct_outside_all_pools",
+            items: complete_stream(None),
+        }],
+        admissions.clone(),
+    );
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("session");
+    let error = block_on(session.collect_uncommitted())
+        .expect_err("metadata violates frozen pool membership");
+    assert_eq!(
+        gateway_error_from_engine(&error).kind(),
+        GatewayErrorKind::Internal
+    );
+    assert!(session.provider_attempt_outcomes().is_empty());
+    assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+    assert_eq!(
+        admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
 }

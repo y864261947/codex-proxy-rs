@@ -7,7 +7,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use futures::{FutureExt, future::BoxFuture, pin_mut, select_biased};
+use futures::{FutureExt, StreamExt, future::BoxFuture, pin_mut, select_biased};
 use futures_timer::Delay;
 use uuid::Uuid;
 
@@ -36,6 +36,7 @@ use crate::identity::ProviderKind;
 use crate::lifecycle::CancellationToken;
 use crate::operation::{Operation, ProviderSessionState};
 use crate::policy::{AdmissionScopeId, ClientApiKeyId, ClientPolicy};
+use crate::routing::source::SourceId;
 use crate::routing::{
     PublicModelId, PublicModelProfile, RoutingContext, RuntimeSnapshot, UpstreamModelId,
 };
@@ -232,18 +233,34 @@ impl Default for ProviderCircuitPolicy {
     }
 }
 
+/// 健康反馈按实际来源隔离；无来源的旧账号计划保留 Provider 范围。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProviderCircuitScope {
+    Provider(ProviderKind),
+    Source(SourceId),
+}
+
+impl fmt::Display for ProviderCircuitScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(provider) => write!(formatter, "provider:{provider}"),
+            Self::Source(source) => write!(formatter, "source:{source}"),
+        }
+    }
+}
+
 pub trait ProviderCircuitPort: Send + Sync {
     fn decision<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>>;
     fn observe_failure<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>>;
     fn observe_success<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>>;
 }
 
@@ -407,9 +424,7 @@ impl DefaultExecutionService {
                 GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
             })?;
         let request_id = new_request_id()?;
-        let routing_context = self
-            .route_context(request.client.policy.account_scope().provider_kinds())
-            .await?;
+        let routing_context = self.route_context(&request.client.policy).await;
         let account_scope = Arc::clone(request.client.policy.account_scope());
         let plan = if let Some(group) = request.client.policy.access_group() {
             let allowed = crate::routing::source::AllowedSources::new(
@@ -697,46 +712,64 @@ impl DefaultExecutionService {
         })
     }
 
-    async fn route_context(
-        &self,
-        provider_kinds: &BTreeSet<ProviderKind>,
-    ) -> Result<RoutingContext, GatewayError> {
-        let decisions = futures::future::join_all(provider_kinds.iter().map(|provider_kind| {
-            let circuits = Arc::clone(&self.circuits);
-            async move {
-                let decision = circuits.decision(provider_kind).fuse();
-                let timeout = Delay::new(COORDINATION_TIMEOUT).fuse();
-                pin_mut!(decision, timeout);
-                let decision = select_biased! {
-                    result = decision => Some(result),
-                    _ = timeout => None,
-                };
-                (provider_kind, decision)
-            }
+    async fn route_context(&self, policy: &ClientPolicy) -> RoutingContext {
+        let scopes: Vec<_> = if let Some(group) = policy.access_group() {
+            group
+                .pool_group_ids
+                .iter()
+                .cloned()
+                .map(SourceId::AccountPool)
+                .chain(group.channel_ids.iter().cloned().map(SourceId::Channel))
+                .map(ProviderCircuitScope::Source)
+                .collect()
+        } else {
+            policy
+                .account_scope()
+                .provider_kinds()
+                .iter()
+                .cloned()
+                .map(ProviderCircuitScope::Provider)
+                .collect()
+        };
+        let mut remaining = scopes.len();
+        let mut decisions = futures::stream::iter(scopes.into_iter().map(|scope| async move {
+            let decision = self.circuits.decision(&scope).await;
+            (scope, decision)
         }))
-        .await;
-        let mut blocked_providers = BTreeSet::new();
-        for (provider_kind, decision) in decisions {
-            match decision {
-                Some(Ok(ProviderCircuitDecision::BlockedUntil(_))) => {
-                    blocked_providers.insert(provider_kind.clone());
+        .buffer_unordered(16);
+        // 所有健康读取共享一个等待预算，来源增多不会累积逐项超时。
+        let timeout = Delay::new(COORDINATION_TIMEOUT).fuse();
+        pin_mut!(timeout);
+        let mut context = RoutingContext::default();
+        while remaining > 0 {
+            let next = decisions.next().fuse();
+            pin_mut!(next);
+            let result = select_biased! {
+                result = next => result,
+                _ = timeout => {
+                    tracing::warn!(remaining, "来源 circuit 读取超时，未完成的可重建状态 fail-open");
+                    break;
                 }
-                Some(Err(error)) => tracing::warn!(
-                    provider = provider_kind.as_str(),
-                    %error,
-                    "Provider circuit 读取失败，按可重建协调状态 fail-open"
-                ),
-                None => tracing::warn!(
-                    provider = provider_kind.as_str(),
-                    "Provider circuit 读取超时，按可重建协调状态 fail-open"
-                ),
-                Some(Ok(ProviderCircuitDecision::Allow)) => {}
+            };
+            let Some((scope, decision)) = result else {
+                break;
+            };
+            remaining -= 1;
+            match decision {
+                Ok(ProviderCircuitDecision::BlockedUntil(_)) => match scope {
+                    ProviderCircuitScope::Provider(provider) => {
+                        context.blocked_providers.insert(provider);
+                    }
+                    ProviderCircuitScope::Source(source) => {
+                        context.blocked_sources.insert(source);
+                    }
+                },
+                Err(error) => tracing::warn!(%scope, %error,
+                    "来源 circuit 读取失败，按可重建协调状态 fail-open"),
+                Ok(ProviderCircuitDecision::Allow) => {}
             }
         }
-        Ok(RoutingContext {
-            required_provider: None,
-            blocked_providers,
-        })
+        context
     }
 
     async fn probe_inner(
@@ -1327,16 +1360,20 @@ async fn publish_provider_attempt_outcomes(
     outcomes: &[ProviderAttemptOutcome],
 ) {
     for outcome in outcomes {
+        let scope = match outcome.source() {
+            Some(source) => ProviderCircuitScope::Source(source.clone()),
+            None => ProviderCircuitScope::Provider(outcome.provider_kind().clone()),
+        };
         let result = match outcome.error_kind() {
-            None => circuits.observe_success(outcome.provider_kind()).await,
+            None => circuits.observe_success(&scope).await,
             Some(kind) if provider_failure_affects_circuit(kind) => {
-                circuits.observe_failure(outcome.provider_kind()).await
+                circuits.observe_failure(&scope).await
             }
             Some(_) => continue,
         };
         if let Err(error) = result {
             tracing::warn!(
-                provider = outcome.provider_kind().as_str(),
+                %scope,
                 %error,
                 "Provider circuit feedback 写入失败，数据面不受影响"
             );

@@ -119,10 +119,14 @@ impl AttemptTrigger {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderAttemptOutcome {
     /// 上游流自然完成且通过 canonical event 序列校验。
-    Succeeded { provider_kind: ProviderKind },
+    Succeeded {
+        provider_kind: ProviderKind,
+        source: Option<crate::routing::source::SourceId>,
+    },
     /// 上游打开或流式阶段返回了稳定 Provider 错误。
     Failed {
         provider_kind: ProviderKind,
+        source: Option<crate::routing::source::SourceId>,
         error_kind: ProviderErrorKind,
     },
 }
@@ -132,7 +136,17 @@ impl ProviderAttemptOutcome {
     #[must_use]
     pub const fn provider_kind(&self) -> &ProviderKind {
         match self {
-            Self::Succeeded { provider_kind } | Self::Failed { provider_kind, .. } => provider_kind,
+            Self::Succeeded { provider_kind, .. } | Self::Failed { provider_kind, .. } => {
+                provider_kind
+            }
+        }
+    }
+
+    /// 采用本次尝试冻结的来源，改名、改组与共享配额不改变健康归属。
+    #[must_use]
+    pub const fn source(&self) -> Option<&crate::routing::source::SourceId> {
+        match self {
+            Self::Succeeded { source, .. } | Self::Failed { source, .. } => source.as_ref(),
         }
     }
 

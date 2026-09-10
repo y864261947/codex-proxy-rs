@@ -34,9 +34,79 @@ fn provider_circuit_should_only_count_instance_attributable_failures() {
         ProviderErrorKind::QuotaExhausted,
         ProviderErrorKind::Cancelled,
         ProviderErrorKind::ProcessTerminated,
+        ProviderErrorKind::SourceCapacityUnavailable,
+        ProviderErrorKind::AccountCapacityUnavailable,
+        ProviderErrorKind::ProviderInfrastructureUnavailable,
     ] {
         assert!(!provider_failure_affects_circuit(error_kind));
     }
+}
+
+#[tokio::test]
+async fn source_circuits_keep_channels_pools_and_legacy_providers_independent() {
+    use gateway_core::{
+        engine::execution::{
+            ProviderCircuitDecision as Decision, ProviderCircuitPort, ProviderCircuitScope,
+        },
+        identity::{ChannelId, ProviderKind},
+        routing::{AccountGroupId, source::SourceId},
+    };
+    let Some((repository, mut connection, namespace)) = repository(2).await else {
+        return;
+    };
+    let provider = ProviderKind::new("openai").expect("provider");
+    assert!(
+        ProviderKind::new("__source:channel:chan_a").is_err(),
+        "reserved scope cannot alias a provider"
+    );
+    let legacy = ProviderCircuitScope::Provider(provider);
+    let a = ProviderCircuitScope::Source(SourceId::Channel(ChannelId::new("chan_a").expect("A")));
+    let b = ProviderCircuitScope::Source(SourceId::Channel(ChannelId::new("chan_b").expect("B")));
+    let pool = ProviderCircuitScope::Source(SourceId::AccountPool(
+        AccountGroupId::new("grp_00000000000000000000000000000001").expect("pool"),
+    ));
+    for scope in [&legacy, &a, &pool] {
+        repository
+            .observe_failure(scope)
+            .await
+            .expect("first failure");
+        assert_eq!(
+            repository.decision(scope).await.expect("below threshold"),
+            Decision::Allow
+        );
+        repository
+            .observe_failure(scope)
+            .await
+            .expect("second failure");
+        assert!(matches!(
+            repository.decision(scope).await.expect("blocked"),
+            Decision::BlockedUntil(_)
+        ));
+        assert_eq!(
+            repository.decision(&b).await.expect("unrelated B"),
+            Decision::Allow
+        );
+    }
+    assert!(matches!(
+        repository
+            .provider_circuit_decision("openai")
+            .await
+            .expect("legacy key preserved"),
+        ProviderCircuitDecision::BlockedUntil(_)
+    ));
+    repository.observe_success(&b).await.expect("B success");
+    repository.observe_success(&a).await.expect("A recovered");
+    assert_eq!(
+        repository.decision(&a).await.expect("A ready"),
+        Decision::Allow
+    );
+    for scope in [&legacy, &pool] {
+        assert!(matches!(
+            repository.decision(scope).await.expect("still blocked"),
+            Decision::BlockedUntil(_)
+        ));
+    }
+    delete_namespace_keys(&mut connection, &namespace).await;
 }
 
 #[tokio::test]

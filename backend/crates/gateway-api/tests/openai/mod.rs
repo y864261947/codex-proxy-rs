@@ -24,7 +24,7 @@ use gateway_core::engine::continuation::{
 };
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientApiKeyUsageSink, DefaultExecutionService, ExecutionService,
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
+    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort, ProviderCircuitScope,
 };
 use gateway_core::engine::provider::ProviderRegistry;
 use gateway_core::engine::{
@@ -322,21 +322,21 @@ struct UnusedCircuits;
 impl ProviderCircuitPort for UnusedCircuits {
     fn decision<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
     }
 
     fn observe_failure<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
     }
 
     fn observe_success<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
     }
