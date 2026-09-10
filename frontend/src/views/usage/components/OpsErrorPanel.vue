@@ -13,6 +13,7 @@ import { useOpsErrorsTable } from '../composables/useOpsErrorsTable'
 import { opsErrorColumns } from '../constants'
 import { opsErrorSummary } from '../utils/opsErrorPresentation'
 import { usageUserAgent } from '../utils/records'
+import { upstreamSourceText } from '../utils/source'
 import OpsErrorDetailModal from './OpsErrorDetailModal.vue'
 import UsageClientIpCell from './UsageClientIpCell.vue'
 
@@ -46,6 +47,8 @@ function showDetail(record: OpsError) {
 }
 
 function accountText(record: OpsError) {
+  if (record.upstreamSource?.kind === 'channel')
+    return upstreamSourceText(record.upstreamSource)
   return record.accountEmail
     || record.accountName
     || record.metadata.accountLabel
@@ -157,6 +160,9 @@ function upstreamSendStateText(value: string | null | undefined) {
             :title="accountText(row)"
           >
             {{ accountText(row) }}
+          </span>
+          <span v-if="row.upstreamSource?.kind === 'pool'" class="mt-1 block truncate text-cp-xs text-cp-text-secondary" :title="upstreamSourceText(row.upstreamSource)">
+            {{ upstreamSourceText(row.upstreamSource) }}
           </span>
         </template>
         <template #model="{ row }">

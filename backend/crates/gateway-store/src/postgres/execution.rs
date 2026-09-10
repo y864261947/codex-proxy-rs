@@ -184,6 +184,7 @@ impl ContinuationRequestObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelRequestAttemptStart {
+    pub source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub model_request_id: String,
     pub attempt_count: u32,
     pub provider_kind: String,
@@ -199,6 +200,19 @@ pub struct ModelRequestAttemptStart {
 
 impl ModelRequestAttemptStart {
     pub fn validate(&self) -> StoreResult<()> {
+        let channel = self.source.as_ref().is_some_and(|source| {
+            matches!(
+                source.id(),
+                gateway_core::routing::source::SourceId::Channel(_)
+            )
+        });
+        if channel && (self.provider_account_id.is_some() || self.provider_account_ref.is_some())
+            || !channel && self.provider_account_ref.is_none()
+        {
+            return Err(invalid(
+                "attempt must identify an account or a channel, never both",
+            ));
+        }
         for (field, value) in [
             ("model_request_id", self.model_request_id.as_str()),
             ("provider_kind", self.provider_kind.as_str()),
@@ -525,14 +539,15 @@ impl ModelRequestRepository for PgExecutionStore {
                attempt_count, upstream_send_state, account_selection_wait_ms,
                capacity_used_slots, capacity_total_slots
                , continuation_affinity_hash, continuation_previous_response_id_hash,
-               continuation_requested, customer_ref, access_group_ref
+               continuation_requested, customer_ref, access_group_ref,
+               source_kind, source_ref, source_name_snapshot
              ) select
                $1, $2, $3, $4, $5, $6, $7, $8,
                $9, $10, $11, $12, $13::inet, $14, $15,
                $16, $17, $18, $19, $20, $21, $22, $23,
                $24, $25, $26,
                account.name, account.email, account.authentication_kind,
-               $27, $28, $29, 1, 'not_sent', $30, $31, $32, $33, $34, $35, $36, $37
+               $27, $28, $29, 1, 'not_sent', $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40
              from (values (true)) as seed(present)
              left join provider_accounts account on account.id = $25",
         )
@@ -585,6 +600,14 @@ impl ModelRequestRepository for PgExecutionStore {
         .bind(request.continuation.requested)
         .bind(request.customer_ref)
         .bind(request.access_group_ref)
+        .bind(attempt.source.as_ref().map(|source| source.id().kind()))
+        .bind(
+            attempt
+                .source
+                .as_ref()
+                .map(|source| source.id().reference()),
+        )
+        .bind(attempt.source.as_ref().and_then(|source| source.name()))
         .execute(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("insert model request with first attempt"))?;
@@ -618,8 +641,9 @@ impl ModelRequestRepository for PgExecutionStore {
                    when $9::bigint is null then account_selection_wait_ms
                    else coalesce(account_selection_wait_ms, 0) + $9
                  end,
-                 capacity_used_slots = coalesce($10, capacity_used_slots),
-                 capacity_total_slots = coalesce($11, capacity_total_slots)
+                 capacity_used_slots = case when $12 = 'channel' then null else coalesce($10, capacity_used_slots) end,
+                 capacity_total_slots = case when $12 = 'channel' then null else coalesce($11, capacity_total_slots) end,
+                 source_kind = $12, source_ref = $13, source_name_snapshot = $14
              where id = $1 and outcome = 'running' and downstream_committed_at is null
                and $8 = attempt_count + 1
              returning attempt_count",
@@ -647,6 +671,9 @@ impl ModelRequestRepository for PgExecutionStore {
             attempt.capacity_total_slots,
             "capacity_total_slots",
         )?)
+        .bind(attempt.source.as_ref().map(|source| source.id().kind()))
+        .bind(attempt.source.as_ref().map(|source| source.id().reference()))
+        .bind(attempt.source.as_ref().and_then(|source| source.name()))
         .fetch_optional(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("begin model request attempt"))?
@@ -1070,6 +1097,7 @@ impl ExecutionStore for PgExecutionStore {
         super::OpsEventRepository::append_ops_event(
             &super::PgOpsEventRepository::new(self.pool.clone()),
             super::OpsEvent {
+                source: failure.source,
                 id: Uuid::now_v7().to_string(),
                 model_request_id: Some(failure.request_id.as_str().to_owned()),
                 attempt_index: Some(failure.attempt_index.get()),
@@ -1123,6 +1151,7 @@ impl ExecutionStore for PgExecutionStore {
         super::OpsEventRepository::append_ops_event(
             &super::PgOpsEventRepository::new(self.pool.clone()),
             super::OpsEvent {
+                source: None,
                 id: Uuid::now_v7().to_string(),
                 model_request_id: None,
                 attempt_index: None,
@@ -1418,7 +1447,10 @@ fn validate_routing_snapshot(scope: &str, refs: &[String], names: &Value) -> Sto
         return Err(invalid("routing group names snapshot must be an array"));
     };
     let valid = match scope {
-        value if value == AccountRoutingScopeKind::All.as_str() => {
+        value
+            if value == AccountRoutingScopeKind::All.as_str()
+                || value == AccountRoutingScopeKind::None.as_str() =>
+        {
             refs.is_empty() && names.is_empty()
         }
         value if value == AccountRoutingScopeKind::Groups.as_str() => {
@@ -1440,6 +1472,7 @@ fn validate_routing_snapshot(scope: &str, refs: &[String], names: &Value) -> Sto
 
 fn attempt_start_row(attempt: CoreAttemptRecord) -> ModelRequestAttemptStart {
     ModelRequestAttemptStart {
+        source: attempt.source,
         model_request_id: attempt.request_id.as_str().to_owned(),
         attempt_count: attempt.attempt_count.get(),
         provider_kind: attempt.provider_kind.as_str().to_owned(),

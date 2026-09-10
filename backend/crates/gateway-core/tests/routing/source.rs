@@ -5,6 +5,249 @@ use gateway_core::{
     routing::source::{AllowedSources, SourceId, SourcePolicy, SourcePreference},
 };
 
+fn channel_policy(id: &str, enabled: bool) -> SourcePolicy {
+    SourcePolicy::new(
+        SourceId::Channel(ChannelId::new(id).expect("channel")),
+        enabled,
+        SourcePreference::default(),
+        RateLimits::unlimited(),
+        None,
+    )
+    .expect("policy")
+}
+
+fn channel_access(ids: &[&str]) -> AllowedSources {
+    AllowedSources::new(
+        ids.iter()
+            .map(|id| SourceId::Channel(ChannelId::new(*id).expect("channel"))),
+    )
+}
+
+#[test]
+fn source_name_snapshot_and_explicit_no_account_history_survive_later_configuration_changes() {
+    use gateway_core::account::scope::{
+        AccountRoutingScopeKind, ClientRoutingScope, FrozenAccountScope,
+    };
+    let first = channel_policy("chan_first", true)
+        .with_name("Original channel".to_owned())
+        .expect("name");
+    let frozen = first.snapshot();
+    let renamed = first.with_name("Renamed".to_owned()).expect("rename");
+    assert_eq!(frozen.name(), Some("Original channel"));
+    assert_eq!(renamed.snapshot().name(), Some("Renamed"));
+    assert!(renamed.with_name("bad\nname".to_owned()).is_err());
+    let empty = FrozenAccountScope::new(
+        super::account_directory(),
+        ClientRoutingScope::no_accounts(),
+    );
+    assert_eq!(
+        empty.routing_snapshot().kind(),
+        AccountRoutingScopeKind::None
+    );
+    assert!(empty.routing_snapshot().groups_snapshot().is_empty());
+    assert!(
+        !empty.allows(
+            &gateway_core::account::ProviderAccountId::new("acct_openai").expect("account")
+        )
+    );
+}
+
+#[test]
+fn same_named_channel_models_keep_capabilities_and_visibility_separate() {
+    use gateway_core::routing::{
+        ConfigRevision, ModelCapabilities, ProviderKind, PublicModelId, RoutingContext,
+        RuntimeSnapshot,
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    let first = ChannelId::new("chan_first").expect("channel");
+    let second = ChannelId::new("chan_second").expect("channel");
+    let third = ChannelId::new("chan_disabled").expect("channel");
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        super::scheduling(),
+        vec![ProviderKind::new("openai").expect("provider")],
+        vec![
+            super::model("openai", "shared", super::capabilities()).with_channel(first),
+            super::model(
+                "openai",
+                "shared",
+                ModelCapabilities::new(BTreeSet::new(), None),
+            )
+            .with_channel(second.clone()),
+            super::model("openai", "second-only", super::capabilities()).with_channel(second),
+            super::model("openai", "disabled-only", super::capabilities()).with_channel(third),
+        ],
+        Vec::new(),
+    )
+    .expect("same upstream model in different channels is valid")
+    .with_account_directory(super::account_directory())
+    .with_model_mappings(BTreeMap::from([
+        ("public-first".to_owned(), "shared".to_owned()),
+        ("secret-alias".to_owned(), "second-only".to_owned()),
+        ("absent-alias".to_owned(), "absent".to_owned()),
+    ]))
+    .with_source_policies(vec![
+        channel_policy("chan_first", true),
+        channel_policy("chan_second", true),
+        channel_policy("chan_disabled", false),
+    ])
+    .expect("policies");
+    let first_access = channel_access(&["chan_first"]);
+    assert_eq!(
+        snapshot
+            .public_models_for_channels(&first_access)
+            .iter()
+            .map(|id| id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["public-first", "shared"]
+    );
+    assert!(
+        snapshot
+            .public_models_for_channels(&AllowedSources::default())
+            .is_empty()
+    );
+    assert!(
+        snapshot
+            .public_models_for_channels(&channel_access(&["chan_disabled", "chan_absent"]))
+            .is_empty()
+    );
+    let shared = PublicModelId::new("shared").expect("model");
+    let plan = snapshot
+        .plan_channels(
+            &shared,
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+            &first_access,
+        )
+        .expect("first supports generation");
+    assert_eq!(plan.candidates().len(), 1);
+    assert_eq!(
+        plan.candidates()[0].source(),
+        Some(&SourceId::Channel(
+            ChannelId::new("chan_first").expect("channel")
+        ))
+    );
+    assert!(
+        snapshot
+            .plan_channels(
+                &shared,
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &RoutingContext::default(),
+                &channel_access(&["chan_second"])
+            )
+            .is_err()
+    );
+    assert!(
+        snapshot
+            .plan_channels(
+                &PublicModelId::new("secret-alias").expect("model"),
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &RoutingContext::default(),
+                &first_access
+            )
+            .is_err()
+    );
+    assert!(
+        snapshot
+            .plan_channels(
+                &shared,
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &RoutingContext {
+                    blocked_providers: BTreeSet::from([
+                        ProviderKind::new("openai").expect("provider")
+                    ]),
+                    ..RoutingContext::default()
+                },
+                &first_access
+            )
+            .is_err()
+    );
+    // 相同适配器的旧账号路径不能从渠道目录获得能力或隐式授权。
+    assert!(
+        snapshot
+            .plan(
+                &shared,
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &RoutingContext::default()
+            )
+            .is_err()
+    );
+    assert!(
+        snapshot
+            .public_models_for_scope(&snapshot.all_account_scope())
+            .iter()
+            .all(|model| model.as_str() != "second-only")
+    );
+}
+
+#[test]
+fn missing_source_policy_denies_a_discovered_channel_and_duplicate_catalog_rows_are_rejected() {
+    use gateway_core::routing::{
+        ConfigRevision, ProviderKind, PublicModelId, RoutingContext, RuntimeSnapshot,
+    };
+    let channel = ChannelId::new("chan_first").expect("channel");
+    let model =
+        super::model("openai", "shared", super::capabilities()).with_channel(channel.clone());
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        super::scheduling(),
+        vec![ProviderKind::new("openai").expect("provider")],
+        vec![model.clone()],
+        Vec::new(),
+    )
+    .expect("snapshot");
+    let allowed = channel_access(&["chan_first"]);
+    assert!(snapshot.public_models_for_channels(&allowed).is_empty());
+    assert!(
+        snapshot
+            .plan_channels(
+                &PublicModelId::new("shared").expect("model"),
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &RoutingContext::default(),
+                &allowed
+            )
+            .is_err()
+    );
+    assert!(
+        RuntimeSnapshot::new(
+            ConfigRevision::new(1).expect("revision"),
+            super::scheduling(),
+            vec![ProviderKind::new("openai").expect("provider")],
+            vec![model.clone(), model.clone()],
+            Vec::new()
+        )
+        .is_err()
+    );
+    let other = super::model("xai", "different", super::capabilities()).with_channel(channel);
+    assert!(
+        RuntimeSnapshot::new(
+            ConfigRevision::new(1).expect("revision"),
+            super::scheduling(),
+            vec![
+                ProviderKind::new("openai").expect("provider"),
+                ProviderKind::new("xai").expect("provider")
+            ],
+            vec![model, other],
+            Vec::new()
+        )
+        .is_err()
+    );
+    assert!(
+        snapshot
+            .with_source_policies(vec![
+                channel_policy("chan_first", true),
+                channel_policy("chan_first", false)
+            ])
+            .is_err()
+    );
+}
+
 #[test]
 fn source_preferences_do_not_replace_global_capacity_or_shared_quota_identity() {
     let quota = QuotaScopeId::new("quota_project").expect("quota");

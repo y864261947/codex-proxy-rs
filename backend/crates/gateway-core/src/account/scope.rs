@@ -125,6 +125,7 @@ impl RuntimeAccountDirectory {
 /// 历史请求保存的账号范围种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AccountRoutingScopeKind {
+    None,
     All,
     Groups,
 }
@@ -133,6 +134,7 @@ impl AccountRoutingScopeKind {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::None => "none",
             Self::All => "all",
             Self::Groups => "groups",
         }
@@ -171,6 +173,13 @@ pub struct AccountRoutingSnapshot {
 }
 
 impl AccountRoutingSnapshot {
+    #[must_use]
+    pub fn none() -> Self {
+        Self {
+            kind: AccountRoutingScopeKind::None,
+            groups: Arc::from([]),
+        }
+    }
     #[must_use]
     pub fn all() -> Self {
         Self {
@@ -289,7 +298,11 @@ impl FrozenAccountScope {
         match &self.client_scope {
             ClientRoutingScope::AllAccounts => AccountRoutingSnapshot::all(),
             ClientRoutingScope::Restricted { bound_groups, .. } => {
-                AccountRoutingSnapshot::groups(bound_groups.to_vec())
+                if bound_groups.is_empty() {
+                    AccountRoutingSnapshot::none()
+                } else {
+                    AccountRoutingSnapshot::groups(bound_groups.to_vec())
+                }
             }
         }
     }

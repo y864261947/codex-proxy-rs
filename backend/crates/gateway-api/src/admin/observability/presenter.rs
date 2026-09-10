@@ -2,6 +2,16 @@
 
 use super::*;
 
+fn upstream_source_view(
+    source: Option<&gateway_core::routing::source::SourceSnapshot>,
+) -> Option<UpstreamSourceView> {
+    source.map(|source| UpstreamSourceView {
+        kind: source.id().kind(),
+        id: source.id().reference().to_owned(),
+        name: source.name().map(str::to_owned),
+    })
+}
+
 pub(crate) fn display_duration(value: Option<u64>) -> String {
     let Some(value) = value.and_then(|value| i64::try_from(value).ok()) else {
         return "—".to_owned();
@@ -257,6 +267,7 @@ pub(crate) fn usage_list_record_view(record: domain::UsageListRecord) -> UsageLi
         .clone()
         .or_else(|| record.requested_model_id.clone());
     UsageListRecordView {
+        upstream_source: upstream_source_view(record.upstream_source.as_ref()),
         id: record.id,
         provider: record.provider_kind,
         authentication_kind: record.provider_account_authentication_kind,
@@ -344,6 +355,7 @@ pub(crate) fn usage_record_view(record: domain::UsageRecord) -> UsageRecordView 
         .or_else(|| record.requested_model_id.clone());
     let metadata = provider_metadata_fields(record.provider_metadata_json.as_deref());
     UsageRecordView {
+        upstream_source: upstream_source_view(record.upstream_source.as_ref()),
         id: record.id.clone(),
         request_id: record.id,
         client_api_key_id: Some(record.client_api_key_ref),
@@ -425,6 +437,7 @@ pub(crate) fn usage_record_view(record: domain::UsageRecord) -> UsageRecordView 
 
 pub(crate) fn provider_metadata_fields(value: Option<&str>) -> BTreeMap<String, Value> {
     const CORE_METADATA_FIELDS: &[&str] = &[
+        "upstreamSource",
         "protocol",
         "logicalOutcome",
         "attemptCount",
@@ -467,6 +480,7 @@ pub(crate) fn usage_attempt_view(attempt: domain::UsageAttempt) -> UsageAttemptV
         .or(attempt.provider_account_ref.as_ref())
         .cloned();
     UsageAttemptView {
+        upstream_source: upstream_source_view(attempt.upstream_source.as_ref()),
         id: attempt.id,
         attempt_index: attempt.attempt_index,
         trigger: attempt.source,
@@ -542,6 +556,7 @@ pub(crate) fn ops_error_view(error: domain::OpsError) -> OpsErrorView {
         .clone()
         .or_else(|| error.requested_model_id.clone());
     OpsErrorView {
+        upstream_source: upstream_source_view(error.upstream_source.as_ref()),
         id: error.event_id,
         request_id: error.request_id,
         client_api_key_id: error.client_api_key_ref,

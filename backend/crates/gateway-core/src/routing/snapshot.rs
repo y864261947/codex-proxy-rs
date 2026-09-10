@@ -298,6 +298,10 @@ async fn compile_runtime_snapshot(
                 model.upstream_model().clone(),
                 model.capabilities().clone(),
             );
+            let compiled = match model.channel_id().cloned() {
+                Some(channel_id) => compiled.with_channel(channel_id),
+                None => compiled,
+            };
             match model.presentation().cloned() {
                 Some(presentation) => compiled.with_presentation(presentation),
                 None => compiled,
@@ -462,6 +466,9 @@ async fn compile_runtime_snapshot(
 /// 数据面使用的不可变配置快照。
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
+    channel_models:
+        Arc<BTreeMap<crate::identity::ChannelId, BTreeMap<UpstreamModelId, ProviderModel>>>,
+    source_policies: Arc<BTreeMap<super::source::SourceId, super::source::SourcePolicy>>,
     revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     providers: Arc<BTreeSet<ProviderKind>>,
@@ -496,12 +503,42 @@ impl RuntimeSnapshot {
         }
 
         let mut known_provider_catalogs = BTreeSet::new();
+        let mut channel_models =
+            BTreeMap::<crate::identity::ChannelId, BTreeMap<UpstreamModelId, ProviderModel>>::new();
         let mut model_map =
             BTreeMap::<ProviderKind, BTreeMap<UpstreamModelId, ModelCapabilities>>::new();
         let mut presentation_map =
             BTreeMap::<ProviderKind, BTreeMap<UpstreamModelId, super::ModelPresentation>>::new();
         for model in provider_models {
+            if let Some(channel_id) = model.channel_id.clone() {
+                if !provider_set.contains(&model.provider) {
+                    return Err(RoutingError::NotFound {
+                        entity: "provider",
+                        id: model.provider.to_string(),
+                    });
+                }
+                // 成功返回渠道目录不能授权该适配器的未知账号路径。
+                known_provider_catalogs.insert(model.provider.clone());
+                let models = channel_models.entry(channel_id.clone()).or_default();
+                if models
+                    .values()
+                    .any(|existing| existing.provider != model.provider)
+                {
+                    return Err(RoutingError::DuplicateEntity {
+                        entity: "channel provider",
+                        id: channel_id.to_string(),
+                    });
+                }
+                if models.insert(model.upstream_model.clone(), model).is_some() {
+                    return Err(RoutingError::DuplicateEntity {
+                        entity: "channel model",
+                        id: channel_id.to_string(),
+                    });
+                }
+                continue;
+            }
             let ProviderModel {
+                channel_id: _,
                 provider,
                 upstream_model,
                 capabilities,
@@ -545,6 +582,8 @@ impl RuntimeSnapshot {
         client_policy_map.retain(|_, policy| policy.enabled());
 
         Ok(Self {
+            channel_models: Arc::new(channel_models),
+            source_policies: Arc::new(BTreeMap::new()),
             revision,
             account_selection_policy,
             providers: Arc::new(provider_set),
@@ -556,6 +595,138 @@ impl RuntimeSnapshot {
             account_directory: Arc::new(RuntimeAccountDirectory::default()),
             client_policies: Arc::new(client_policy_map),
             min_codex_client_versions: CodexClientMinVersions::default(),
+        })
+    }
+
+    /// 发布与模型目录同一请求快照的来源启停、容量与调度策略。
+    pub fn with_source_policies(
+        mut self,
+        policies: Vec<super::source::SourcePolicy>,
+    ) -> Result<Self, RoutingError> {
+        let mut sources = BTreeMap::new();
+        for policy in policies {
+            let id = policy.id().clone();
+            if sources.insert(id.clone(), policy).is_some() {
+                return Err(RoutingError::DuplicateEntity {
+                    entity: "source",
+                    id: id.to_string(),
+                });
+            }
+        }
+        self.source_policies = Arc::new(sources);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn source_policy(
+        &self,
+        source: &super::source::SourceId,
+    ) -> Option<&super::source::SourcePolicy> {
+        self.source_policies.get(source)
+    }
+
+    /// 只返回显式允许且启用渠道中真实发现的模型；别名也必须解析到该渠道。
+    #[must_use]
+    pub fn public_models_for_channels(
+        &self,
+        allowed: &super::source::AllowedSources,
+    ) -> Vec<PublicModelId> {
+        let mut visible = BTreeSet::new();
+        for source in allowed.iter() {
+            let super::source::SourceId::Channel(channel) = source else {
+                continue;
+            };
+            if !self
+                .source_policy(source)
+                .is_some_and(super::source::SourcePolicy::enabled)
+            {
+                continue;
+            }
+            let Some(models) = self.channel_models.get(channel) else {
+                continue;
+            };
+            visible.extend(
+                models
+                    .keys()
+                    .filter_map(|model| PublicModelId::new(model.as_str()).ok()),
+            );
+            for alias in self.model_mappings.keys() {
+                let mapped = self.mapped_model(alias);
+                if models.keys().any(|model| model.as_str() == mapped)
+                    && let Ok(alias) = PublicModelId::new(alias.clone())
+                {
+                    visible.insert(alias);
+                }
+            }
+        }
+        visible.into_iter().collect()
+    }
+
+    /// 渠道必须同时有显式权限、启用策略及该来源自己的能力事实。
+    /// 账号 scope 保留在计划中用于请求历史，绝不作为渠道授权的替代。
+    pub fn plan_channels(
+        &self,
+        public_model: &PublicModelId,
+        operation: &Operation,
+        account_scope: Arc<FrozenAccountScope>,
+        context: &RoutingContext,
+        allowed: &super::source::AllowedSources,
+    ) -> Result<RoutingPlan, RoutingError> {
+        let requirements = operation.capability_requirements();
+        let mapped = self.mapped_model(public_model.as_str());
+        let mut candidates = Vec::new();
+        for source in allowed.iter() {
+            let super::source::SourceId::Channel(channel) = source else {
+                continue;
+            };
+            if !self
+                .source_policy(source)
+                .is_some_and(super::source::SourcePolicy::enabled)
+            {
+                continue;
+            }
+            let Some(model) = self.channel_models.get(channel).and_then(|models| {
+                models
+                    .values()
+                    .find(|model| model.upstream_model.as_str() == mapped)
+            }) else {
+                continue;
+            };
+            if context.blocked_providers.contains(&model.provider)
+                || context
+                    .required_provider
+                    .as_ref()
+                    .is_some_and(|required| required != &model.provider)
+            {
+                continue;
+            }
+            let Some(emulated_features) = model.capabilities.match_requirements(&requirements)
+            else {
+                continue;
+            };
+            candidates.push(ProviderCandidate {
+                source: self
+                    .source_policy(source)
+                    .map(super::source::SourcePolicy::snapshot),
+                provider: model.provider.clone(),
+                upstream_model: Some(model.upstream_model.clone()),
+                emulated_features,
+                account_scope: Arc::clone(&account_scope),
+            });
+        }
+        if candidates.is_empty() {
+            return Err(RoutingError::NoCapableProvider {
+                model: public_model.to_string(),
+            });
+        }
+        Ok(RoutingPlan {
+            config_revision: self.revision,
+            account_selection_policy: self.account_selection_policy,
+            operation: operation.kind(),
+            max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
+                .expect("nonzero request attempt limit"),
+            account_scope,
+            candidates: Arc::from(candidates),
         })
     }
 

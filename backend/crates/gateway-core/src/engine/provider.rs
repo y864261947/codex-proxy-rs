@@ -502,6 +502,7 @@ pub struct ContinuationRequestObservation {
 /// Provider 实时目录编译后的单模型能力。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModelCapabilities {
+    channel_id: Option<ChannelId>,
     upstream_model: UpstreamModelId,
     capabilities: ModelCapabilities,
     presentation: Option<ModelPresentation>,
@@ -529,10 +530,23 @@ impl ProviderModelCapabilities {
     #[must_use]
     pub const fn new(upstream_model: UpstreamModelId, capabilities: ModelCapabilities) -> Self {
         Self {
+            channel_id: None,
             upstream_model,
             capabilities,
             presentation: None,
         }
+    }
+
+    /// 渠道目录逐来源声明能力，不能合并为整个适配器的能力。
+    #[must_use]
+    pub fn with_channel(mut self, channel_id: ChannelId) -> Self {
+        self.channel_id = Some(channel_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn channel_id(&self) -> Option<&ChannelId> {
+        self.channel_id.as_ref()
     }
 
     #[must_use]

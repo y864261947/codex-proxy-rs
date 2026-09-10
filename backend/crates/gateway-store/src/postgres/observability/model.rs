@@ -479,6 +479,7 @@ pub struct DashboardObservation {
 /// 使用记录列表所需的窄投影；完整执行、路由和客户端详情按 ID 单独读取。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub id: String,
     pub endpoint: String,
     pub client_transport: String,
@@ -526,6 +527,7 @@ pub struct UsageListRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub id: String,
     pub client_api_key_ref: String,
     pub config_revision: u64,
@@ -609,6 +611,7 @@ pub struct UsageRecordPage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageAttemptObservation {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub source: String,
     pub id: String,
     pub attempt_index: u32,
@@ -688,6 +691,7 @@ pub struct DiagnosticObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsErrorRecord {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub source: String,
     pub event_id: String,
     pub request_id: Option<String>,

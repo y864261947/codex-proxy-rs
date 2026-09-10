@@ -66,7 +66,14 @@ export interface UsageRecordMetadata {
   [key: string]: unknown
 }
 
+export interface UpstreamSource {
+  kind: 'channel' | 'pool'
+  id: string
+  name: string | null
+}
+
 export interface UsageListRecord {
+  upstreamSource?: UpstreamSource | null
   id: string
   provider: string | null
   authenticationKind: string | null
@@ -96,6 +103,7 @@ export interface UsageListRecord {
 }
 
 export interface UsageRecord {
+  upstreamSource?: UpstreamSource | null
   id: string
   requestId: string
   clientApiKeyId: string | null
@@ -156,6 +164,7 @@ export interface UsageRecord {
 }
 
 export interface UsageAttempt {
+  upstreamSource?: UpstreamSource | null
   id: string
   attemptIndex: number
   trigger: string
@@ -251,6 +260,7 @@ export interface OpsErrorMetadata {
 }
 
 export interface OpsError {
+  upstreamSource?: UpstreamSource | null
   id: string
   requestId: string | null
   clientApiKeyId: string | null

@@ -25,6 +25,60 @@ impl fmt::Display for SourceId {
     }
 }
 
+impl SourceId {
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::AccountPool(_) => "pool",
+            Self::Channel(_) => "channel",
+        }
+    }
+
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        match self {
+            Self::AccountPool(id) => id.as_str(),
+            Self::Channel(id) => id.as_str(),
+        }
+    }
+}
+
+/// 请求冻结的来源名称；旧配置没有名称时保持未知，以 ID 展示。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSnapshot {
+    id: SourceId,
+    name: Option<String>,
+}
+
+impl SourceSnapshot {
+    pub fn new(id: SourceId, name: Option<String>) -> Result<Self, IdentifierError> {
+        if name.as_deref().is_some_and(|name| {
+            name.is_empty()
+                || name.trim() != name
+                || name.chars().count() > 128
+                || name.chars().any(char::is_control)
+        }) {
+            return Err(IdentifierError::InvalidFormat);
+        }
+        Ok(Self { id, name })
+    }
+
+    #[must_use]
+    pub const fn unnamed(id: SourceId) -> Self {
+        Self { id, name: None }
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> &SourceId {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourcePreference {
     priority: NonZeroU16,
@@ -63,6 +117,7 @@ impl Default for SourcePreference {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourcePolicy {
     id: SourceId,
+    name: Option<String>,
     enabled: bool,
     preference: SourcePreference,
     limits: RateLimits,
@@ -82,11 +137,25 @@ impl SourcePolicy {
         }
         Ok(Self {
             id,
+            name: None,
             enabled,
             preference,
             limits,
             quota_scope_id,
         })
+    }
+
+    pub fn with_name(mut self, name: String) -> Result<Self, IdentifierError> {
+        self.name = SourceSnapshot::new(self.id.clone(), Some(name))?.name;
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> SourceSnapshot {
+        SourceSnapshot {
+            id: self.id.clone(),
+            name: self.name.clone(),
+        }
     }
 
     #[must_use]

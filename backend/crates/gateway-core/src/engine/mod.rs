@@ -548,6 +548,7 @@ pub struct NewModelRequest {
 /// 每次真实上游发送前对同一 `model_requests` 行的更新。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptRecord {
+    pub source: Option<crate::routing::source::SourceSnapshot>,
     pub request_id: ModelRequestId,
     pub attempt_count: NonZeroU32,
     pub trigger: AttemptTrigger,
@@ -567,6 +568,7 @@ pub struct AttemptRecord {
 /// 需要解释换号的中间失败。
 #[derive(Debug)]
 pub struct IntermediateFailure {
+    pub source: Option<crate::routing::source::SourceSnapshot>,
     pub request_id: ModelRequestId,
     pub attempt_index: NonZeroU32,
     pub trigger: AttemptTrigger,

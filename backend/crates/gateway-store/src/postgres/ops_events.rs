@@ -26,6 +26,7 @@ impl OpsEventLevel {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsEvent {
+    pub source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub id: String,
     pub model_request_id: Option<String>,
     pub attempt_index: Option<u32>,
@@ -50,6 +51,15 @@ pub struct OpsEvent {
 
 impl OpsEvent {
     pub fn validate(&self) -> StoreResult<()> {
+        if self.source.as_ref().is_some_and(|source| {
+            matches!(
+                source.id(),
+                gateway_core::routing::source::SourceId::Channel(_)
+            )
+        }) && (self.provider_account_id.is_some() || self.provider_account_ref.is_some())
+        {
+            return Err(invalid("channel event cannot identify an account"));
+        }
         require_nonempty(ENTITY, "id", &self.id)?;
         require_nonempty(ENTITY, "component", &self.component)?;
         require_nonempty(ENTITY, "operation", &self.operation)?;
@@ -120,13 +130,13 @@ impl OpsEventRepository for PgOpsEventRepository {
                provider_account_authentication_kind_snapshot,
                failure_kind, upstream_send_state, status_code, provider_error_code, retry_after_ms,
                upstream_request_id, latency_ms, message, raw_upstream_error,
-               created_at
+               created_at, source_kind, source_ref, source_name_snapshot
              ) values (
                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                (select name from provider_accounts where id = $8),
                (select email from provider_accounts where id = $8),
                (select authentication_kind from provider_accounts where id = $8),
-               $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+               $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23
              )",
         )
         .bind(event.id)
@@ -167,6 +177,9 @@ impl OpsEventRepository for PgOpsEventRepository {
         .bind(event.message)
         .bind(event.raw_upstream_error)
         .bind(event.created_at)
+        .bind(event.source.as_ref().map(|source| source.id().kind()))
+        .bind(event.source.as_ref().map(|source| source.id().reference()))
+        .bind(event.source.as_ref().and_then(|source| source.name()))
         .execute(&self.pool)
         .await
         .map_err(|_| postgres_unavailable("append ops event"))?;

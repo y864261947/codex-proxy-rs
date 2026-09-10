@@ -217,6 +217,7 @@ where
 }
 
 struct CurrentAttempt {
+    source: Option<crate::routing::source::SourceSnapshot>,
     stream: ProviderStream,
     metadata: ProviderCallMetadata,
     trigger: AttemptTrigger,
@@ -930,6 +931,7 @@ where
             ));
         }
         let attempt_record = AttemptRecord {
+            source: candidate.source_snapshot().cloned(),
             request_id: self.request_id.clone(),
             attempt_count: next_attempt,
             trigger,
@@ -975,6 +977,7 @@ where
             self.routing_attempts = self.routing_attempts.saturating_add(1);
         }
         self.current = Some(CurrentAttempt {
+            source: candidate.source_snapshot().cloned(),
             stream,
             metadata,
             trigger,
@@ -1184,6 +1187,7 @@ where
                     self.engine
                         .store()
                         .record_intermediate_failure(IntermediateFailure {
+                            source: current.source.clone(),
                             request_id: self.request_id.clone(),
                             attempt_index: current.index,
                             trigger: current.trigger,

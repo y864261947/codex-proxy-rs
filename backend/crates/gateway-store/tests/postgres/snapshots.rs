@@ -239,6 +239,7 @@ async fn attempts_should_keep_their_own_account_snapshots() {
         .expect("insert first attempt");
     PgOpsEventRepository::new(database.pool.clone())
         .append_ops_event(OpsEvent {
+            source: None,
             id: "ops_snap_a".to_owned(),
             model_request_id: Some("req_snap_ab".to_owned()),
             attempt_index: Some(1),
@@ -371,6 +372,7 @@ async fn ops_errors_should_keep_request_and_event_snapshots_after_account_deleti
     .expect("mark request failed");
     PgOpsEventRepository::new(database.pool.clone())
         .append_ops_event(OpsEvent {
+            source: None,
             id: "ops_snap_probe".to_owned(),
             model_request_id: None,
             attempt_index: None,
@@ -562,6 +564,7 @@ async fn diagnostics_should_fallback_to_name_then_ref_for_missing_snapshots() {
         .insert_model_request_with_first_attempt(
             new_request("req_snap_legacy", started_at + chrono::Duration::seconds(1)),
             ModelRequestAttemptStart {
+                source: None,
                 account_selection_wait_ms: None,
                 capacity_used_slots: None,
                 capacity_total_slots: None,
@@ -851,6 +854,7 @@ async fn api_key_diagnostics_should_display_key_name_and_fallback_to_ref() {
         request.client_api_key_id = Some("key_diag".to_owned());
         request.client_api_key_ref = "key_diag".to_owned();
         let attempt = ModelRequestAttemptStart {
+            source: None,
             account_selection_wait_ms: None,
             capacity_used_slots: None,
             capacity_total_slots: None,
@@ -997,8 +1001,188 @@ fn new_request(id: &str, started_at: DateTime<Utc>) -> NewModelRequest {
     }
 }
 
+fn channel_attempt(id: &str, count: u32, channel: &str, name: &str) -> ModelRequestAttemptStart {
+    use gateway_core::{
+        identity::ChannelId,
+        routing::source::{SourceId, SourceSnapshot},
+    };
+    let mut value = attempt(id, count, "unused");
+    value.provider_kind = "api_openai".to_owned();
+    value.provider_account_id = None;
+    value.provider_account_ref = None;
+    value.source = Some(
+        SourceSnapshot::new(
+            SourceId::Channel(ChannelId::new(channel).expect("channel")),
+            Some(name.to_owned()),
+        )
+        .expect("source snapshot"),
+    );
+    value
+}
+
+#[tokio::test]
+async fn channel_history_supports_both_insert_paths_and_retains_the_actual_source_across_retries() {
+    use gateway_store::postgres::UpstreamSendState;
+    let Some(database) = TestDatabase::create("channel_history").await else {
+        return;
+    };
+    let store = PgExecutionStore::new(database.pool.clone());
+    let started_at = Utc::now();
+    for merged in [false, true] {
+        let id = if merged {
+            "req_channel_merged"
+        } else {
+            "req_channel_sequential"
+        };
+        let mut request = new_request(id, started_at);
+        request.routing_scope = "none".to_owned();
+        let first = channel_attempt(id, 1, "chan_first", "First original name");
+        let frozen = first.source.clone();
+        if merged {
+            store
+                .insert_model_request_with_first_attempt(request, first)
+                .await
+                .expect("merged channel request");
+        } else {
+            store
+                .insert_model_request(request)
+                .await
+                .expect("request without attempt");
+            assert_eq!(
+                store
+                    .begin_model_request_attempt(first)
+                    .await
+                    .expect("channel attempt"),
+                1
+            );
+        }
+        store
+            .mark_upstream_send_state(id, UpstreamSendState::Sent)
+            .await
+            .expect("record sent channel");
+        let event_id = format!("event_{id}");
+        PgOpsEventRepository::new(database.pool.clone())
+            .append_ops_event(OpsEvent {
+                source: frozen,
+                id: event_id.clone(),
+                model_request_id: Some(id.to_owned()),
+                attempt_index: Some(1),
+                level: OpsEventLevel::Warning,
+                component: "routing".to_owned(),
+                operation: "account_retry".to_owned(),
+                provider_kind: Some("api_openai".to_owned()),
+                provider_account_id: None,
+                provider_account_ref: None,
+                upstream_model_id: Some("upstream-model".to_owned()),
+                failure_kind: "unavailable".to_owned(),
+                upstream_send_state: Some("sent".to_owned()),
+                raw_upstream_error: None,
+                status_code: Some(503),
+                provider_error_code: None,
+                retry_after_ms: None,
+                upstream_request_id: None,
+                latency_ms: Some(10),
+                message: "upstream failed before delivery".to_owned(),
+                created_at: started_at,
+            })
+            .await
+            .expect("intermediate source snapshot");
+        store
+            .begin_model_request_attempt(channel_attempt(id, 2, "chan_second", "Second channel"))
+            .await
+            .expect("next source");
+        let actual: (String, String, String, String, Option<String>, i32) = sqlx::query_as("select source_kind, source_ref, source_name_snapshot, upstream_send_state, provider_account_ref, attempt_count from model_requests where id = $1").bind(id).fetch_one(&database.pool).await.expect("source history");
+        assert_eq!(
+            actual,
+            (
+                "channel".to_owned(),
+                "chan_second".to_owned(),
+                "Second channel".to_owned(),
+                "sent".to_owned(),
+                None,
+                2
+            )
+        );
+        let old: (String, String) =
+            sqlx::query_as("select source_ref, source_name_snapshot from ops_events where id = $1")
+                .bind(event_id)
+                .fetch_one(&database.pool)
+                .await
+                .expect("old source");
+        assert_eq!(
+            old,
+            ("chan_first".to_owned(), "First original name".to_owned())
+        );
+        // 数据库约束同时拒绝缺身份和把渠道伪装成账号，NULL 不得绕过 check。
+        assert!(sqlx::query("update model_requests set source_kind = null, source_ref = null, source_name_snapshot = null where id = $1").bind(id).execute(&database.pool).await.is_err());
+        assert!(
+            sqlx::query(
+                "update model_requests set provider_account_ref = 'acct_fake' where id = $1"
+            )
+            .bind(id)
+            .execute(&database.pool)
+            .await
+            .is_err()
+        );
+        finalize_request(&database.pool, id, started_at).await;
+        let detail = observability_repository(&database.pool)
+            .usage_record_detail(id)
+            .await
+            .expect("channel detail projection");
+        assert_eq!(
+            detail
+                .request
+                .upstream_source
+                .as_ref()
+                .expect("source")
+                .name(),
+            Some("Second channel")
+        );
+        assert_eq!(detail.attempts.len(), 2);
+        assert_eq!(
+            detail.attempts[0]
+                .upstream_source
+                .as_ref()
+                .expect("old source")
+                .name(),
+            Some("First original name")
+        );
+        assert_eq!(
+            detail.attempts[1]
+                .upstream_source
+                .as_ref()
+                .expect("last source")
+                .name(),
+            Some("Second channel")
+        );
+    }
+    let records = observability_repository(&database.pool)
+        .list_usage_records(usage_query(started_at, UsageRecordFilter::default()))
+        .await
+        .expect("channel list projection");
+    assert_eq!(records.items.len(), 2);
+    assert!(records.items.iter().all(|row| {
+        row.upstream_source
+            .as_ref()
+            .is_some_and(|source| source.id().reference() == "chan_second")
+            && row.provider_account_ref.is_none()
+    }));
+}
+
+#[test]
+fn channel_attempt_validation_rejects_account_aliases_and_missing_target_identity() {
+    let mut request = channel_attempt("req_validation", 1, "chan_first", "First");
+    assert!(request.validate().is_ok());
+    request.provider_account_ref = Some("acct_fake".to_owned());
+    assert!(request.validate().is_err());
+    request.provider_account_ref = None;
+    request.source = None;
+    assert!(request.validate().is_err());
+}
+
 fn attempt(id: &str, count: u32, account_id: &str) -> ModelRequestAttemptStart {
     ModelRequestAttemptStart {
+        source: None,
         account_selection_wait_ms: None,
         capacity_used_slots: None,
         capacity_total_slots: None,

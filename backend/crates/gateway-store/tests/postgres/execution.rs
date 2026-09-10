@@ -106,6 +106,7 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
         deadline_at: started_at + Duration::seconds(30),
     };
     let attempt = ModelRequestAttemptStart {
+        source: None,
         account_selection_wait_ms: None,
         capacity_used_slots: None,
         capacity_total_slots: None,
@@ -173,6 +174,7 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
         .expect("mark sent before retry");
     let second = repository
         .begin_model_request_attempt(ModelRequestAttemptStart {
+            source: None,
             account_selection_wait_ms: None,
             capacity_used_slots: None,
             capacity_total_slots: None,

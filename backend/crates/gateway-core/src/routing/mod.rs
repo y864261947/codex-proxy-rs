@@ -430,6 +430,7 @@ impl ModelCapabilities {
 /// 一个 Provider 实时发现的上游模型能力。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModel {
+    channel_id: Option<crate::identity::ChannelId>,
     provider: ProviderKind,
     upstream_model: UpstreamModelId,
     capabilities: ModelCapabilities,
@@ -444,11 +445,23 @@ impl ProviderModel {
         capabilities: ModelCapabilities,
     ) -> Self {
         Self {
+            channel_id: None,
             provider,
             upstream_model,
             capabilities,
             presentation: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_channel(mut self, channel_id: crate::identity::ChannelId) -> Self {
+        self.channel_id = Some(channel_id);
+        self
+    }
+
+    #[must_use]
+    pub const fn channel_id(&self) -> Option<&crate::identity::ChannelId> {
+        self.channel_id.as_ref()
     }
 
     #[must_use]
@@ -484,7 +497,7 @@ pub struct RoutingContext {
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {
-    source: Option<source::SourceId>,
+    source: Option<source::SourceSnapshot>,
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
     emulated_features: BTreeSet<Feature>,
@@ -494,14 +507,19 @@ pub struct ProviderCandidate {
 impl ProviderCandidate {
     /// None 仅用于迁入来源配置之前的既有账号集合路径。
     #[must_use]
-    pub const fn source(&self) -> Option<&source::SourceId> {
-        self.source.as_ref()
+    pub fn source(&self) -> Option<&source::SourceId> {
+        self.source.as_ref().map(source::SourceSnapshot::id)
     }
 
     #[must_use]
     pub fn with_source(mut self, source: source::SourceId) -> Self {
-        self.source = Some(source);
+        self.source = Some(source::SourceSnapshot::unnamed(source));
         self
+    }
+
+    #[must_use]
+    pub const fn source_snapshot(&self) -> Option<&source::SourceSnapshot> {
+        self.source.as_ref()
     }
 
     #[must_use]
