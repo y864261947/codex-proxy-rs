@@ -37,3 +37,9 @@
 4. 模型目录、发现、价格和测试记录进入第三批；逐厂商协议及媒体能力按第五批逐项验证，目录不提前标记为可调用。
 
 本文件描述实施目标，不代表上述渠道功能已经交付；实际状态以实施记录和 CI 为准。
+
+## 首个 API 适配边界
+
+先在现有 OpenAI Provider crate 内增加独立的 API 渠道适配器，复用该 owner 的 Responses 协议解析；使用独立的 ProviderKind 与 API Key 认证，不进入 Codex OAuth 账号选择。当前网关客户端入口是 Responses；Chat Completions、Anthropic、Gemini 的转换按后续协议批次分别验证。
+
+2026-09-10 核对官方资料：[模型列表](https://developers.openai.com/api/reference/resources/models/methods/list) 返回模型 ID、归属和生命周期等基本信息，不能据此推断价格或完整能力；[流式响应](https://developers.openai.com/api/docs/guides/streaming-responses) 使用 SSE 及具名生命周期事件。初始 API 渠道显式配置 Responses 模型集合，自动发现与能力确认在第三批处理。
