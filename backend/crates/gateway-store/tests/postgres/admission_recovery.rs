@@ -132,7 +132,7 @@ async fn recovery_aggregates_frozen_customer_refs_after_key_reassignment_and_del
             .as_database_error()
             .and_then(|error| error.code())
             .as_deref(),
-        Some("23503")
+        Some("23001")
     );
     seed_request(
         &database.pool,

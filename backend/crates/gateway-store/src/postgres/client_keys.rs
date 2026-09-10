@@ -1315,7 +1315,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
     };
     match &cursor.value {
         ClientApiKeyCursorValue::Name(name) => {
-            statement.push(" and (lower(name), id)");
+            statement.push(" and (lower(k.name), k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(name.to_lowercase());
@@ -1324,7 +1324,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push(")");
         }
         ClientApiKeyCursorValue::Enabled(enabled) => {
-            statement.push(" and (enabled, id)");
+            statement.push(" and (k.enabled, k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(*enabled);
@@ -1333,7 +1333,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push(")");
         }
         ClientApiKeyCursorValue::CreatedAt(created_at) => {
-            statement.push(" and (created_at, id)");
+            statement.push(" and (k.created_at, k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(*created_at);
@@ -1342,7 +1342,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push(")");
         }
         ClientApiKeyCursorValue::LastUsedAt(Some(last_used_at)) => {
-            statement.push(" and (last_used_at is null or (last_used_at, id)");
+            statement.push(" and (k.last_used_at is null or (k.last_used_at, k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(*last_used_at);
@@ -1351,7 +1351,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push("))");
         }
         ClientApiKeyCursorValue::LastUsedAt(None) => {
-            statement.push(" and last_used_at is null and id");
+            statement.push(" and k.last_used_at is null and k.id");
             statement.push(comparison);
             statement.push_bind(cursor.id.clone());
         }
@@ -1364,16 +1364,16 @@ fn push_client_key_order(statement: &mut QueryBuilder<Postgres>, sort: ClientApi
         ClientApiKeySortDirection::Desc => " desc",
     };
     match sort.field {
-        ClientApiKeySortField::Name => statement.push(" order by lower(name)"),
-        ClientApiKeySortField::Enabled => statement.push(" order by enabled"),
-        ClientApiKeySortField::CreatedAt => statement.push(" order by created_at"),
-        ClientApiKeySortField::LastUsedAt => statement.push(" order by last_used_at"),
+        ClientApiKeySortField::Name => statement.push(" order by lower(k.name)"),
+        ClientApiKeySortField::Enabled => statement.push(" order by k.enabled"),
+        ClientApiKeySortField::CreatedAt => statement.push(" order by k.created_at"),
+        ClientApiKeySortField::LastUsedAt => statement.push(" order by k.last_used_at"),
     };
     statement.push(direction);
     if sort.field == ClientApiKeySortField::LastUsedAt {
         statement.push(" nulls last");
     }
-    statement.push(", id");
+    statement.push(", k.id");
     statement.push(direction);
 }
 

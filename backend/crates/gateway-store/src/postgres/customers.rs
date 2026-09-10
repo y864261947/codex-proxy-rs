@@ -168,7 +168,7 @@ fn sql_error(error: sqlx::Error) -> AdminStoreError {
         .and_then(|error| error.code())
         .as_deref()
     {
-        Some("23505" | "23503") => AdminStoreErrorKind::Conflict,
+        Some("23505" | "23503" | "23001") => AdminStoreErrorKind::Conflict,
         Some("23514" | "23502") => AdminStoreErrorKind::Invalid,
         _ => AdminStoreErrorKind::Unavailable,
     };
