@@ -120,8 +120,8 @@ async fn recovery_aggregates_frozen_customer_refs_after_key_reassignment_and_del
     let now = Utc::now();
     sqlx::raw_sql(
         "insert into customers (id, name) values ('cust_original', 'Original'), ('cust_new', 'New');
-         insert into client_api_keys (id, name, key, customer_id)
-         values ('key-recovery', 'first', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'cust_original');"
+         insert into client_api_keys (id, name, key, customer_id, created_at, updated_at)
+         values ('key-recovery', 'first', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'cust_original', now(), now());"
     ).execute(&database.pool).await.expect("seed customer and key");
     let error = sqlx::query("delete from customers where id = 'cust_original'")
         .execute(&database.pool)

@@ -6,12 +6,13 @@ export * from './modules/accounts'
 
 // API Keys 管理
 export * from './modules/api-keys'
-
 // 认证相关
 export * from './modules/auth'
 
 // 备份管理
 export * from './modules/backups'
+
+export * from './modules/customers'
 
 // Dashboard 聚合
 export * from './modules/dashboard'

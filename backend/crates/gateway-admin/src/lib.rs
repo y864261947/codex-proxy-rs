@@ -149,6 +149,7 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    customers: Arc<dyn use_case::customers::CustomerService>,
     auth: Arc<dyn AuthService>,
     accounts: Arc<dyn AccountsService>,
     account_groups: Arc<dyn AccountGroupService>,
@@ -163,6 +164,10 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    #[must_use]
+    pub fn customers(&self) -> &dyn use_case::customers::CustomerService {
+        self.customers.as_ref()
+    }
     #[must_use]
     pub fn auth(&self) -> &dyn AuthService {
         self.auth.as_ref()
@@ -290,6 +295,10 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        customers: Arc::new(use_case::customers::DefaultCustomerService::new(
+            store.customers(),
+            snapshot.clone(),
+        )),
         auth,
         accounts,
         account_groups: Arc::new(DefaultAccountGroupService::new(

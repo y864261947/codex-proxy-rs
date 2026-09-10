@@ -59,8 +59,8 @@ async fn snapshot_freezes_customer_status_and_limits_without_changing_key_limits
     sqlx::raw_sql(
         "insert into customers (id, name, max_concurrency, requests_per_minute)
          values ('cust_snapshot', 'Customer', 5, 120);
-         insert into client_api_keys (id, name, key, customer_id, max_concurrency, requests_per_minute)
-         values ('key_snapshot', 'first', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'cust_snapshot', 2, 30);"
+         insert into client_api_keys (id, name, key, customer_id, max_concurrency, requests_per_minute, created_at, updated_at)
+         values ('key_snapshot', 'first', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'cust_snapshot', 2, 30, now(), now());"
     ).execute(&database.pool).await.expect("seed customer and assigned key");
     let repository = PgRuntimeSnapshotRepository::new(database.pool.clone());
     let snapshot = repository

@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import type { ApiKey } from '@/api'
 import { ref, watch } from 'vue'
 
+import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
@@ -12,6 +14,7 @@ import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { usePageSelection } from '@/composables/usePageSelection'
 import ApiKeyActions from './components/ApiKeyActions.vue'
 import ApiKeyCreateModal from './components/ApiKeyCreateModal.vue'
+import ApiKeyCustomerModal from './components/ApiKeyCustomerModal.vue'
 import ApiKeyFilters from './components/ApiKeyFilters.vue'
 import ApiKeyIdentityCell from './components/ApiKeyIdentityCell.vue'
 import ApiKeyPrefixCell from './components/ApiKeyPrefixCell.vue'
@@ -24,6 +27,12 @@ import { useApiKeyUse } from './composables/useApiKeyUse'
 import { apiKeyColumns } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
+const customerKey = ref<ApiKey | null>(null)
+const customerOpen = ref(false)
+function assignCustomer(key: ApiKey) {
+  customerKey.value = key
+  customerOpen.value = true
+}
 
 const {
   loading,
@@ -160,6 +169,11 @@ watch(
             <template #enabled="{ row }">
               <ApiKeyStatusBadge :api-key="row" />
             </template>
+            <template #customer="{ row }">
+              <BaseButton variant="ghost" :title="`设置 ${row.name} 的客户归属`" @click="assignCustomer(row)">
+                {{ row.customer?.name || '未分配' }}{{ row.customer && !row.customer.enabled ? '（停用）' : '' }}
+              </BaseButton>
+            </template>
             <template #lastUsedAt="{ row }">
               <LastUsedAtCell :value="row.lastUsedAt" />
             </template>
@@ -200,6 +214,7 @@ watch(
       @save="requestSave"
       @import-ccs="importCreatedKeyToCcs"
     />
+    <ApiKeyCustomerModal v-model="customerOpen" :api-key="customerKey" @saved="loadApiKeys" />
 
     <ApiKeyUseModal
       v-model="showUseKeyModal"

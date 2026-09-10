@@ -85,6 +85,7 @@ pub struct ClientKeyListQuery {
 /// 不含完整明文 Key 的管理投影。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientKeyRecord {
+    pub customer: Option<super::customers::CustomerRef>,
     pub id: ClientApiKeyId,
     pub name: String,
     pub label: Option<String>,

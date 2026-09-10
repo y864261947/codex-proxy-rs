@@ -107,6 +107,7 @@ impl fmt::Debug for ClientApiKeySecret {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientApiKeyRecord {
+    pub customer: Option<gateway_admin::model::customers::CustomerRef>,
     pub id: String,
     pub name: String,
     pub label: Option<String>,
@@ -351,10 +352,11 @@ impl ClientApiKeyRepository for PgClientApiKeyRepository {
         query.validate()?;
         let total = count_client_api_keys(&self.pool, query.search.as_deref()).await?;
         let mut statement = QueryBuilder::<Postgres>::new(
-            "select k.id, k.name, k.label, left(k.key, 10) as prefix, k.enabled,
+            "select k.id, k.name, k.label, k.customer_id, c.name as customer_name, c.enabled as customer_enabled, left(k.key, 10) as prefix, k.enabled,
                     k.max_concurrency, k.requests_per_minute, k.last_used_at, k.created_at,
                     k.updated_at, '[]'::jsonb as groups, '{}'::text[] as provider_kinds
              from client_api_keys k
+             left join customers c on c.id = k.customer_id
              where true",
         );
         push_client_key_search(&mut statement, query.search.as_deref());
@@ -409,7 +411,7 @@ impl ClientApiKeyRepository for PgClientApiKeyRepository {
     async fn get_client_api_key(&self, id: &str) -> StoreResult<Option<ClientApiKeyRecord>> {
         require_nonempty(ENTITY, "id", id)?;
         sqlx::query(
-            "select k.id, k.name, k.label, left(k.key, 10) as prefix, k.enabled,
+            "select k.id, k.name, k.label, k.customer_id, c.name as customer_name, c.enabled as customer_enabled, left(k.key, 10) as prefix, k.enabled,
                     k.max_concurrency, k.requests_per_minute, k.last_used_at, k.created_at,
                     k.updated_at, coalesce(groups.groups, '[]'::jsonb) as groups,
                     case
@@ -421,6 +423,7 @@ impl ClientApiKeyRepository for PgClientApiKeyRepository {
                       else coalesce(groups.provider_kinds, '{}')
                     end as provider_kinds
              from client_api_keys k
+             left join customers c on c.id = k.customer_id
              left join lateral (
                select
                  (select count(*)::bigint
@@ -910,6 +913,7 @@ fn admin_client_key_cursor(cursor: ClientApiKeyCursor) -> AdminStoreResult<Admin
 
 fn admin_client_key_record(record: ClientApiKeyRecord) -> AdminStoreResult<AdminClientKeyRecord> {
     Ok(AdminClientKeyRecord {
+        customer: record.customer,
         id: ClientApiKeyId::new(record.id)
             .map_err(|_| admin_store_error(ENTITY, invalid("invalid client key id")))?,
         name: record.name,
@@ -1123,6 +1127,22 @@ fn client_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<ClientApiK
         .try_get("groups")
         .map_err(|_| invalid("invalid groups"))?;
     Ok(ClientApiKeyRecord {
+        customer: row
+            .try_get::<Option<String>, _>("customer_id")
+            .map_err(|_| invalid("invalid customer ID"))?
+            .map(|id| {
+                Ok::<_, StoreError>(gateway_admin::model::customers::CustomerRef {
+                    id: gateway_core::policy::CustomerId::new(id)
+                        .map_err(|_| invalid("invalid customer ID"))?,
+                    name: row
+                        .try_get("customer_name")
+                        .map_err(|_| invalid("invalid customer name"))?,
+                    enabled: row
+                        .try_get("customer_enabled")
+                        .map_err(|_| invalid("invalid customer status"))?,
+                })
+            })
+            .transpose()?,
         id: row.try_get("id").map_err(|_| invalid("invalid id"))?,
         name: row.try_get("name").map_err(|_| invalid("invalid name"))?,
         label: row.try_get("label").map_err(|_| invalid("invalid label"))?,

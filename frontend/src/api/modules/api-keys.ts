@@ -1,9 +1,11 @@
 import type { AccountGroupRef } from './account-groups'
+import type { CustomerRef } from './customers'
 import request from '../request'
 
 export type ApiKeyRoutingScope = 'all' | 'groups'
 
 export interface ApiKey {
+  customer: CustomerRef | null
   id: string
   name: string
   label: string | null

@@ -39,8 +39,16 @@ export const routes: RouteRecordRaw[] = [
       },
       {
         path: 'api-keys',
-        name: 'api-keys',
-        component: () => import('@/views/api-keys/index.vue'),
+        redirect: '/access/keys',
+      },
+      {
+        path: 'access',
+        component: () => import('@/views/access/index.vue'),
+        children: [
+          { path: '', redirect: '/access/keys' },
+          { path: 'keys', name: 'api-keys', component: () => import('@/views/api-keys/index.vue') },
+          { path: 'customers', name: 'customers', component: () => import('@/views/customers/index.vue') },
+        ],
       },
       {
         path: 'usage',

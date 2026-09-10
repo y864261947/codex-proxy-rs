@@ -84,6 +84,19 @@ impl AdminStoreError {
 
 pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 
+#[async_trait]
+pub trait CustomerStore: Send + Sync {
+    async fn list_customers(
+        &self,
+        query: crate::model::customers::CustomerListQuery,
+    ) -> AdminStoreResult<crate::model::customers::CustomerPage>;
+    async fn change_customer(
+        &self,
+        change: crate::model::customers::CustomerChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
@@ -404,6 +417,7 @@ impl AdminAccountStorePorts {
 /// 字段保持私有，每个 getter 只交出一种明确能力。该类型不提供通用拆包入口。
 #[derive(Clone)]
 pub struct AdminStorePorts {
+    customers: Arc<dyn CustomerStore>,
     accounts: AdminAccountStorePorts,
     auth: Arc<dyn AuthStore>,
     client_keys: Arc<dyn ClientKeyStore>,
@@ -418,6 +432,7 @@ impl AdminStorePorts {
         accounts: AdminAccountStorePorts,
         auth: Arc<dyn AuthStore>,
         client_keys: Arc<dyn ClientKeyStore>,
+        customers: Arc<dyn CustomerStore>,
         observability: Arc<dyn ObservabilityStore>,
         settings: Arc<dyn SettingsStore>,
         backup: BackupStorePorts,
@@ -426,6 +441,7 @@ impl AdminStorePorts {
             accounts,
             auth,
             client_keys,
+            customers,
             observability,
             settings,
             backup,
@@ -455,6 +471,11 @@ impl AdminStorePorts {
     #[must_use]
     pub fn client_keys(&self) -> Arc<dyn ClientKeyStore> {
         self.client_keys.clone()
+    }
+
+    #[must_use]
+    pub fn customers(&self) -> Arc<dyn CustomerStore> {
+        self.customers.clone()
     }
 
     #[must_use]

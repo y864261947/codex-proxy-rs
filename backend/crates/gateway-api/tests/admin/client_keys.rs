@@ -207,6 +207,7 @@ fn client_key_responses_should_keep_shape_and_redact_creation_debug() {
         .single()
         .expect("valid time");
     let view = ClientKeyView::from(gateway_admin::model::client_keys::ClientKeyRecord {
+        customer: None,
         id: gateway_core::policy::ClientApiKeyId::new("key_visible").expect("Client Key ID"),
         name: "visible".to_owned(),
         label: None,

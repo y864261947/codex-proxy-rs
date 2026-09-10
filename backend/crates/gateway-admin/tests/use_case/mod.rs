@@ -14,6 +14,23 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+#[async_trait]
+impl gateway_admin::ports::store::CustomerStore for UnavailableStore {
+    async fn list_customers(
+        &self,
+        _: gateway_admin::model::customers::CustomerListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::customers::CustomerPage> {
+        Err(unavailable("customer"))
+    }
+    async fn change_customer(
+        &self,
+        _: gateway_admin::model::customers::CustomerChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("customer"))
+    }
+}
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -199,6 +216,7 @@ impl AdminHarness {
                 ),
                 self.auth,
                 self.client_keys,
+                Arc::new(UnavailableStore),
                 self.observability,
                 self.settings,
                 self.backup,

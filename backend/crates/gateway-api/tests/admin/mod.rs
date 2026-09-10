@@ -6,6 +6,23 @@ use std::{
     },
 };
 
+#[async_trait]
+impl gateway_admin::ports::store::CustomerStore for UnusedStore {
+    async fn list_customers(
+        &self,
+        _: gateway_admin::model::customers::CustomerListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::customers::CustomerPage> {
+        Err(unavailable("customer"))
+    }
+    async fn change_customer(
+        &self,
+        _: gateway_admin::model::customers::CustomerChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("customer"))
+    }
+}
+
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures::future::BoxFuture;
@@ -80,6 +97,7 @@ mod account_groups;
 mod accounts;
 mod auth;
 mod client_keys;
+mod customers;
 mod errors;
 mod observability;
 mod settings;
@@ -127,6 +145,7 @@ impl AdminTestFixture {
             AdminAccountStorePorts::new(unused.clone(), unused.clone(), account_groups.clone()),
             auth.clone(),
             client_keys.clone(),
+            unused.clone(),
             unused,
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
@@ -644,6 +663,7 @@ impl ClientKeyStore for MemoryClientKeyStore {
         let now = Utc::now();
         Ok(Some(ClientKeySecret::new(
             ClientKeyRecord {
+                customer: None,
                 id: id.clone(),
                 name: "revealed".to_owned(),
                 label: None,

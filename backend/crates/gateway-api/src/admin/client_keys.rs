@@ -237,6 +237,7 @@ impl ClientKeyMutationRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientKeyView {
+    customer: Option<ClientKeyCustomerView>,
     id: String,
     name: String,
     label: Option<String>,
@@ -261,6 +262,14 @@ pub struct ClientKeyGroupView {
     enabled: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientKeyCustomerView {
+    id: String,
+    name: String,
+    enabled: bool,
+}
+
 impl From<ClientKeyRecord> for ClientKeyView {
     fn from(record: ClientKeyRecord) -> Self {
         let routing_scope = if record.groups.is_empty() {
@@ -269,6 +278,11 @@ impl From<ClientKeyRecord> for ClientKeyView {
             "groups"
         };
         Self {
+            customer: record.customer.map(|customer| ClientKeyCustomerView {
+                id: customer.id.to_string(),
+                name: customer.name,
+                enabled: customer.enabled,
+            }),
             id: record.id.to_string(),
             name: record.name,
             label: record.label,

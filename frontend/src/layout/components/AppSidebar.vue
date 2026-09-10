@@ -58,7 +58,7 @@ const preferredMotion = usePreferredReducedMotion()
 const navItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
   { label: '自建号池', icon: Users, path: '/pools' },
-  { label: 'API 密钥', icon: KeyRound, path: '/api-keys' },
+  { label: '下游接入', icon: KeyRound, path: '/access' },
   { label: '监控中心', icon: Activity, path: '/monitoring' },
   { label: '请求与用量', icon: ChartNoAxesColumn, path: '/usage' },
   { label: '主题设置', icon: Palette, path: '/theme' },

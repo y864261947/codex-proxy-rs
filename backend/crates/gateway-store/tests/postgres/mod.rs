@@ -15,6 +15,7 @@ mod admin_security_audit;
 mod admission_recovery;
 mod backup;
 mod client_keys;
+mod customers;
 mod execution;
 mod execution_buffer;
 mod health;
