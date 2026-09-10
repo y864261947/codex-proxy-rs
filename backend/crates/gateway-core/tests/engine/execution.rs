@@ -475,6 +475,43 @@ fn slow_circuit_store_should_time_out_and_fail_open_during_request_start() {
 
     assert!(started_at.elapsed() < Duration::from_secs(2));
     assert!(!started.session.is_finalized());
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 1);
+    block_on(started.session.detach_finalize());
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
+}
+
+#[test]
+fn cancelling_request_preparation_releases_realtime_concurrency() {
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(start_snapshot()),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        Arc::new(UnusedAdmissions),
+        Arc::new(PendingDecisionCircuits),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let client = service.authenticate("sk_start_test").expect("client");
+    block_on(async {
+        let mut request = service.start(StartExecution {
+            client,
+            public_model: PublicModelId::new("gpt-start").unwrap(),
+            operation: start_operation(),
+            metadata: ExecutionRequestMetadata {
+                protocol: "openai".to_owned(),
+                endpoint: "/v1/responses".to_owned(),
+                transport: ClientTransport::HttpSse,
+                stream: true,
+                client_ip: None,
+                user_agent: None,
+                previous_response_id: None,
+            },
+        });
+        assert!(futures::poll!(&mut request).is_pending());
+        assert_eq!(service.traffic_monitor().snapshot().preparing_requests, 1);
+        drop(request);
+        assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
+    });
 }
 
 #[test]
