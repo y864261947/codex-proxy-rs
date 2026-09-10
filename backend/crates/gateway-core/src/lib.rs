@@ -34,6 +34,7 @@ use engine::execution::{
 };
 use engine::probe::AccountProbe;
 use engine::provider::ProviderRegistry;
+use engine::traffic::TrafficMonitor;
 use health::HealthProbe;
 use routing::snapshot::{RuntimeSnapshotCompiler, SnapshotStorePort};
 use runtime::{
@@ -84,6 +85,7 @@ impl CoreStorePorts {
 }
 
 pub struct CoreBundle {
+    traffic: TrafficMonitor,
     execution: Arc<dyn ExecutionService>,
     snapshot_control: Arc<dyn SnapshotControl>,
     account_probe: Arc<dyn AccountProbe>,
@@ -92,6 +94,11 @@ pub struct CoreBundle {
 }
 
 impl CoreBundle {
+    #[must_use]
+    pub fn traffic_monitor(&self) -> TrafficMonitor {
+        self.traffic.clone()
+    }
+
     #[must_use]
     pub fn execution_service(&self) -> Arc<dyn ExecutionService> {
         Arc::clone(&self.execution)
@@ -154,11 +161,13 @@ pub async fn initialize(
         ports.continuation,
         ports.client_api_key_usage,
     ));
+    let traffic = service.traffic_monitor();
     let execution: Arc<dyn ExecutionService> = service.clone();
     let account_probe: Arc<dyn AccountProbe> = service;
     let snapshot_control: Arc<dyn SnapshotControl> = publisher;
     let health_probes: Vec<Arc<dyn HealthProbe>> = vec![Arc::new(snapshots)];
     Ok(CoreBundle {
+        traffic,
         execution,
         snapshot_control,
         account_probe,

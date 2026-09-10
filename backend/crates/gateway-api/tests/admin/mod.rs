@@ -164,7 +164,7 @@ impl AdminTestFixture {
     }
 
     pub fn state(&self) -> AdminTestState {
-        AdminTestState(self.services.clone())
+        AdminTestState(self.services.clone(), Default::default())
     }
 }
 
@@ -193,9 +193,13 @@ impl ClientDistributionResolver for StaticClientDistribution {
 }
 
 #[derive(Clone)]
-pub(super) struct AdminTestState(AdminServices);
+pub(super) struct AdminTestState(AdminServices, gateway_core::engine::traffic::TrafficMonitor);
 
 impl AdminSessionState for AdminTestState {
+    fn traffic_monitor(&self) -> &gateway_core::engine::traffic::TrafficMonitor {
+        &self.1
+    }
+
     fn admin_services(&self) -> &AdminServices {
         &self.0
     }

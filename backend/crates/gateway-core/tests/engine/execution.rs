@@ -90,6 +90,14 @@ fn account_probe_should_not_write_to_the_persistent_execution_store() {
 
     assert_eq!(error.kind(), GatewayErrorKind::NoAvailableProvider);
     assert_eq!(error.source(), AccountProbeErrorSource::Gateway);
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
+    assert_eq!(
+        service
+            .traffic_monitor()
+            .snapshot()
+            .ingress_requests_last_minute,
+        0
+    );
     assert_eq!(error.send_state(), None);
     assert!(!store.touched.load(Ordering::SeqCst));
 }
@@ -378,6 +386,8 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
     }))
     .expect("provider endpoint request should start without a text catalog entry");
 
+    assert_eq!(service.traffic_monitor().snapshot().executing_requests, 1);
+
     let error = block_on(started.session.collect_uncommitted())
         .expect_err("the cold provider stops execution after persistence");
     assert_eq!(
@@ -389,6 +399,8 @@ fn assert_provider_endpoint_observation(model: Option<&str>) {
     let upstream_models = store.upstream_models();
     assert!(!upstream_models.is_empty());
     assert!(upstream_models.iter().all(Option::is_none));
+    assert!(started.session.is_finalized());
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
 }
 
 #[test]
@@ -423,6 +435,10 @@ fn circuit_store_failure_should_fail_open_during_request_start() {
     .expect("recoverable circuit state must not reject the request");
 
     assert!(!started.session.is_finalized());
+    assert_eq!(service.traffic_monitor().snapshot().executing_requests, 1);
+    assert_eq!(service.traffic_monitor().snapshot().preparing_requests, 0);
+    drop(started);
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
 }
 
 #[test]
@@ -496,6 +512,7 @@ fn known_catalog_should_reject_a_model_that_the_provider_did_not_publish() {
     };
 
     assert_eq!(error.kind(), GatewayErrorKind::NoAvailableProvider);
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
 }
 
 #[test]

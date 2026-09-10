@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// 当前进程内存中的实时事实，不与数据库中的完成统计混算。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeTrafficView {
+    pub observed_at: DateTime<Utc>,
+    pub scope: &'static str,
+    pub window_seconds: u64,
+    pub uptime_seconds: u64,
+    pub ingress_requests_last_minute: u64,
+    pub in_flight_requests: u64,
+    pub preparing_requests: u64,
+    pub executing_requests: u64,
+}
+
 /// 观测列表响应数据。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]

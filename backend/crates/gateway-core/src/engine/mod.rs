@@ -7,6 +7,7 @@ pub mod execution;
 mod observation;
 pub mod probe;
 pub mod provider;
+pub mod traffic;
 
 pub use coordinator::{AttemptCoordinator, ResponseExecutionSession};
 

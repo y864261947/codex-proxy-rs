@@ -24,6 +24,7 @@ use crate::engine::probe::{
     AccountProbeResult, AccountProbeUpstreamResponse,
 };
 use crate::engine::provider::ProviderRegistry;
+use crate::engine::traffic::{TrafficLease, TrafficMonitor};
 use crate::engine::{
     AttemptCoordinator, AttemptRecord, CoordinatedEvent, EngineError, ExecutionStore,
     GatewayEngine, IntermediateFailure, ModelRequestFinalization, ModelRequestId, NewModelRequest,
@@ -141,6 +142,7 @@ impl ExecutionTarget {
 }
 
 struct PendingStartExecution {
+    traffic: TrafficLease,
     client: AuthenticatedClient,
     target: ExecutionTarget,
     operation: Operation,
@@ -246,6 +248,7 @@ pub trait ProviderCircuitPort: Send + Sync {
 }
 
 pub struct DefaultExecutionService {
+    traffic: TrafficMonitor,
     snapshots: RuntimeSnapshotHandle,
     coordinator: Arc<AttemptCoordinator<dyn ExecutionStore>>,
     probe_coordinator: Arc<AttemptCoordinator<dyn ExecutionStore>>,
@@ -275,6 +278,7 @@ impl DefaultExecutionService {
         let probe_engine = GatewayEngine::<dyn ExecutionStore>::new(transient, providers.clone());
         Self {
             snapshots,
+            traffic: TrafficMonitor::default(),
             coordinator: Arc::new(AttemptCoordinator::new(engine)),
             probe_coordinator: Arc::new(AttemptCoordinator::new(probe_engine)),
             observations,
@@ -286,6 +290,11 @@ impl DefaultExecutionService {
         }
     }
 
+    #[must_use]
+    pub fn traffic_monitor(&self) -> TrafficMonitor {
+        self.traffic.clone()
+    }
+
     async fn start_inner(&self, request: StartExecution) -> Result<StartedExecution, GatewayError> {
         let StartExecution {
             client,
@@ -294,6 +303,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         self.start_inner_with_target(PendingStartExecution {
+            traffic: self.traffic.begin_execution(),
             client,
             target: ExecutionTarget::Model(public_model),
             operation,
@@ -313,6 +323,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         self.start_inner_with_target(PendingStartExecution {
+            traffic: self.traffic.begin_execution(),
             client,
             target: ExecutionTarget::ProviderEndpoint(provider),
             operation,
@@ -465,6 +476,7 @@ impl DefaultExecutionService {
         continuation: Option<ContinuationBinding>,
     ) -> Result<StartedExecution, GatewayError> {
         let PendingStartExecution {
+            mut traffic,
             client,
             target,
             operation,
@@ -556,12 +568,14 @@ impl DefaultExecutionService {
                 return Err(gateway_error_from_engine(&error));
             }
         };
+        traffic.mark_executing();
         Ok(StartedExecution {
             request_id,
             created_at: started_at,
             stream: metadata.stream,
             session: Box::new(DefaultExecutionSession::new(
                 core,
+                traffic,
                 admission,
                 Arc::clone(&self.circuits),
                 Arc::clone(&self.continuation),
@@ -935,6 +949,7 @@ impl AdmissionLease {
 }
 
 struct DefaultExecutionSession {
+    traffic: Option<TrafficLease>,
     core: Option<ResponseExecutionSession<dyn ExecutionStore>>,
     admission: Option<AdmissionLease>,
     circuits: Arc<dyn ProviderCircuitPort>,
@@ -946,12 +961,14 @@ struct DefaultExecutionSession {
 impl DefaultExecutionSession {
     fn new(
         core: ResponseExecutionSession<dyn ExecutionStore>,
+        traffic: TrafficLease,
         admission: AdmissionLease,
         circuits: Arc<dyn ProviderCircuitPort>,
         continuation: Arc<dyn NativeContinuationPort>,
     ) -> Self {
         Self {
             core: Some(core),
+            traffic: Some(traffic),
             admission: Some(admission),
             circuits,
             continuation,
@@ -971,9 +988,11 @@ impl DefaultExecutionSession {
             .core
             .as_ref()
             .is_some_and(ResponseExecutionSession::is_finalized)
-            && let Some(admission) = self.admission.take()
         {
-            admission.release().await;
+            drop(self.traffic.take());
+            if let Some(admission) = self.admission.take() {
+                admission.release().await;
+            }
         }
     }
 
@@ -1023,6 +1042,7 @@ impl DefaultExecutionSession {
             .get(self.observed_provider_outcomes..)
             .unwrap_or_default();
         publish_provider_attempt_outcomes(self.circuits.as_ref(), pending).await;
+        drop(self.traffic.take());
         if let Some(admission) = self.admission.take() {
             admission.release().await;
         }

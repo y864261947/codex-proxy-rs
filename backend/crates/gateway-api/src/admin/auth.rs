@@ -25,6 +25,7 @@ const ADMIN_SESSION_COOKIE_ATTRS: &str = "Path=/; Secure; HttpOnly; SameSite=Lax
 /// 所有管理 HTTP 模块从 state 消费同一个认证用例端口。
 pub trait AdminSessionState {
     fn admin_services(&self) -> &AdminServices;
+    fn traffic_monitor(&self) -> &gateway_core::engine::traffic::TrafficMonitor;
 }
 
 /// 已通过管理员会话或部署级管理 API Key 鉴权的请求。

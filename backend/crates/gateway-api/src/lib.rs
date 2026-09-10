@@ -116,6 +116,7 @@ impl ApiBundle {
 pub fn initialize(
     mut config: ApiConfig,
     execution: Arc<dyn ExecutionService>,
+    traffic: gateway_core::engine::traffic::TrafficMonitor,
     admin: AdminServices,
     probes: Vec<Arc<dyn HealthProbe>>,
     worker_health: Arc<dyn WorkerHealthSource>,
@@ -128,13 +129,14 @@ pub fn initialize(
         .map_err(|_| ApiError::Config(ApiConfigError::InvalidRequestIdHeader))?;
     let state = ApiState {
         admin,
-        openai: OpenAiService::new(execution, lifecycle),
+        openai: OpenAiService::new(execution, lifecycle, traffic.clone()),
+        traffic,
         health: HealthStatus::new(probes, worker_health),
     };
     let index = config.asset_directory.join("index.html");
     let mut router = Router::new()
         .route("/healthz", get(health::healthz))
-        .merge(openai::router::router())
+        .merge(openai::router::router(state.clone()))
         .merge(admin::router::<ApiState>())
         .fallback_service(ServeDir::new(config.asset_directory).fallback(ServeFile::new(index)));
     if !config.cors_allowed_origins.is_empty() {
@@ -208,6 +210,7 @@ pub enum ApiError {
 
 #[derive(Clone)]
 pub(crate) struct ApiState {
+    traffic: gateway_core::engine::traffic::TrafficMonitor,
     admin: AdminServices,
     openai: OpenAiService,
     health: HealthStatus,
@@ -226,6 +229,10 @@ impl ApiState {
 }
 
 impl admin::AdminSessionState for ApiState {
+    fn traffic_monitor(&self) -> &gateway_core::engine::traffic::TrafficMonitor {
+        &self.traffic
+    }
+
     fn admin_services(&self) -> &AdminServices {
         &self.admin
     }

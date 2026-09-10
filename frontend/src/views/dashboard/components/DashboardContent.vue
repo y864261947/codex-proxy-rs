@@ -5,6 +5,7 @@ import { RefreshCw } from '@lucide/vue'
 
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BasePageHeader from '@/components/base/BasePageHeader.vue'
+import RealtimeTrafficCard from '@/components/RealtimeTrafficCard.vue'
 
 import AccountOverviewCard from './AccountOverviewCard.vue'
 import DashboardHeartbeat from './DashboardHeartbeat.vue'
@@ -75,6 +76,8 @@ const trendKind = defineModel<DashboardTrendKind>('trendKind', { required: true 
         </BaseIconButton>
       </template>
     </BasePageHeader>
+
+    <RealtimeTrafficCard class="mt-6" />
 
     <section
       class="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4 2xl:gap-6"

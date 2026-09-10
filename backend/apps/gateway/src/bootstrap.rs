@@ -91,6 +91,7 @@ pub async fn run() -> Result<(), BootstrapError> {
     let api = gateway_api::initialize(
         api,
         core.execution_service(),
+        core.traffic_monitor(),
         admin.services(),
         probes,
         host.worker_health(),

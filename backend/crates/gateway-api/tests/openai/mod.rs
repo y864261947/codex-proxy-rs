@@ -82,6 +82,7 @@ async fn api_router_with_origins_and_worker_health(
             request_id_header: "x-request-id".to_owned(),
         },
         execution,
+        Default::default(),
         admin.services,
         Vec::new(),
         worker_health,

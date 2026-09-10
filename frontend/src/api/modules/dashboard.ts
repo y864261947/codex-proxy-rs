@@ -184,6 +184,25 @@ interface DashboardQuery {
   kind: string
 }
 
+export interface RealtimeTraffic {
+  observedAt: string
+  scope: 'process'
+  windowSeconds: number
+  uptimeSeconds: number
+  ingressRequestsLastMinute: number
+  inFlightRequests: number
+  preparingRequests: number
+  executingRequests: number
+}
+
+export function getRealtimeTraffic(signal?: AbortSignal) {
+  return request<RealtimeTraffic>({
+    url: '/api/admin/dashboard/realtime',
+    method: 'GET',
+    signal,
+  })
+}
+
 export function getDashboardSummary(data: DashboardQuery) {
   return request<DashboardSummaryResponse>({
     url: '/api/admin/dashboard/summary',

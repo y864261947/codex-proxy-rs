@@ -17,13 +17,25 @@ export const routes: RouteRecordRaw[] = [
       },
       {
         path: 'accounts',
-        name: 'accounts',
-        component: () => import('@/views/accounts/index.vue'),
+        redirect: '/pools/accounts',
       },
       {
         path: 'account-groups',
-        name: 'account-groups',
-        component: () => import('@/views/account-groups/index.vue'),
+        redirect: '/pools/groups',
+      },
+      {
+        path: 'pools',
+        component: () => import('@/views/pools/index.vue'),
+        children: [
+          { path: '', redirect: '/pools/accounts' },
+          { path: 'accounts', name: 'accounts', component: () => import('@/views/accounts/index.vue') },
+          { path: 'groups', name: 'account-groups', component: () => import('@/views/account-groups/index.vue') },
+        ],
+      },
+      {
+        path: 'monitoring',
+        name: 'monitoring',
+        component: () => import('@/views/monitoring/index.vue'),
       },
       {
         path: 'api-keys',
