@@ -7,11 +7,10 @@ type ApiKeyRow = Awaited<ReturnType<typeof getApiKeys>>['items'][number] & {
 
 export const apiKeyColumns = defineTableColumns<ApiKeyRow>([
   { key: 'selection', kind: 'selection' },
-  { key: 'identity', label: '名称', kind: 'identity', size: 'xl', sortable: 'name' },
+  { key: 'identity', label: '名称与客户', kind: 'identity', size: 'xl', sortable: 'name' },
   { key: 'prefix', label: '密钥前缀', kind: 'mono', size: '2xl' },
   { key: 'enabled', label: '状态', kind: 'status', sortable: true },
   { key: 'scope', label: '分组', kind: 'status' },
-  { key: 'customer', label: '客户归属', kind: 'identity', size: 'lg' },
   { key: 'createdAtDisplay', label: '创建时间', kind: 'datetime', sortable: 'createdAt' },
   {
     key: 'lastUsedAt',

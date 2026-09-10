@@ -54,4 +54,7 @@ fn unassigned_keys_keep_a_single_scope_and_scope_types_cannot_collide() {
         AdmissionScopeId::Customer(CustomerId::new("cust_same").expect("customer id")).to_string()
     );
     assert!(CustomerId::new("invalid").is_err());
+    for id in ["cust_", "cust_ ", "cust_中文", "cust_bad/slash"] {
+        assert!(CustomerId::new(id).is_err());
+    }
 }

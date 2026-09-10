@@ -13,6 +13,13 @@ impl CustomerId {
     pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
         let value = value.into();
         validate_text(&value, 128, false, Some("cust_"))?;
+        if value.len() == 5
+            || !value[5..]
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(IdentifierError::InvalidFormat);
+        }
         Ok(Self(value))
     }
 

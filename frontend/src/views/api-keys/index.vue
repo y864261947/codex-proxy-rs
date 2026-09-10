@@ -2,7 +2,6 @@
 import type { ApiKey } from '@/api'
 import { ref, watch } from 'vue'
 
-import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCard from '@/components/base/BaseCard.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import BaseConfirmModal from '@/components/base/BaseConfirmModal.vue'
@@ -154,7 +153,12 @@ watch(
               />
             </template>
             <template #identity="{ row }">
-              <ApiKeyIdentityCell :api-key="row" />
+              <div class="grid min-w-0 gap-1">
+                <ApiKeyIdentityCell :api-key="row" />
+                <button type="button" class="max-w-full truncate text-left text-cp-xs text-cp-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-cp-primary" :title="`设置 ${row.name} 的客户归属`" @click.stop="assignCustomer(row)">
+                  客户：{{ row.customer?.name || '未分配' }}{{ row.customer && !row.customer.enabled ? '（停用）' : '' }}
+                </button>
+              </div>
             </template>
             <template #prefix="{ row }">
               <ApiKeyPrefixCell
@@ -168,11 +172,6 @@ watch(
             </template>
             <template #enabled="{ row }">
               <ApiKeyStatusBadge :api-key="row" />
-            </template>
-            <template #customer="{ row }">
-              <BaseButton variant="ghost" :title="`设置 ${row.name} 的客户归属`" @click="assignCustomer(row)">
-                {{ row.customer?.name || '未分配' }}{{ row.customer && !row.customer.enabled ? '（停用）' : '' }}
-              </BaseButton>
             </template>
             <template #lastUsedAt="{ row }">
               <LastUsedAtCell :value="row.lastUsedAt" />

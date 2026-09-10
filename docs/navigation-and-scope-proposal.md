@@ -1,6 +1,6 @@
 # 功能收敛与菜单建议
 
-日期：2026-09-10。状态：讨论稿，等待用户完善；没有修改业务代码或线上服务。
+日期：2026-09-10。状态：用户已授权按此收敛方案分批开发，进度见 [实施记录](implementation-progress.md)。下文“当前代码”描述改造前基线，不代表最新实现状态。
 
 相关文档：[功能候选总表](feature-integration-candidates.md)、[模型管理候选项](model-management-candidates.md)、[渠道与号池监控](monitoring-proposal.md)。候选表用于选择，不代表全部实施。
 
