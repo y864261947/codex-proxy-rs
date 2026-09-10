@@ -58,7 +58,7 @@ fn update_body() -> Value {
 async fn global_admission_settings_require_auth_validate_limits_and_round_trip_without_cache() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
-    let router = app(fixture.state());
+    let router = gateway_api::admin::router::<AdminTestState>().with_state(fixture.state());
     let path = "/api/admin/settings/admission";
     let unauth = Request::builder()
         .uri(path)
