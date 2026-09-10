@@ -45,14 +45,17 @@ async fn customer_assignment_requires_an_explicit_binding_and_valid_customer_id(
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
     for (body, expected) in [
-        (json!({"keyId": "key_one"}), StatusCode::BAD_REQUEST),
+        (
+            json!({"keyId": "key_one"}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         (
             json!({"keyId": "key_one", "customerId": ""}),
             StatusCode::BAD_REQUEST,
         ),
         (
             json!({"keyId": "key_one", "customerId": null, "other": true}),
-            StatusCode::BAD_REQUEST,
+            StatusCode::UNPROCESSABLE_ENTITY,
         ),
         (
             json!({"keyId": "key_one", "customerId": null}),
@@ -69,6 +72,7 @@ async fn customer_assignment_requires_an_explicit_binding_and_valid_customer_id(
                 Request::builder()
                     .method("POST")
                     .uri("/api/admin/customers/assign-key")
+                    .header("x-request-id", "req_customer_assignment")
                     .header(header::COOKIE, "cpr_admin_session=valid-session")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body.to_string()))
