@@ -439,6 +439,7 @@ fn blocked_provider_should_be_filtered() {
             &RoutingContext {
                 required_provider: Some(ProviderKind::new("openai").expect("provider")),
                 blocked_providers: BTreeSet::from([ProviderKind::new("openai").expect("provider")]),
+                ..RoutingContext::default()
             },
         )
         .expect_err("blocked platform has no candidate");

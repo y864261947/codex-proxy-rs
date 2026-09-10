@@ -1687,7 +1687,6 @@ fn health_snapshot(authorized: &[&str]) -> RuntimeSnapshot {
             )
             .with_access_group(Some(AccessGroupPolicy {
                 id: AccessGroupId::new("access_health").expect("group"),
-                name: "Health tests".to_owned(),
                 enabled: true,
                 allowed_models: BTreeSet::from(["gpt-start".to_owned()]),
                 pool_group_ids: BTreeSet::new(),
@@ -1982,7 +1981,6 @@ fn pool_health_is_independent_from_other_pools_and_legacy_provider_health() {
     let snapshots =
         RuntimeSnapshotHandle::new(start_snapshot_with_access_group(Some(AccessGroupPolicy {
             id: AccessGroupId::new("access_health_pool").expect("group"),
-            name: "Pools".to_owned(),
             enabled: true,
             allowed_models: BTreeSet::from(["gpt-start".to_owned()]),
             pool_group_ids: pools.iter().cloned().collect(),
