@@ -422,8 +422,8 @@ fn access_groups_freeze_explicit_pools_without_expanding_empty_or_legacy_permiss
             SnapshotProviderAccountFacts::new(account_b.clone(), "alpha"),
         ],
         vec![
-            SnapshotAccountGroupMemberFacts::new(first, account_a.clone()),
-            SnapshotAccountGroupMemberFacts::new(second, account_b.clone()),
+            SnapshotAccountGroupMemberFacts::new(first.clone(), account_a.clone()),
+            SnapshotAccountGroupMemberFacts::new(second.clone(), account_b.clone()),
         ],
     );
     let providers =
@@ -434,6 +434,13 @@ fn access_groups_freeze_explicit_pools_without_expanding_empty_or_legacy_permiss
             .compile(),
     )
     .expect("snapshot");
+    for (id, name) in [(first, "First"), (second, "Second")] {
+        let source = snapshot
+            .source_policy(&gateway_core::routing::source::SourceId::AccountPool(id))
+            .expect("compiled pool");
+        assert!(source.enabled());
+        assert_eq!(source.snapshot().name(), Some(name));
+    }
     let policies = snapshot
         .client_policies()
         .map(|policy| (policy.key_id().as_str(), policy))

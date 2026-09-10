@@ -641,6 +641,244 @@ fn model_request(operation: &Operation, deadline: SystemTime) -> NewModelRequest
     }
 }
 
+fn pool_source(index: u8) -> gateway_core::routing::source::SourceId {
+    gateway_core::routing::source::SourceId::AccountPool(
+        gateway_core::routing::AccountGroupId::new(format!("grp_{index:032x}")).expect("pool"),
+    )
+}
+
+fn pool_plan(operation: &Operation) -> RoutingPlan {
+    use gateway_core::policy::RateLimits;
+    use gateway_core::routing::{
+        SourceRoutingTarget,
+        source::{AllowedSources, SourceId, SourcePolicy, SourcePreference},
+    };
+    let provider = ProviderKind::new("openai").expect("provider");
+    let sources = [pool_source(1), pool_source(2)];
+    let pools = sources
+        .iter()
+        .map(|source| match source {
+            SourceId::AccountPool(pool) => pool.clone(),
+            SourceId::Channel(_) => unreachable!("pool fixture"),
+        })
+        .collect::<Vec<_>>();
+    let directory = Arc::new(RuntimeAccountDirectory::new(
+        [
+            ("acct_one", BTreeSet::from([pools[0].clone()])),
+            ("acct_two", BTreeSet::from([pools[1].clone()])),
+            ("acct_shared", pools.into_iter().collect()),
+        ]
+        .into_iter()
+        .map(|(id, groups)| {
+            (
+                ProviderAccountId::new(id).expect("account"),
+                RuntimeAccount::new(provider.clone(), groups),
+            )
+        })
+        .collect(),
+    ));
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        AccountSelectionPolicy::new(
+            RotationStrategy::Smart,
+            NonZeroU32::new(2).expect("concurrency"),
+            Duration::from_millis(50),
+        ),
+        vec![provider.clone()],
+        vec![ProviderModel::new(
+            provider,
+            UpstreamModelId::new("gpt-5").expect("model"),
+            ModelCapabilities::new(BTreeSet::from([operation.kind()]), Some(32_000))
+                .with_upstream_feature_validation(),
+        )],
+        Vec::new(),
+    )
+    .expect("snapshot")
+    .with_account_directory(directory)
+    .with_source_policies(
+        sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                SourcePolicy::new(
+                    source.clone(),
+                    true,
+                    SourcePreference::new(u16::try_from(index + 1).expect("priority"), 1)
+                        .expect("preference"),
+                    RateLimits::unlimited(),
+                    None,
+                )
+                .expect("source")
+                .with_name(format!("Pool {}", index + 1))
+                .expect("name")
+            })
+            .collect(),
+    )
+    .expect("policies");
+    snapshot
+        .plan_sources(
+            SourceRoutingTarget::Model(&PublicModelId::new("gpt-5").expect("model")),
+            operation,
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+            &AllowedSources::new(sources),
+            0,
+        )
+        .expect("pool routing")
+}
+
+#[test]
+fn pool_execution_freezes_selected_scope_and_continuation_source() {
+    for pinned in [false, true] {
+        let operation = generate_operation();
+        let route_plan = pool_plan(&operation);
+        let selected = pool_source(if pinned { 2 } else { 1 });
+        let continuation = pinned.then(|| {
+            ContinuationBinding::Pinned(
+                NativeContinuationPin::new(
+                    PreviousResponseId::new("previous"),
+                    PreviousResponseId::new("upstream"),
+                    ClientApiKeyId::new("key_client_1").expect("key"),
+                    ProviderKind::new("openai").expect("provider"),
+                    ProviderAccountId::new("acct_shared").expect("account"),
+                )
+                .with_source(selected.clone()),
+            )
+        });
+        let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_shared",
+            items: complete_stream(None),
+        }]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            continuation,
+            CancellationToken::new(),
+        ))
+        .expect("start");
+        block_on(session.collect_uncommitted()).expect("result");
+        let pin = session
+            .native_continuation_pin(
+                &ProviderSessionState::new("openai", Map::new()).expect("state"),
+            )
+            .expect("pin");
+        assert_eq!(pin.source(), Some(&selected));
+        block_on(session.commit_downstream(Some(200))).expect("commit");
+        let contexts = provider.contexts.lock().expect("contexts");
+        assert_eq!(contexts.len(), 1);
+        let scope = contexts[0].account_scope().expect("selected account scope");
+        assert_eq!(
+            scope.allows(&ProviderAccountId::new("acct_one").expect("one")),
+            !pinned
+        );
+        assert_eq!(
+            scope.allows(&ProviderAccountId::new("acct_two").expect("two")),
+            pinned
+        );
+        assert!(scope.allows(&ProviderAccountId::new("acct_shared").expect("shared")));
+        assert_eq!(
+            store.state.lock().expect("state").attempts[0]
+                .source
+                .as_ref()
+                .map(|source| source.id()),
+            Some(&selected)
+        );
+    }
+}
+
+#[test]
+fn native_replay_cannot_advance_to_another_pool_when_original_pool_is_exhausted() {
+    let Operation::Generate(generate) = generate_operation() else {
+        panic!("generate")
+    };
+    let operation = Operation::Generate(generate.with_provider_session_state(
+        ProviderSessionState::new("openai", Map::new()).expect("state"),
+    ));
+    let route_plan = pool_plan(&operation);
+    let continuation = NativeContinuationPin::new(
+        PreviousResponseId::new("previous"),
+        PreviousResponseId::new("upstream"),
+        ClientApiKeyId::new("key_client_1").expect("key"),
+        ProviderKind::new("openai").expect("provider"),
+        ProviderAccountId::new("acct_shared").expect("account"),
+    )
+    .with_source(pool_source(1));
+    let (coordinator, _, provider) = coordinator(vec![
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        )),
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        )),
+        Script::Stream {
+            account_id: "acct_two",
+            items: complete_stream(None),
+        },
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        Some(ContinuationBinding::Pinned(continuation)),
+        CancellationToken::new(),
+    ))
+    .expect("start");
+    assert!(block_on(session.collect_uncommitted()).is_err());
+    let contexts = provider.contexts.lock().expect("contexts");
+    assert_eq!(
+        contexts.len(),
+        2,
+        "must not call another pool with the native transcript"
+    );
+    assert_eq!(
+        contexts[1].continuation_attempt(),
+        ContinuationAttempt::ReplayAny
+    );
+    assert!(contexts.iter().all(|context| {
+        !context
+            .account_scope()
+            .expect("scope")
+            .allows(&ProviderAccountId::new("acct_two").expect("outside original pool"))
+    }));
+}
+
+#[test]
+fn native_pin_rejects_unavailable_source_and_account_outside_its_source() {
+    for (source, account) in [
+        (pool_source(3), "acct_shared"),
+        (pool_source(2), "acct_one"),
+    ] {
+        let operation = generate_operation();
+        let route_plan = pool_plan(&operation);
+        let pin = NativeContinuationPin::new(
+            PreviousResponseId::new("previous"),
+            PreviousResponseId::new("upstream"),
+            ClientApiKeyId::new("key_client_1").expect("key"),
+            ProviderKind::new("openai").expect("provider"),
+            ProviderAccountId::new(account).expect("account"),
+        )
+        .with_source(source);
+        let (coordinator, _, provider) = coordinator(Vec::new());
+        let error = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            Some(ContinuationBinding::Pinned(pin)),
+            CancellationToken::new(),
+        ))
+        .err()
+        .expect("pin mismatch");
+        assert!(matches!(error, EngineError::ContinuationPinMismatch));
+        assert!(provider.contexts.lock().expect("contexts").is_empty());
+    }
+}
+
 fn coordinator(
     scripts: Vec<Script>,
 ) -> (

@@ -206,3 +206,41 @@ impl AllowedSources {
         self.0.iter()
     }
 }
+
+/// 在同级来源内按权重产生请求冻结的无重复尝试顺序；低数值优先级先用。
+pub(crate) fn selection_order(
+    mut sources: Vec<(SourceId, SourcePreference)>,
+    mut seed: u64,
+) -> Vec<SourceId> {
+    sources.sort_by_key(|(_, preference)| preference.priority());
+    let mut ordered = Vec::with_capacity(sources.len());
+    while let Some((_, first)) = sources.first() {
+        let priority = first.priority();
+        let count = sources
+            .iter()
+            .take_while(|(_, preference)| preference.priority() == priority)
+            .count();
+        let total: u64 = sources[..count]
+            .iter()
+            .map(|(_, preference)| u64::from(preference.weight()))
+            .sum();
+        // SplitMix64 仅用于调度分布，不承担凭据或安全随机数职责。
+        seed = seed.wrapping_add(0x9e3779b97f4a7c15);
+        let mut random = seed;
+        random = (random ^ (random >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+        random = (random ^ (random >> 27)).wrapping_mul(0x94d049bb133111eb);
+        random ^= random >> 31;
+        let mut ticket = random % total;
+        let mut selected = 0;
+        for (index, (_, preference)) in sources[..count].iter().enumerate() {
+            let weight = u64::from(preference.weight());
+            if ticket < weight {
+                selected = index;
+                break;
+            }
+            ticket -= weight;
+        }
+        ordered.push(sources.remove(selected).0);
+    }
+    ordered
+}

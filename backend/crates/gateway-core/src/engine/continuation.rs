@@ -11,6 +11,7 @@ use crate::account::ProviderAccountId;
 use crate::identity::ProviderKind;
 use crate::operation::ProviderSessionState;
 use crate::policy::ClientApiKeyId;
+use crate::routing::source::SourceId;
 
 /// 客户端或 Provider 传递的 opaque response handle。
 ///
@@ -60,6 +61,7 @@ pub struct NativeContinuationPin {
     client_api_key_id: ClientApiKeyId,
     provider: ProviderKind,
     account: ProviderAccountId,
+    source: Option<SourceId>,
     scope: NativeContinuationScope,
     session_state: Option<ProviderSessionState>,
 }
@@ -79,6 +81,7 @@ impl NativeContinuationPin {
             client_api_key_id,
             provider,
             account,
+            source: None,
             scope: NativeContinuationScope::ConnectionLocal,
             session_state: None,
         }
@@ -89,6 +92,25 @@ impl NativeContinuationPin {
     pub const fn with_scope(mut self, scope: NativeContinuationScope) -> Self {
         self.scope = scope;
         self
+    }
+
+    /// 冻结产生该会话的来源；旧记录没有来源时保留原有账号绑定语义。
+    #[must_use]
+    pub fn with_source(mut self, source: SourceId) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> Option<&SourceId> {
+        self.source.as_ref()
+    }
+
+    #[must_use]
+    pub fn matches_source(&self, source: Option<&SourceId>) -> bool {
+        self.source
+            .as_ref()
+            .is_none_or(|expected| Some(expected) == source)
     }
 
     /// 附着仅由对应 Provider 解释的不透明会话状态。
@@ -156,6 +178,7 @@ impl fmt::Debug for NativeContinuationPin {
             .field("client_api_key_id", &self.client_api_key_id)
             .field("provider", &self.provider)
             .field("account", &self.account)
+            .field("source", &self.source)
             .field("scope", &self.scope)
             .field(
                 "session_state",

@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::future::BoxFuture;
 use gateway_core::account::ProviderAccountId;
+use gateway_core::account::scope::AccountGroupId;
 use gateway_core::engine::continuation::{
     NativeContinuationPin, NativeContinuationPort, NativeContinuationScope,
     NativeContinuationStoreError, PreviousResponseId,
@@ -16,6 +17,7 @@ use gateway_core::engine::continuation::{
 use gateway_core::operation::ProviderSessionState;
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::routing::ProviderKind;
+use gateway_core::routing::source::SourceId;
 use redis::aio::ConnectionManager;
 use serde::{Deserialize, Serialize};
 
@@ -80,6 +82,8 @@ struct ContinuationWire {
     upstream_response_id: String,
     provider: String,
     account: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pool_id: Option<String>,
     scope: String,
     #[serde(default)]
     session_state: Option<ProviderSessionState>,
@@ -193,6 +197,15 @@ impl NativeContinuationPort for RedisNativeContinuationRepository {
 }
 
 fn encode_pin(pin: &NativeContinuationPin) -> Result<String, NativeContinuationStoreError> {
+    let pool_id = match pin.source() {
+        None => None,
+        Some(SourceId::AccountPool(pool)) => Some(pool.as_str().to_owned()),
+        Some(SourceId::Channel(_)) => {
+            return Err(NativeContinuationStoreError::invalid_data(
+                "account continuation cannot be bound to a channel",
+            ));
+        }
+    };
     if pin
         .session_state()
         .is_some_and(|state| state.provider() != pin.provider().as_str())
@@ -206,6 +219,7 @@ fn encode_pin(pin: &NativeContinuationPin) -> Result<String, NativeContinuationS
         upstream_response_id: pin.upstream_response_id().as_str().to_owned(),
         provider: pin.provider().as_str().to_owned(),
         account: pin.account().as_str().to_owned(),
+        pool_id,
         scope: scope_name(pin.scope()).to_owned(),
         session_state: pin.session_state().cloned(),
     })
@@ -245,6 +259,12 @@ fn decode_pin(
         account,
     )
     .with_scope(scope);
+    if let Some(pool) = wire.pool_id {
+        let pool = AccountGroupId::new(pool).map_err(|_| {
+            NativeContinuationStoreError::invalid_data("pin payload contains an invalid pool id")
+        })?;
+        pin = pin.with_source(SourceId::AccountPool(pool));
+    }
     if let Some(state) = wire.session_state {
         if state.provider() != provider.as_str() {
             return Err(NativeContinuationStoreError::invalid_data(

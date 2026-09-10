@@ -400,21 +400,51 @@ impl DefaultExecutionService {
             .route_context(request.client.policy.account_scope().provider_kinds())
             .await?;
         let account_scope = Arc::clone(request.client.policy.account_scope());
-        let plan = match &request.target {
-            ExecutionTarget::ProviderEndpoint(provider) => {
-                request.client.snapshot.plan_provider_endpoint(
-                    provider,
-                    &request.operation,
-                    account_scope,
-                    &routing_context,
-                )
-            }
-            ExecutionTarget::Model(public_model) => request.client.snapshot.plan(
-                public_model,
+        let plan = if let Some(group) = request.client.policy.access_group() {
+            let allowed = crate::routing::source::AllowedSources::new(
+                group
+                    .pool_group_ids
+                    .iter()
+                    .cloned()
+                    .map(crate::routing::source::SourceId::AccountPool),
+            );
+            let target = match &request.target {
+                ExecutionTarget::Model(model) => crate::routing::SourceRoutingTarget::Model(model),
+                ExecutionTarget::ProviderEndpoint(provider) => {
+                    crate::routing::SourceRoutingTarget::ProviderEndpoint(provider)
+                }
+            };
+            let seed = request_id
+                .as_str()
+                .bytes()
+                .fold(0xcbf29ce484222325_u64, |seed, byte| {
+                    (seed ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+                });
+            request.client.snapshot.plan_sources(
+                target,
                 &request.operation,
                 account_scope,
                 &routing_context,
-            ),
+                &allowed,
+                seed,
+            )
+        } else {
+            match &request.target {
+                ExecutionTarget::ProviderEndpoint(provider) => {
+                    request.client.snapshot.plan_provider_endpoint(
+                        provider,
+                        &request.operation,
+                        account_scope,
+                        &routing_context,
+                    )
+                }
+                ExecutionTarget::Model(public_model) => request.client.snapshot.plan(
+                    public_model,
+                    &request.operation,
+                    account_scope,
+                    &routing_context,
+                ),
+            }
         }
         .map_err(map_routing_error)?;
         let continuation = match request.metadata.previous_response_id.as_ref() {
@@ -475,14 +505,15 @@ impl DefaultExecutionService {
                         ));
                     }
                     Some(pin)
-                        if !plan
-                            .candidates()
-                            .iter()
-                            .any(|candidate| candidate.provider() == pin.provider()) =>
+                        if !plan.candidates().iter().any(|candidate| {
+                            candidate.provider() == pin.provider()
+                                && pin.matches_source(candidate.source())
+                                && candidate.account_scope().allows(pin.account())
+                        }) =>
                     {
                         return Err(GatewayError::new(
                             GatewayErrorKind::NoAvailableProvider,
-                            "continuation provider is not available",
+                            "continuation source is not available",
                         ));
                     }
                     Some(pin) => {

@@ -47,6 +47,23 @@ fn native_pin_should_reject_different_account() {
 }
 
 #[test]
+fn native_pin_source_is_strict_when_present_and_legacy_records_keep_account_semantics() {
+    use gateway_core::routing::{AccountGroupId, source::SourceId};
+    let first = SourceId::AccountPool(
+        AccountGroupId::new("grp_11111111111111111111111111111111").expect("pool"),
+    );
+    let second = SourceId::AccountPool(
+        AccountGroupId::new("grp_22222222222222222222222222222222").expect("pool"),
+    );
+    assert!(pin().matches_source(None));
+    assert!(pin().matches_source(Some(&first)));
+    let pinned = pin().with_source(first.clone());
+    assert!(pinned.matches_source(Some(&first)));
+    assert!(!pinned.matches_source(Some(&second)));
+    assert!(!pinned.matches_source(None));
+}
+
+#[test]
 fn native_pin_should_reject_different_client_api_key() {
     assert!(!pin().matches_client(&ClientApiKeyId::new("key_other").expect("valid client key")));
 }

@@ -1075,7 +1075,47 @@ fn start_snapshot_with_limits(
     group: Option<gateway_core::policy::AccessGroupPolicy>,
     global_limits: RateLimits,
 ) -> RuntimeSnapshot {
+    use gateway_core::routing::{
+        RoutingGroupSnapshot,
+        source::{SourceId, SourcePolicy, SourcePreference},
+    };
     let provider = ProviderKind::new("openai").expect("provider kind");
+    let pools = group
+        .as_ref()
+        .map(|group| group.pool_group_ids.clone())
+        .unwrap_or_default();
+    let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
+        ProviderAccountId::new("acct_start").expect("account"),
+        RuntimeAccount::new(provider.clone(), pools.clone()),
+    )])));
+    let scope = match &group {
+        None => ClientRoutingScope::all_accounts(),
+        Some(_) if pools.is_empty() => ClientRoutingScope::no_accounts(),
+        Some(_) => ClientRoutingScope::restricted(
+            pools
+                .iter()
+                .map(|id| RoutingGroupSnapshot::new(id.clone(), "Test pool".to_owned()))
+                .collect(),
+            pools.clone(),
+            BTreeSet::from([provider.clone()]),
+        )
+        .expect("restricted pool scope"),
+    };
+    let source_policies = pools
+        .into_iter()
+        .map(|id| {
+            SourcePolicy::new(
+                SourceId::AccountPool(id),
+                true,
+                SourcePreference::default(),
+                RateLimits::unlimited(),
+                None,
+            )
+            .expect("source")
+            .with_name("Test pool".to_owned())
+            .expect("name")
+        })
+        .collect();
     let capabilities =
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
@@ -1095,7 +1135,7 @@ fn start_snapshot_with_limits(
             ClientPolicy::new(
                 ClientApiKeyId::new("key_start_test").expect("client API key ID"),
                 PlaintextClientApiKey::new("sk_start_test").expect("plaintext client API key"),
-                account_scope(&provider, "acct_start"),
+                Arc::new(FrozenAccountScope::new(Arc::clone(&directory), scope)),
                 true,
                 RateLimits::unlimited(),
             )
@@ -1104,6 +1144,9 @@ fn start_snapshot_with_limits(
         ],
     )
     .expect("start snapshot")
+    .with_account_directory(directory)
+    .with_source_policies(source_policies)
+    .expect("source policies")
 }
 
 #[test]
@@ -1114,7 +1157,10 @@ fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoin
         enabled: true,
         limits: RateLimits::unlimited(),
         allowed_models: BTreeSet::from(["public-alias".to_owned()]),
-        pool_group_ids: BTreeSet::new(),
+        pool_group_ids: BTreeSet::from([gateway_core::routing::AccountGroupId::new(
+            "grp_11111111111111111111111111111111",
+        )
+        .expect("pool")]),
     }))
     .with_model_mappings(BTreeMap::from([(
         "public-alias".to_owned(),

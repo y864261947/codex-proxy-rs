@@ -258,6 +258,36 @@ pub struct FrozenAccountScope {
 }
 
 impl FrozenAccountScope {
+    /// 本次来源选择只能缩小既有权限，不能借号池绑定扩大账号集合。
+    #[must_use]
+    pub fn within_group(&self, group: RoutingGroupSnapshot) -> Self {
+        let allowed = match &self.client_scope {
+            ClientRoutingScope::AllAccounts => true,
+            ClientRoutingScope::Restricted {
+                enabled_group_ids, ..
+            } => enabled_group_ids.contains(group.id()),
+        };
+        let enabled_group_ids = if allowed {
+            BTreeSet::from([group.id().clone()])
+        } else {
+            BTreeSet::new()
+        };
+        let provider_kinds = self
+            .directory
+            .providers_for_groups(&enabled_group_ids)
+            .intersection(self.provider_kinds())
+            .cloned()
+            .collect();
+        Self {
+            directory: Arc::clone(&self.directory),
+            client_scope: ClientRoutingScope::Restricted {
+                bound_groups: Arc::from([group]),
+                enabled_group_ids: Arc::new(enabled_group_ids),
+                provider_kinds: Arc::new(provider_kinds),
+            },
+        }
+    }
+
     #[must_use]
     pub const fn new(
         directory: Arc<RuntimeAccountDirectory>,
@@ -277,11 +307,16 @@ impl FrozenAccountScope {
         match &self.client_scope {
             ClientRoutingScope::AllAccounts => true,
             ClientRoutingScope::Restricted {
-                enabled_group_ids, ..
-            } => account
-                .group_ids()
-                .iter()
-                .any(|group_id| enabled_group_ids.contains(group_id)),
+                enabled_group_ids,
+                provider_kinds,
+                ..
+            } => {
+                provider_kinds.contains(account.provider_kind())
+                    && account
+                        .group_ids()
+                        .iter()
+                        .any(|group_id| enabled_group_ids.contains(group_id))
+            }
         }
     }
 

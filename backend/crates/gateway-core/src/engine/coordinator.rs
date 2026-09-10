@@ -144,7 +144,12 @@ where
             .map_or(Ok(0), |pin| {
                 plan.candidates()
                     .iter()
-                    .position(|candidate| candidate.provider() == pin.provider())
+                    .position(|candidate| {
+                        candidate.provider() == pin.provider()
+                            && pin.matches_source(candidate.source())
+                            && (account_selection.is_diagnostic()
+                                || candidate.account_scope().allows(pin.account()))
+                    })
                     .ok_or(EngineError::ContinuationPinMismatch)
             })?;
         let trace = TraceContext::new(request_id.as_str());
@@ -520,17 +525,19 @@ where
         let response_id = self.observation.upstream_response_id.as_deref()?;
         let previous_response_id = PreviousResponseId::new(response_id.to_owned());
         let upstream_response_id = PreviousResponseId::new(response_id.to_owned());
-        Some(
-            NativeContinuationPin::new(
-                previous_response_id,
-                upstream_response_id,
-                self.client_api_key_ref.clone(),
-                provider,
-                account,
-            )
-            .with_scope(NativeContinuationScope::Persisted)
-            .with_session_state(state.clone()),
+        let mut pin = NativeContinuationPin::new(
+            previous_response_id,
+            upstream_response_id,
+            self.client_api_key_ref.clone(),
+            provider,
+            account,
         )
+        .with_scope(NativeContinuationScope::Persisted)
+        .with_session_state(state.clone());
+        if let Some(source) = &current.source {
+            pin = pin.with_source(source.id().clone());
+        }
+        Some(pin)
     }
 
     /// 请求取消；实际终态在下一次会话 poll 时由 Core 持久化。
@@ -705,7 +712,7 @@ where
                 pinned_account.clone(),
                 self.account_state_owner.clone(),
             )
-            .with_account_scope(Arc::clone(self.plan.account_scope())),
+            .with_account_scope(Arc::clone(candidate.account_scope())),
         }
         .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
             self.credential_recovery_attempted_accounts
@@ -901,9 +908,10 @@ where
             .as_ref()
             .and_then(ContinuationBinding::pinned)
             && self.continuation_attempt == ContinuationAttempt::Native
-            && metadata
-                .provider_account_id()
-                .is_none_or(|account| !pin.matches(metadata.provider(), account))
+            && (!pin.matches_source(candidate.source())
+                || metadata
+                    .provider_account_id()
+                    .is_none_or(|account| !pin.matches(metadata.provider(), account)))
         {
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -993,9 +1001,19 @@ where
         let Some(next) = self.candidate_index.checked_add(1) else {
             return false;
         };
-        if next >= self.plan.candidates().len() {
+        let pinned_source = self
+            .continuation
+            .as_ref()
+            .and_then(ContinuationBinding::pinned)
+            .filter(|pin| pin.source().is_some());
+        let Some(next) = (next..self.plan.candidates().len()).find(|index| {
+            let candidate = &self.plan.candidates()[*index];
+            pinned_source.is_none_or(|pin| {
+                pin.provider() == candidate.provider() && pin.matches_source(candidate.source())
+            })
+        }) else {
             return false;
-        }
+        };
         self.candidate_index = next;
         true
     }

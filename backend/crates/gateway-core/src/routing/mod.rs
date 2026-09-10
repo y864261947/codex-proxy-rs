@@ -494,6 +494,13 @@ pub struct RoutingContext {
     pub blocked_providers: BTreeSet<ProviderKind>,
 }
 
+/// 统一来源计划仍保留模型端点与 Provider 自有端点的能力边界。
+#[derive(Debug, Clone, Copy)]
+pub enum SourceRoutingTarget<'a> {
+    Model(&'a PublicModelId),
+    ProviderEndpoint(&'a ProviderKind),
+}
+
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {

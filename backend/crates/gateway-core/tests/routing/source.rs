@@ -24,6 +24,214 @@ fn channel_access(ids: &[&str]) -> AllowedSources {
 }
 
 #[test]
+fn pool_source_plans_intersect_account_and_provider_permissions() {
+    use gateway_core::account::ProviderAccountId;
+    use gateway_core::routing::{
+        ClientRoutingScope, FrozenAccountScope, ProviderKind, PublicModelId, RoutingContext,
+        RoutingGroupSnapshot, RuntimeAccount, RuntimeAccountDirectory, SourceRoutingTarget,
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
+    let a = AccountGroupId::new("grp_11111111111111111111111111111111").expect("pool A");
+    let b = AccountGroupId::new("grp_22222222222222222222222222222222").expect("pool B");
+    let provider = ProviderKind::new("openai").expect("provider");
+    let account_a = ProviderAccountId::new("acct_pool_a").expect("account A");
+    let account_b = ProviderAccountId::new("acct_pool_b").expect("account B");
+    let other_provider = ProviderAccountId::new("acct_other_provider").expect("account");
+    let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([
+        (
+            account_a.clone(),
+            RuntimeAccount::new(provider.clone(), BTreeSet::from([a.clone()])),
+        ),
+        (
+            account_b.clone(),
+            RuntimeAccount::new(provider.clone(), BTreeSet::from([b.clone()])),
+        ),
+        (
+            other_provider.clone(),
+            RuntimeAccount::new(
+                ProviderKind::new("xai").expect("xai"),
+                BTreeSet::from([a.clone()]),
+            ),
+        ),
+    ])));
+    let scope = Arc::new(FrozenAccountScope::new(
+        Arc::clone(&directory),
+        ClientRoutingScope::restricted(
+            vec![RoutingGroupSnapshot::new(a.clone(), "Pool A".to_owned())],
+            BTreeSet::from([a.clone()]),
+            BTreeSet::from([provider.clone()]),
+        )
+        .expect("restricted"),
+    ));
+    let snapshot = super::snapshot()
+        .with_account_directory(Arc::clone(&directory))
+        .with_source_policies(vec![
+            SourcePolicy::new(
+                SourceId::AccountPool(a.clone()),
+                true,
+                SourcePreference::default(),
+                RateLimits::unlimited(),
+                None,
+            )
+            .expect("A")
+            .with_name("Pool A".to_owned())
+            .expect("name"),
+            SourcePolicy::new(
+                SourceId::AccountPool(b.clone()),
+                true,
+                SourcePreference::default(),
+                RateLimits::unlimited(),
+                None,
+            )
+            .expect("B"),
+        ])
+        .expect("sources");
+    // Even an overly broad source set cannot expand the independently frozen account scope.
+    let allowed = AllowedSources::new([
+        SourceId::AccountPool(a.clone()),
+        SourceId::AccountPool(b.clone()),
+    ]);
+    let model = PublicModelId::new("gpt-5.5").expect("model");
+    for target in [
+        SourceRoutingTarget::Model(&model),
+        SourceRoutingTarget::ProviderEndpoint(&provider),
+    ] {
+        let plan = snapshot
+            .plan_sources(
+                target,
+                &super::operation(),
+                Arc::clone(&scope),
+                &RoutingContext::default(),
+                &allowed,
+                42,
+            )
+            .expect("pool plan");
+        assert_eq!(plan.candidates().len(), 1);
+        let candidate = &plan.candidates()[0];
+        assert_eq!(candidate.source(), Some(&SourceId::AccountPool(a.clone())));
+        assert_eq!(
+            candidate.source_snapshot().and_then(|source| source.name()),
+            Some("Pool A")
+        );
+        assert!(candidate.account_scope().allows(&account_a));
+        assert!(!candidate.account_scope().allows(&account_b));
+        assert!(!candidate.account_scope().allows(&other_provider));
+        assert_eq!(
+            candidate.account_scope().provider_kinds(),
+            &BTreeSet::from([provider.clone()])
+        );
+    }
+    for denied in [
+        Arc::new(FrozenAccountScope::new(
+            Arc::clone(&directory),
+            ClientRoutingScope::no_accounts(),
+        )),
+        Arc::new(scope.within_group(RoutingGroupSnapshot::new(b, "Unapproved".to_owned()))),
+    ] {
+        assert!(
+            snapshot
+                .plan_sources(
+                    SourceRoutingTarget::Model(&model),
+                    &super::operation(),
+                    denied,
+                    &RoutingContext::default(),
+                    &allowed,
+                    0
+                )
+                .is_err()
+        );
+    }
+    assert!(
+        snapshot
+            .plan_sources(
+                SourceRoutingTarget::Model(&model),
+                &super::operation(),
+                scope,
+                &RoutingContext::default(),
+                &AllowedSources::default(),
+                0
+            )
+            .is_err()
+    );
+}
+
+#[test]
+fn source_priority_precedes_weight_and_order_is_frozen_without_duplicates() {
+    use gateway_core::routing::{
+        ConfigRevision, ProviderKind, PublicModelId, RoutingContext, RuntimeSnapshot,
+        SourceRoutingTarget,
+    };
+    let ids = ["chan_one", "chan_three", "chan_fallback"];
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        super::scheduling(),
+        vec![ProviderKind::new("openai").expect("provider")],
+        ids.iter()
+            .map(|id| {
+                super::model("openai", "gpt-5.5", super::capabilities())
+                    .with_channel(ChannelId::new(*id).expect("channel"))
+            })
+            .collect(),
+        Vec::new(),
+    )
+    .expect("snapshot")
+    .with_source_policies(
+        ids.iter()
+            .zip([(1, 1), (1, 3), (2, 1000)])
+            .map(|(id, (priority, weight))| {
+                SourcePolicy::new(
+                    SourceId::Channel(ChannelId::new(*id).expect("channel")),
+                    true,
+                    SourcePreference::new(priority, weight).expect("preference"),
+                    RateLimits::unlimited(),
+                    None,
+                )
+                .expect("policy")
+            })
+            .collect(),
+    )
+    .expect("policies");
+    let access = channel_access(&ids);
+    let model = PublicModelId::new("gpt-5.5").expect("model");
+    let order = |seed| {
+        snapshot
+            .plan_sources(
+                SourceRoutingTarget::Model(&model),
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &RoutingContext::default(),
+                &access,
+                seed,
+            )
+            .expect("plan")
+            .candidates()
+            .iter()
+            .map(|candidate| candidate.source().expect("source").reference().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let mut first_count = 0;
+    for seed in 0..1_000 {
+        let chosen = order(seed);
+        assert_eq!(chosen.len(), 3);
+        assert_eq!(chosen[2], "chan_fallback");
+        assert_ne!(chosen[0], chosen[1]);
+        assert_eq!(
+            chosen,
+            order(seed),
+            "same request seed freezes the attempt order"
+        );
+        first_count += usize::from(chosen[0] == "chan_one");
+    }
+    assert!(
+        (200..=300).contains(&first_count),
+        "1:3 weighting was not observed: {first_count}"
+    );
+}
+
+#[test]
 fn source_name_snapshot_and_explicit_no_account_history_survive_later_configuration_changes() {
     use gateway_core::account::scope::{
         AccountRoutingScopeKind, ClientRoutingScope, FrozenAccountScope,

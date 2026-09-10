@@ -446,6 +446,20 @@ async fn compile_runtime_snapshot(
         );
     }
 
+    let source_policies = groups
+        .values()
+        .map(|group| {
+            super::source::SourcePolicy::new(
+                super::source::SourceId::AccountPool(group.id.clone()),
+                group.enabled,
+                super::source::SourcePreference::default(),
+                crate::policy::RateLimits::unlimited(),
+                None,
+            )
+            .and_then(|policy| policy.with_name(group.name.clone()))
+            .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     RuntimeSnapshot::new(
         facts.config_revision,
         selection_policy,
@@ -453,6 +467,7 @@ async fn compile_runtime_snapshot(
         provider_models,
         client_policies,
     )
+    .and_then(|snapshot| snapshot.with_source_policies(source_policies))
     .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
     .map(|snapshot| {
         snapshot
@@ -623,6 +638,105 @@ impl RuntimeSnapshot {
         source: &super::source::SourceId,
     ) -> Option<&super::source::SourcePolicy> {
         self.source_policies.get(source)
+    }
+
+    /// 接入分组选定来源后，号池候选使用该池与请求权限的交集。
+    pub fn plan_sources(
+        &self,
+        target: super::SourceRoutingTarget<'_>,
+        operation: &Operation,
+        account_scope: Arc<FrozenAccountScope>,
+        context: &RoutingContext,
+        allowed: &super::source::AllowedSources,
+        seed: u64,
+    ) -> Result<RoutingPlan, RoutingError> {
+        let order = super::source::selection_order(
+            allowed
+                .iter()
+                .filter_map(|source| {
+                    self.source_policy(source)
+                        .filter(|policy| policy.enabled())
+                        .map(|policy| (source.clone(), policy.effective_preference(None)))
+                })
+                .collect(),
+            seed,
+        );
+        let mut candidates = Vec::new();
+        for source in order {
+            let policy = self
+                .source_policy(&source)
+                .expect("ordered source belongs to this immutable snapshot");
+            let plan = match &source {
+                super::source::SourceId::AccountPool(group) => {
+                    let scope = Arc::new(
+                        account_scope.within_group(RoutingGroupSnapshot::new(
+                            group.clone(),
+                            policy
+                                .snapshot()
+                                .name()
+                                .unwrap_or(group.as_str())
+                                .to_owned(),
+                        )),
+                    );
+                    if scope.provider_kinds().is_empty() {
+                        continue;
+                    }
+                    match target {
+                        super::SourceRoutingTarget::Model(model) => {
+                            self.plan(model, operation, scope, context)
+                        }
+                        super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                            self.plan_provider_endpoint(provider, operation, scope, context)
+                        }
+                    }
+                }
+                super::source::SourceId::Channel(_) => match target {
+                    super::SourceRoutingTarget::Model(model) => self.plan_channels(
+                        model,
+                        operation,
+                        Arc::clone(&account_scope),
+                        context,
+                        &super::source::AllowedSources::new([source.clone()]),
+                    ),
+                    super::SourceRoutingTarget::ProviderEndpoint(_) => continue,
+                },
+            };
+            match plan {
+                Ok(plan) => {
+                    candidates.extend(plan.candidates().iter().cloned().map(|mut candidate| {
+                        candidate.source = Some(policy.snapshot());
+                        candidate
+                    }))
+                }
+                Err(
+                    RoutingError::EmptyAccountScope
+                    | RoutingError::NoCapableProvider { .. }
+                    | RoutingError::NoCapableProviderEndpoint { .. },
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if candidates.is_empty() {
+            return Err(match target {
+                super::SourceRoutingTarget::Model(model) => RoutingError::NoCapableProvider {
+                    model: model.to_string(),
+                },
+                super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                    RoutingError::NoCapableProviderEndpoint {
+                        provider: provider.to_string(),
+                    }
+                }
+            });
+        }
+        Ok(RoutingPlan {
+            config_revision: self.revision,
+            account_selection_policy: self.account_selection_policy,
+            operation: operation.kind(),
+            max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
+                .expect("nonzero attempt limit"),
+            account_scope,
+            candidates: Arc::from(candidates),
+        })
     }
 
     /// 只返回显式允许且启用渠道中真实发现的模型；别名也必须解析到该渠道。
