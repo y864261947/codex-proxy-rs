@@ -135,6 +135,8 @@ impl ClientKeySort {
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateClientKeyRequest {
+    customer_id: Option<String>,
+    access_group_id: Option<String>,
     name: String,
     label: Option<String>,
     group_ids: Vec<String>,
@@ -151,6 +153,20 @@ impl CreateClientKeyRequest {
         validate_limit(self.max_concurrency, "maxConcurrency")?;
         validate_limit(self.requests_per_minute, "requestsPerMinute")?;
         Ok(CreateClientKey {
+            customer_id: self
+                .customer_id
+                .map(|id| {
+                    gateway_core::policy::CustomerId::new(id)
+                        .map_err(|_| WireValidationError::new("customerId"))
+                })
+                .transpose()?,
+            access_group_id: self
+                .access_group_id
+                .map(|id| {
+                    gateway_core::policy::AccessGroupId::new(id)
+                        .map_err(|_| WireValidationError::new("accessGroupId"))
+                })
+                .transpose()?,
             name: self.name,
             label: self.label,
             group_ids,
@@ -237,7 +253,8 @@ impl ClientKeyMutationRequest {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClientKeyView {
-    customer: Option<ClientKeyCustomerView>,
+    customer: Option<ClientKeyAssociationView>,
+    access_group: Option<ClientKeyAssociationView>,
     id: String,
     name: String,
     label: Option<String>,
@@ -264,7 +281,7 @@ pub struct ClientKeyGroupView {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ClientKeyCustomerView {
+struct ClientKeyAssociationView {
     id: String,
     name: String,
     enabled: bool,
@@ -272,16 +289,23 @@ struct ClientKeyCustomerView {
 
 impl From<ClientKeyRecord> for ClientKeyView {
     fn from(record: ClientKeyRecord) -> Self {
-        let routing_scope = if record.groups.is_empty() {
+        let routing_scope = if record.access_group.is_some() {
+            "access_group"
+        } else if record.groups.is_empty() {
             "all"
         } else {
             "groups"
         };
         Self {
-            customer: record.customer.map(|customer| ClientKeyCustomerView {
+            customer: record.customer.map(|customer| ClientKeyAssociationView {
                 id: customer.id.to_string(),
                 name: customer.name,
                 enabled: customer.enabled,
+            }),
+            access_group: record.access_group.map(|group| ClientKeyAssociationView {
+                id: group.id.to_string(),
+                name: group.name,
+                enabled: group.enabled,
             }),
             id: record.id.to_string(),
             name: record.name,

@@ -685,6 +685,7 @@ impl ClientKeyStore for MemoryClientKeyStore {
         Ok(Some(ClientKeySecret::new(
             ClientKeyRecord {
                 customer: None,
+                access_group: None,
                 id: id.clone(),
                 name: "revealed".to_owned(),
                 label: None,

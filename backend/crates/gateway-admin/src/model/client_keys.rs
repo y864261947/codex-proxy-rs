@@ -86,6 +86,7 @@ pub struct ClientKeyListQuery {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientKeyRecord {
     pub customer: Option<super::customers::CustomerRef>,
+    pub access_group: Option<super::access_groups::AccessGroupRef>,
     pub id: ClientApiKeyId,
     pub name: String,
     pub label: Option<String>,
@@ -143,6 +144,8 @@ impl fmt::Debug for ClientKeySecret {
 /// API 提交的 Client Key 创建命令。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateClientKey {
+    pub customer_id: Option<gateway_core::policy::CustomerId>,
+    pub access_group_id: Option<gateway_core::policy::AccessGroupId>,
     pub name: String,
     pub label: Option<String>,
     pub group_ids: Vec<AccountGroupId>,
@@ -152,6 +155,8 @@ pub struct CreateClientKey {
 /// 管理用例生成 ID 与明文后的持久化命令。
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewClientKey {
+    pub customer_id: Option<gateway_core::policy::CustomerId>,
+    pub access_group_id: Option<gateway_core::policy::AccessGroupId>,
     pub id: ClientApiKeyId,
     pub name: String,
     pub label: Option<String>,

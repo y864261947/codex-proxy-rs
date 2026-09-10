@@ -24,6 +24,8 @@ use super::TestDatabase;
 #[test]
 fn client_key_requires_the_frozen_plaintext_format() {
     let key = NewClientApiKey {
+        customer_id: None,
+        access_group_id: None,
         id: "key-1".to_owned(),
         name: "default".to_owned(),
         label: None,
@@ -382,6 +384,8 @@ async fn dedicated_reveal_returns_plaintext_without_debug_exposure() {
 fn client_key_debug_redacts_plaintext() {
     let secret = format!("sk_{}", "s".repeat(43));
     let key = NewClientApiKey {
+        customer_id: None,
+        access_group_id: None,
         id: "key-1".to_owned(),
         name: "default".to_owned(),
         label: None,

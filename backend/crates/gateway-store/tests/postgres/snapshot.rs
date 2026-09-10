@@ -110,8 +110,8 @@ async fn snapshot_reads_access_models_pools_and_limits_in_one_consistent_revisio
     };
     sqlx::raw_sql(
         "insert into account_groups (id, name, color, created_at, updated_at) values
-         ('grp_00000000000000000000000000000001', 'First', '#123456', now(), now()),
-         ('grp_00000000000000000000000000000002', 'Second', '#654321', now(), now());
+         ('grp_00000000000000000000000000000001', 'First', '#123456FF', now(), now()),
+         ('grp_00000000000000000000000000000002', 'Second', '#654321FF', now(), now());
          insert into access_groups (id, name, max_concurrency, requests_per_minute, allowed_models)
          values ('access_snapshot', 'Access', 5, 90, array['public-model']);
          insert into access_group_pools values ('access_snapshot', 'grp_00000000000000000000000000000001');

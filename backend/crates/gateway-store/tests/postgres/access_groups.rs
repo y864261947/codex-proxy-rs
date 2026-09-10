@@ -56,7 +56,7 @@ async fn access_configuration_assignment_and_restriction_failures_preserve_atomi
     const MISSING_POOL: &str = "grp_00000000000000000000000000000002";
     sqlx::raw_sql(
         "insert into account_groups (id, name, color, created_at, updated_at)
-         values ('grp_00000000000000000000000000000001', 'Pool', '#123456', now(), now());
+         values ('grp_00000000000000000000000000000001', 'Pool', '#123456FF', now(), now());
          insert into customers (id, name) values ('cust_team', 'Customer');
          insert into client_api_keys (id, name, key, customer_id, max_concurrency, created_at, updated_at)
          values ('key_access', 'Key', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'cust_team', 2, now(), now());
@@ -207,5 +207,91 @@ async fn access_configuration_assignment_and_restriction_failures_preserve_atomi
         .expect("legacy snapshot");
     assert!(snapshot.client_api_keys[0].access_group.is_none());
     assert_eq!(snapshot.client_api_keys[0].group_ids[0].as_str(), POOL);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn key_creation_atomically_applies_customer_and_access_permissions_or_leaves_no_key() {
+    use gateway_admin::{
+        model::client_keys::{
+            ClientKeyListQuery, ClientKeyPageSize, ClientKeySort, ClientKeySortField, NewClientKey,
+            SortDirection,
+        },
+        ports::store::ClientKeyStore,
+    };
+    use gateway_core::policy::CustomerId;
+    use gateway_store::postgres::PgAdminClientKeyStore;
+    let Some(db) = TestDatabase::create("scoped_key_creation").await else {
+        return;
+    };
+    sqlx::raw_sql(
+        "insert into customers (id, name) values ('cust_team', 'Customer');
+         insert into access_groups (id, name, allowed_models) values ('access_team', 'Team', array['public-model']);
+         insert into provider_accounts (
+           id, provider_kind, name, email, upstream_user_id, upstream_account_id, plan_type,
+           authentication_kind, provider_credentials_json, credential_revision, has_refresh_token,
+           access_token_expires_at, next_refresh_at, enabled, credential_state, credential_observed_at, created_at, updated_at
+         ) values ('acct_global', 'openai', 'Global', null, 'user-global', null, null, 'oauth', '{}'::jsonb, 1,
+           false, null, null, true, 'ready', now(), now(), now());"
+    ).execute(&db.pool).await.expect("seed ownership and unrelated global provider");
+    let keys = PgAdminClientKeyStore::new(db.pool.clone());
+    let command = NewClientKey {
+        id: ClientApiKeyId::new("key_scoped").expect("key"),
+        name: "scoped".to_owned(),
+        label: None,
+        customer_id: Some(CustomerId::new("cust_team").expect("customer")),
+        access_group_id: Some(group()),
+        group_ids: Vec::new(),
+        limits: RateLimits {
+            max_concurrency: 2,
+            requests_per_minute: 20,
+        },
+        plaintext: format!("sk_{}", "s".repeat(43)),
+    };
+    let mut missing = command.clone();
+    missing.access_group_id = Some(AccessGroupId::new("access_missing").expect("group"));
+    let before: i64 =
+        sqlx::query_scalar("select config_revision from runtime_settings where id = 1")
+            .fetch_one(&db.pool)
+            .await
+            .expect("revision");
+    assert_eq!(
+        keys.create_client_key(missing, &context())
+            .await
+            .expect_err("missing group")
+            .kind(),
+        AdminStoreErrorKind::Conflict
+    );
+    let after: (i64, i64, i64) = sqlx::query_as("select config_revision, (select count(*) from client_api_keys), (select count(*) from admin_audit_events) from runtime_settings where id = 1")
+        .fetch_one(&db.pool).await.expect("no partial create");
+    assert_eq!(after, (before, 0, 0));
+    let (revision, record) = keys
+        .create_client_key(command, &context())
+        .await
+        .expect("create scoped key");
+    assert_eq!(revision.get(), u64::try_from(before + 1).expect("revision"));
+    assert_eq!(record.customer.as_ref().expect("customer").name, "Customer");
+    assert_eq!(
+        record.access_group.as_ref().expect("access group").name,
+        "Team"
+    );
+    assert!(record.groups.is_empty());
+    assert!(
+        record.provider_kinds.is_empty(),
+        "empty access pool must not advertise global providers"
+    );
+    let page = keys
+        .list_client_keys(ClientKeyListQuery {
+            cursor: None,
+            page_size: ClientKeyPageSize::new(20).expect("page"),
+            search: Some("scoped".to_owned()),
+            sort: ClientKeySort {
+                field: ClientKeySortField::Name,
+                direction: SortDirection::Asc,
+            },
+        })
+        .await
+        .expect("list scoped key");
+    assert_eq!(page.items, [record]);
     db.close().await;
 }
