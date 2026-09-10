@@ -3,7 +3,7 @@
 //! Core 不解释 Provider transcript；同一客户端连接需要的可携带状态由
 //! [`ProviderSessionState`](crate::operation::ProviderSessionState) 不透明承载。
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use futures::future::BoxFuture;
 
@@ -63,7 +63,7 @@ pub struct NativeContinuationPin {
     account: ProviderAccountId,
     source: Option<SourceId>,
     scope: NativeContinuationScope,
-    session_state: Option<ProviderSessionState>,
+    session_state: Option<Arc<ProviderSessionState>>,
 }
 
 impl NativeContinuationPin {
@@ -116,7 +116,7 @@ impl NativeContinuationPin {
     /// 附着仅由对应 Provider 解释的不透明会话状态。
     #[must_use]
     pub fn with_session_state(mut self, state: ProviderSessionState) -> Self {
-        self.session_state = Some(state);
+        self.session_state = Some(Arc::new(state));
         self
     }
 
@@ -158,8 +158,8 @@ impl NativeContinuationPin {
 
     /// 返回与本 pin 同账号绑定的 Provider 私有会话状态。
     #[must_use]
-    pub const fn session_state(&self) -> Option<&ProviderSessionState> {
-        self.session_state.as_ref()
+    pub fn session_state(&self) -> Option<&ProviderSessionState> {
+        self.session_state.as_deref()
     }
 
     /// 校验本次 route/account 选择没有破坏 native pin。
