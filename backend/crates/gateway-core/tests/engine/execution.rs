@@ -1127,7 +1127,7 @@ fn start_snapshot_with_limits(
         ),
         vec![provider.clone()],
         vec![ProviderModel::new(
-            provider.clone(),
+            provider,
             UpstreamModelId::new("gpt-start").expect("model ID"),
             capabilities,
         )],
