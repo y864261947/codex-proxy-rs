@@ -16,6 +16,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
 use crate::account::AccountSelectionPolicy;
+use crate::channel::ChannelBinding;
 use crate::operation::{CapabilityRequirements, Feature, OperationKind};
 use crate::validation::{IdentifierError, RoutingError, validate_text};
 
@@ -430,7 +431,7 @@ impl ModelCapabilities {
 /// 一个 Provider 实时发现的上游模型能力。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModel {
-    channel_id: Option<crate::identity::ChannelId>,
+    channel: Option<ChannelBinding>,
     provider: ProviderKind,
     upstream_model: UpstreamModelId,
     capabilities: ModelCapabilities,
@@ -445,7 +446,7 @@ impl ProviderModel {
         capabilities: ModelCapabilities,
     ) -> Self {
         Self {
-            channel_id: None,
+            channel: None,
             provider,
             upstream_model,
             capabilities,
@@ -454,14 +455,14 @@ impl ProviderModel {
     }
 
     #[must_use]
-    pub fn with_channel(mut self, channel_id: crate::identity::ChannelId) -> Self {
-        self.channel_id = Some(channel_id);
+    pub fn with_channel(mut self, channel: ChannelBinding) -> Self {
+        self.channel = Some(channel);
         self
     }
 
     #[must_use]
-    pub const fn channel_id(&self) -> Option<&crate::identity::ChannelId> {
-        self.channel_id.as_ref()
+    pub const fn channel_binding(&self) -> Option<&ChannelBinding> {
+        self.channel.as_ref()
     }
 
     #[must_use]
@@ -504,6 +505,7 @@ pub enum SourceRoutingTarget<'a> {
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {
+    channel: Option<ChannelBinding>,
     source: Option<source::SourceSnapshot>,
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
@@ -520,8 +522,23 @@ impl ProviderCandidate {
 
     #[must_use]
     pub fn with_source(mut self, source: source::SourceId) -> Self {
+        self.channel = None;
         self.source = Some(source::SourceSnapshot::unnamed(source));
         self
+    }
+
+    #[must_use]
+    pub fn with_channel(mut self, channel: ChannelBinding) -> Self {
+        self.source = Some(source::SourceSnapshot::unnamed(source::SourceId::Channel(
+            channel.id().clone(),
+        )));
+        self.channel = Some(channel);
+        self
+    }
+
+    #[must_use]
+    pub const fn channel_binding(&self) -> Option<&ChannelBinding> {
+        self.channel.as_ref()
     }
 
     #[must_use]

@@ -5,6 +5,32 @@ use gateway_store::postgres::{
 
 use super::TestDatabase;
 
+#[tokio::test]
+async fn channel_snapshot_freezes_public_policy_and_revision_without_reading_credentials() {
+    let Some(database) = TestDatabase::create("channel_snapshot").await else {
+        return;
+    };
+    sqlx::query("insert into upstream_channels (id,provider_kind,name,priority,weight,max_concurrency,requests_per_minute,provider_config_json) values ('chan_snapshot','openai_api','A channel',2,3,4,60,'{\"private\":\"sensitive-test-token\"}'::jsonb)").execute(&database.pool).await.expect("channel");
+    let repository = PgRuntimeSnapshotRepository::new(database.pool.clone());
+    let snapshot = repository.load_runtime_snapshot().await.expect("snapshot");
+    let channel = &snapshot.channels[0];
+    assert_eq!(channel.binding().id().as_str(), "chan_snapshot");
+    assert_eq!(channel.binding().revision().get(), 1);
+    assert_eq!(channel.policy().effective_preference(None).priority(), 2);
+    assert_eq!(channel.policy().limits().max_concurrency, 4);
+    assert!(channel.policy().enabled());
+    assert!(!format!("{snapshot:?}").contains("sensitive-test-token"));
+    sqlx::query("update upstream_channels set enabled=false,connection_revision=2,max_concurrency=1,name='Renamed' where id='chan_snapshot'").execute(&database.pool).await.expect("change");
+    let next = repository
+        .load_runtime_snapshot()
+        .await
+        .expect("next snapshot");
+    assert!(!next.channels[0].policy().enabled());
+    assert_eq!(next.channels[0].binding().revision().get(), 2);
+    assert_eq!(next.channels[0].policy().limits().max_concurrency, 1);
+    assert_eq!(channel.policy().snapshot().name(), Some("A channel"));
+}
+
 #[test]
 fn snapshot_client_policy_contains_only_common_limits() {
     let policy = ClientApiKeySnapshot {

@@ -32,6 +32,28 @@ impl ChannelRevision {
     }
 }
 
+/// 一个渠道及其不可分割的配置版本，随目录、候选和调用事实传递。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelBinding {
+    id: ChannelId,
+    revision: ChannelRevision,
+}
+
+impl ChannelBinding {
+    #[must_use]
+    pub const fn new(id: ChannelId, revision: ChannelRevision) -> Self {
+        Self { id, revision }
+    }
+    #[must_use]
+    pub const fn id(&self) -> &ChannelId {
+        &self.id
+    }
+    #[must_use]
+    pub const fn revision(&self) -> ChannelRevision {
+        self.revision
+    }
+}
+
 /// Provider 校验后的不透明连接配置。普通列表、日志及 Debug 均不输出它。
 #[derive(Clone, PartialEq)]
 pub struct ProviderChannelConfig(Map<String, Value>);

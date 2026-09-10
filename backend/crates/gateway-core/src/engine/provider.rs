@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::account::{
     AccountAttemptFeedback, AccountCapacitySnapshot, AccountFeedbackStats, ProviderAccountId,
 };
+use crate::channel::ChannelBinding;
 use crate::engine::AttemptContext;
 use crate::error::{PreDeliveryRetry, ProviderError, ProviderErrorKind};
 use crate::event::{EventSequenceValidator, ProviderEvent};
@@ -34,7 +35,7 @@ pub type EventStream =
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderExecutionTarget {
     Account(ProviderAccountId),
-    Channel(ChannelId),
+    Channel(ChannelBinding),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -118,13 +119,13 @@ impl ProviderCallMetadata {
     pub const fn for_channel(
         provider: ProviderKind,
         upstream_model: Option<UpstreamModelId>,
-        channel_id: ChannelId,
+        channel: ChannelBinding,
         transport: UpstreamTransport,
     ) -> Self {
         Self {
             provider,
             upstream_model,
-            target: ProviderExecutionTarget::Channel(channel_id),
+            target: ProviderExecutionTarget::Channel(channel),
             upstream_request_id: None,
             transport,
             selection_observation: None,
@@ -177,7 +178,7 @@ impl ProviderCallMetadata {
     #[must_use]
     pub const fn channel_id(&self) -> Option<&ChannelId> {
         match &self.target {
-            ProviderExecutionTarget::Channel(id) => Some(id),
+            ProviderExecutionTarget::Channel(binding) => Some(binding.id()),
             ProviderExecutionTarget::Account(_) => None,
         }
     }
@@ -220,7 +221,7 @@ impl ProviderCallMetadata {
                 (
                     ProviderExecutionTarget::Channel(actual),
                     Some(crate::routing::source::SourceId::Channel(expected)),
-                ) => actual == expected,
+                ) => actual.id() == expected && candidate.channel_binding() == Some(actual),
                 _ => false,
             }
     }
@@ -502,7 +503,7 @@ pub struct ContinuationRequestObservation {
 /// Provider 实时目录编译后的单模型能力。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModelCapabilities {
-    channel_id: Option<ChannelId>,
+    channel: Option<ChannelBinding>,
     upstream_model: UpstreamModelId,
     capabilities: ModelCapabilities,
     presentation: Option<ModelPresentation>,
@@ -530,7 +531,7 @@ impl ProviderModelCapabilities {
     #[must_use]
     pub const fn new(upstream_model: UpstreamModelId, capabilities: ModelCapabilities) -> Self {
         Self {
-            channel_id: None,
+            channel: None,
             upstream_model,
             capabilities,
             presentation: None,
@@ -539,14 +540,14 @@ impl ProviderModelCapabilities {
 
     /// 渠道目录逐来源声明能力，不能合并为整个适配器的能力。
     #[must_use]
-    pub fn with_channel(mut self, channel_id: ChannelId) -> Self {
-        self.channel_id = Some(channel_id);
+    pub fn with_channel(mut self, channel: ChannelBinding) -> Self {
+        self.channel = Some(channel);
         self
     }
 
     #[must_use]
-    pub const fn channel_id(&self) -> Option<&ChannelId> {
-        self.channel_id.as_ref()
+    pub const fn channel_binding(&self) -> Option<&ChannelBinding> {
+        self.channel.as_ref()
     }
 
     #[must_use]

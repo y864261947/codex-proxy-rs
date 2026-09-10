@@ -33,6 +33,7 @@ pub struct SnapshotRuntimeSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSnapshotData {
+    pub channels: Vec<gateway_core::routing::snapshot::SnapshotChannelFacts>,
     pub config_revision: Revision,
     pub observed_current_revision: Revision,
     pub settings: SnapshotRuntimeSettings,
@@ -97,6 +98,7 @@ impl RuntimeSnapshotRepository for PgRuntimeSnapshotRepository {
         let account_groups = load_account_groups(&mut transaction).await?;
         let provider_accounts = load_provider_accounts(&mut transaction).await?;
         let group_memberships = load_group_memberships(&mut transaction).await?;
+        let channels = load_channels(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -105,6 +107,7 @@ impl RuntimeSnapshotRepository for PgRuntimeSnapshotRepository {
         let observed_current_revision =
             RuntimeSnapshotRepository::current_config_revision(self).await?;
         Ok(RuntimeSnapshotData {
+            channels,
             config_revision,
             observed_current_revision,
             settings,
@@ -197,7 +200,8 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 account_groups,
                 provider_accounts,
                 group_memberships,
-            ))
+            )
+            .with_channels(data.channels))
         })
     }
 
@@ -215,6 +219,40 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
 
 fn core_revision(revision: Revision) -> Result<ConfigRevision, SnapshotStoreError> {
     ConfigRevision::new(revision.get()).map_err(|_| SnapshotStoreError::unavailable())
+}
+
+async fn load_channels(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> StoreResult<Vec<gateway_core::routing::snapshot::SnapshotChannelFacts>> {
+    use gateway_core::{
+        channel::ChannelBinding,
+        routing::{
+            snapshot::SnapshotChannelFacts,
+            source::{SourceId, SourcePolicy},
+        },
+    };
+    let rows = sqlx::query("select id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, connection_revision, created_at, updated_at from upstream_channels order by id")
+        .fetch_all(&mut **transaction).await.map_err(|_| postgres_unavailable("load channel snapshot"))?;
+    rows.iter()
+        .map(|row| {
+            let record = super::channels::public_record(row)
+                .map_err(|_| postgres_unavailable("decode channel snapshot"))?;
+            let policy = SourcePolicy::new(
+                SourceId::Channel(record.id.clone()),
+                record.fields.enabled,
+                record.fields.preference,
+                record.fields.limits,
+                record.fields.quota_scope_id,
+            )
+            .and_then(|policy| policy.with_name(record.fields.name))
+            .map_err(|_| postgres_unavailable("decode channel policy"))?;
+            Ok(SnapshotChannelFacts::new(
+                ChannelBinding::new(record.id, record.connection_revision),
+                record.provider,
+                policy,
+            ))
+        })
+        .collect()
 }
 
 async fn load_settings(

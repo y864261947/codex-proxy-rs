@@ -1,9 +1,35 @@
 use gateway_core::{
     account::scope::AccountGroupId,
+    channel::{ChannelBinding, ChannelRevision},
     identity::{ChannelId, QuotaScopeId},
     policy::RateLimits,
     routing::source::{AllowedSources, SourceId, SourcePolicy, SourcePreference},
 };
+
+fn binding(id: ChannelId) -> ChannelBinding {
+    ChannelBinding::new(id, ChannelRevision::new(1).expect("channel revision"))
+}
+
+#[test]
+fn one_channel_catalog_cannot_combine_models_from_different_configuration_versions() {
+    use gateway_core::routing::{ConfigRevision, ProviderKind, RuntimeSnapshot};
+    let id = ChannelId::new("chan_versions").expect("channel");
+    let first = super::model("openai", "first-model", super::capabilities())
+        .with_channel(binding(id.clone()));
+    let second = super::model("openai", "second-model", super::capabilities()).with_channel(
+        ChannelBinding::new(id, ChannelRevision::new(2).expect("revision")),
+    );
+    assert!(
+        RuntimeSnapshot::new(
+            ConfigRevision::new(1).expect("revision"),
+            super::scheduling(),
+            vec![ProviderKind::new("openai").expect("provider")],
+            vec![first, second],
+            Vec::new()
+        )
+        .is_err()
+    );
+}
 
 fn channel_policy(id: &str, enabled: bool) -> SourcePolicy {
     SourcePolicy::new(
@@ -172,7 +198,7 @@ fn source_priority_precedes_weight_and_order_is_frozen_without_duplicates() {
         ids.iter()
             .map(|id| {
                 super::model("openai", "gpt-5.5", super::capabilities())
-                    .with_channel(ChannelId::new(*id).expect("channel"))
+                    .with_channel(binding(ChannelId::new(*id).expect("channel")))
             })
             .collect(),
         Vec::new(),
@@ -275,15 +301,17 @@ fn same_named_channel_models_keep_capabilities_and_visibility_separate() {
         super::scheduling(),
         vec![ProviderKind::new("openai").expect("provider")],
         vec![
-            super::model("openai", "shared", super::capabilities()).with_channel(first),
+            super::model("openai", "shared", super::capabilities()).with_channel(binding(first)),
             super::model(
                 "openai",
                 "shared",
                 ModelCapabilities::new(BTreeSet::new(), None),
             )
-            .with_channel(second.clone()),
-            super::model("openai", "second-only", super::capabilities()).with_channel(second),
-            super::model("openai", "disabled-only", super::capabilities()).with_channel(third),
+            .with_channel(binding(second.clone())),
+            super::model("openai", "second-only", super::capabilities())
+                .with_channel(binding(second)),
+            super::model("openai", "disabled-only", super::capabilities())
+                .with_channel(binding(third)),
         ],
         Vec::new(),
     )
@@ -399,8 +427,8 @@ fn missing_source_policy_denies_a_discovered_channel_and_duplicate_catalog_rows_
         ConfigRevision, ProviderKind, PublicModelId, RoutingContext, RuntimeSnapshot,
     };
     let channel = ChannelId::new("chan_first").expect("channel");
-    let model =
-        super::model("openai", "shared", super::capabilities()).with_channel(channel.clone());
+    let model = super::model("openai", "shared", super::capabilities())
+        .with_channel(binding(channel.clone()));
     let snapshot = RuntimeSnapshot::new(
         ConfigRevision::new(1).expect("revision"),
         super::scheduling(),
@@ -432,7 +460,8 @@ fn missing_source_policy_denies_a_discovered_channel_and_duplicate_catalog_rows_
         )
         .is_err()
     );
-    let other = super::model("xai", "different", super::capabilities()).with_channel(channel);
+    let other =
+        super::model("xai", "different", super::capabilities()).with_channel(binding(channel));
     assert!(
         RuntimeSnapshot::new(
             ConfigRevision::new(1).expect("revision"),
@@ -538,16 +567,23 @@ fn call_metadata_cannot_substitute_another_channel_or_an_account_for_the_selecte
     let legacy = &plan.candidates()[0];
     let first = ChannelId::new("chan_first").expect("channel");
     let second = ChannelId::new("chan_second").expect("channel");
-    let selected = legacy.clone().with_source(SourceId::Channel(first.clone()));
+    let selected = legacy.clone().with_channel(binding(first.clone()));
     let metadata = |channel| {
         ProviderCallMetadata::for_channel(
             legacy.provider().clone(),
             legacy.upstream_model().cloned(),
-            channel,
+            binding(channel),
             UpstreamTransport::new("http_sse").expect("transport"),
         )
     };
     assert!(metadata(first.clone()).confirms(&selected));
+    let rotated = selected.clone().with_channel(ChannelBinding::new(
+        first.clone(),
+        ChannelRevision::new(2).expect("new revision"),
+    ));
+    assert!(!metadata(first.clone()).confirms(&rotated));
+    let unversioned = legacy.clone().with_source(SourceId::Channel(first.clone()));
+    assert!(!metadata(first.clone()).confirms(&unversioned));
     assert!(!metadata(second).confirms(&selected));
     assert!(!metadata(first).confirms(legacy));
     let account = ProviderCallMetadata::new(

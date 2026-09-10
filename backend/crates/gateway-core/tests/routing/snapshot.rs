@@ -58,6 +58,125 @@ struct PublishingCatalogProvider {
 
 struct UnavailableCatalogProvider;
 
+struct ChannelCatalogProvider(gateway_core::channel::ChannelBinding);
+
+#[async_trait]
+impl Provider for ChannelCatalogProvider {
+    fn name(&self) -> &'static str {
+        "alpha"
+    }
+    fn catalog_generation(&self) -> ProviderCatalogGeneration {
+        ProviderCatalogGeneration::new(0)
+    }
+    async fn query_model_capabilities(
+        &self,
+    ) -> Result<Vec<ProviderModelCapabilities>, ProviderError> {
+        Ok(vec![
+            ProviderModelCapabilities::new(
+                UpstreamModelId::new("upstream-model").expect("model"),
+                super::capabilities(),
+            )
+            .with_channel(self.0.clone()),
+        ])
+    }
+    async fn execute(
+        &self,
+        _: ProviderRequest,
+        _: AttemptContext,
+    ) -> Result<ProviderStream, ProviderError> {
+        Err(ProviderError::new(
+            ProviderErrorKind::Unavailable,
+            UpstreamSendState::NotSent,
+        ))
+    }
+}
+
+#[test]
+fn channel_catalogs_must_match_persisted_provider_and_configuration_revision() {
+    use gateway_core::{
+        channel::{ChannelBinding, ChannelRevision},
+        identity::ChannelId,
+        routing::{
+            RoutingContext,
+            snapshot::SnapshotChannelFacts,
+            source::{AllowedSources, SourceId, SourcePolicy, SourcePreference},
+        },
+    };
+    let id = ChannelId::new("chan_snapshot").expect("channel");
+    let binding = ChannelBinding::new(id.clone(), ChannelRevision::new(2).expect("revision"));
+    let policy = SourcePolicy::new(
+        SourceId::Channel(id.clone()),
+        true,
+        SourcePreference::default(),
+        RateLimits::unlimited(),
+        None,
+    )
+    .expect("policy")
+    .with_name("Frozen channel".to_owned())
+    .expect("name");
+    let fact = SnapshotChannelFacts::new(
+        binding.clone(),
+        ProviderKind::new("alpha").expect("provider"),
+        policy.clone(),
+    );
+    let compile = |channels, reported| {
+        let registry =
+            ProviderRegistry::new(
+                [Arc::new(ChannelCatalogProvider(reported)) as Arc<dyn Provider>],
+            )
+            .expect("registry");
+        block_on(
+            RuntimeSnapshotCompiler::new(
+                Arc::new(TestSnapshotStore::new(Ok(
+                    facts(1, 1).with_channels(channels)
+                ))),
+                registry,
+            )
+            .compile(),
+        )
+    };
+    assert_eq!(
+        compile(Vec::new(), binding.clone()).expect_err("unregistered channel"),
+        RuntimeSnapshotCompileError::CatalogChanged
+    );
+    assert_eq!(
+        compile(
+            vec![fact.clone()],
+            ChannelBinding::new(id.clone(), ChannelRevision::new(3).expect("rotated"))
+        )
+        .expect_err("catalog changed during snapshot read"),
+        RuntimeSnapshotCompileError::CatalogChanged
+    );
+    let wrong = SnapshotChannelFacts::new(
+        binding.clone(),
+        ProviderKind::new("beta").expect("provider"),
+        policy,
+    );
+    assert_eq!(
+        compile(vec![wrong], binding.clone()).expect_err("provider mismatch"),
+        RuntimeSnapshotCompileError::CatalogChanged
+    );
+    let snapshot = compile(vec![fact], binding.clone()).expect("matching catalog");
+    let allowed = AllowedSources::new([SourceId::Channel(id)]);
+    let plan = snapshot
+        .plan_channels(
+            &PublicModelId::new("public-model").expect("model"),
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+            &allowed,
+        )
+        .expect("channel plan");
+    assert_eq!(plan.candidates()[0].channel_binding(), Some(&binding));
+    assert_eq!(
+        plan.candidates()[0]
+            .source_snapshot()
+            .expect("source")
+            .name(),
+        Some("Frozen channel")
+    );
+}
+
 #[async_trait]
 impl Provider for UnavailableCatalogProvider {
     fn name(&self) -> &'static str {

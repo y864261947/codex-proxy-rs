@@ -204,7 +204,7 @@ impl ChannelStorePort for PgChannelRepository {
     }
 }
 
-fn public_record(row: &PgRow) -> AdminStoreResult<ChannelRecord> {
+pub(super) fn public_record(row: &PgRow) -> AdminStoreResult<ChannelRecord> {
     let id = ChannelId::new(row.try_get::<String, _>("id").map_err(sql_error)?)
         .map_err(|_| invalid())?;
     let fields = ChannelFields {

@@ -130,7 +130,10 @@ fn channel_stream_releases_its_lease_without_fabricating_an_account_identity() {
     let metadata = ProviderCallMetadata::for_channel(
         ProviderKind::new("api_openai").expect("provider"),
         Some(UpstreamModelId::new("test-model").expect("model")),
-        channel.clone(),
+        gateway_core::channel::ChannelBinding::new(
+            channel.clone(),
+            gateway_core::channel::ChannelRevision::new(1).expect("revision"),
+        ),
         UpstreamTransport::new("http_sse").expect("transport"),
     );
     assert_eq!(metadata.channel_id(), Some(&channel));

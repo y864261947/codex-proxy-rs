@@ -155,9 +155,41 @@ impl SnapshotAccountGroupMemberFacts {
     }
 }
 
+/// 渠道的公共策略和连接版本；不携带 Provider 凭据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotChannelFacts {
+    binding: crate::channel::ChannelBinding,
+    provider: ProviderKind,
+    policy: super::source::SourcePolicy,
+}
+
+impl SnapshotChannelFacts {
+    #[must_use]
+    pub const fn new(
+        binding: crate::channel::ChannelBinding,
+        provider: ProviderKind,
+        policy: super::source::SourcePolicy,
+    ) -> Self {
+        Self {
+            binding,
+            provider,
+            policy,
+        }
+    }
+    #[must_use]
+    pub const fn binding(&self) -> &crate::channel::ChannelBinding {
+        &self.binding
+    }
+    #[must_use]
+    pub const fn policy(&self) -> &super::source::SourcePolicy {
+        &self.policy
+    }
+}
+
 /// 一次一致性读取产生的全部 RuntimeSnapshot 持久事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFacts {
+    channels: Vec<SnapshotChannelFacts>,
     config_revision: ConfigRevision,
     observed_current_revision: ConfigRevision,
     settings: SnapshotSettingsFacts,
@@ -179,6 +211,7 @@ impl SnapshotFacts {
         group_memberships: Vec<SnapshotAccountGroupMemberFacts>,
     ) -> Self {
         Self {
+            channels: Vec::new(),
             config_revision,
             observed_current_revision,
             settings,
@@ -187,6 +220,12 @@ impl SnapshotFacts {
             provider_accounts,
             group_memberships,
         }
+    }
+
+    #[must_use]
+    pub fn with_channels(mut self, channels: Vec<SnapshotChannelFacts>) -> Self {
+        self.channels = channels;
+        self
     }
 
     #[must_use]
@@ -283,6 +322,16 @@ async fn compile_runtime_snapshot(
 ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
     let provider_kinds = providers.provider_kinds().cloned().collect::<Vec<_>>();
     let registered_providers = provider_kinds.iter().cloned().collect::<BTreeSet<_>>();
+    let mut channels = BTreeMap::new();
+    for channel in facts.channels {
+        if channel.policy.id() != &super::source::SourceId::Channel(channel.binding.id().clone())
+            || channels
+                .insert(channel.binding.id().clone(), channel)
+                .is_some()
+        {
+            return Err(RuntimeSnapshotCompileError::InvalidData);
+        }
+    }
 
     // 目录查询失败表示未知；查询成功后，即使为空，也必须与“已知缺少模型”区分。
     let mut provider_models = Vec::new();
@@ -292,21 +341,30 @@ async fn compile_runtime_snapshot(
             continue;
         };
         known_provider_catalogs.insert(provider.clone());
-        provider_models.extend(models.into_iter().map(|model| {
+        for model in models {
+            if let Some(binding) = model.channel_binding() {
+                let Some(channel) = channels.get(binding.id()) else {
+                    return Err(RuntimeSnapshotCompileError::CatalogChanged);
+                };
+                if channel.binding != *binding || channel.provider != *provider {
+                    return Err(RuntimeSnapshotCompileError::CatalogChanged);
+                }
+            }
             let compiled = ProviderModel::new(
                 provider.clone(),
                 model.upstream_model().clone(),
                 model.capabilities().clone(),
             );
-            let compiled = match model.channel_id().cloned() {
-                Some(channel_id) => compiled.with_channel(channel_id),
+            let compiled = match model.channel_binding().cloned() {
+                Some(channel) => compiled.with_channel(channel),
                 None => compiled,
             };
-            match model.presentation().cloned() {
+            let compiled = match model.presentation().cloned() {
                 Some(presentation) => compiled.with_presentation(presentation),
                 None => compiled,
-            }
-        }));
+            };
+            provider_models.push(compiled);
+        }
     }
 
     let mut groups = BTreeMap::new();
@@ -446,7 +504,7 @@ async fn compile_runtime_snapshot(
         );
     }
 
-    let source_policies = groups
+    let mut source_policies = groups
         .values()
         .map(|group| {
             super::source::SourcePolicy::new(
@@ -460,6 +518,7 @@ async fn compile_runtime_snapshot(
             .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    source_policies.extend(channels.into_values().map(|channel| channel.policy));
     RuntimeSnapshot::new(
         facts.config_revision,
         selection_policy,
@@ -525,7 +584,8 @@ impl RuntimeSnapshot {
         let mut presentation_map =
             BTreeMap::<ProviderKind, BTreeMap<UpstreamModelId, super::ModelPresentation>>::new();
         for model in provider_models {
-            if let Some(channel_id) = model.channel_id.clone() {
+            if let Some(channel) = model.channel.clone() {
+                let channel_id = channel.id();
                 if !provider_set.contains(&model.provider) {
                     return Err(RoutingError::NotFound {
                         entity: "provider",
@@ -535,12 +595,11 @@ impl RuntimeSnapshot {
                 // 成功返回渠道目录不能授权该适配器的未知账号路径。
                 known_provider_catalogs.insert(model.provider.clone());
                 let models = channel_models.entry(channel_id.clone()).or_default();
-                if models
-                    .values()
-                    .any(|existing| existing.provider != model.provider)
-                {
+                if models.values().any(|existing| {
+                    existing.provider != model.provider || existing.channel != model.channel
+                }) {
                     return Err(RoutingError::DuplicateEntity {
-                        entity: "channel provider",
+                        entity: "channel provider or revision",
                         id: channel_id.to_string(),
                     });
                 }
@@ -553,7 +612,7 @@ impl RuntimeSnapshot {
                 continue;
             }
             let ProviderModel {
-                channel_id: _,
+                channel: _,
                 provider,
                 upstream_model,
                 capabilities,
@@ -819,6 +878,7 @@ impl RuntimeSnapshot {
                 continue;
             };
             candidates.push(ProviderCandidate {
+                channel: model.channel.clone(),
                 source: self
                     .source_policy(source)
                     .map(super::source::SourcePolicy::snapshot),
@@ -1098,6 +1158,7 @@ impl RuntimeSnapshot {
                 None => BTreeSet::new(),
             };
             candidates.push(ProviderCandidate {
+                channel: None,
                 source: None,
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
@@ -1148,6 +1209,7 @@ impl RuntimeSnapshot {
             });
         }
         let candidate = ProviderCandidate {
+            channel: None,
             source: None,
             provider: provider.clone(),
             upstream_model: None,
