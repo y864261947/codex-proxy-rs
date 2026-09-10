@@ -241,6 +241,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
             "ops_events",
             "provider_accounts",
             "runtime_settings",
+            "upstream_channels",
         ]
     );
     assert_eq!(session_settings, ("codex-proxy-rs".to_owned(), 30, 5, 30));
