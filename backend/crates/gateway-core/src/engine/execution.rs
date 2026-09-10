@@ -35,7 +35,7 @@ use crate::event::{GatewayEvent, ProviderEvent, ProviderResponseHeader};
 use crate::identity::ProviderKind;
 use crate::lifecycle::CancellationToken;
 use crate::operation::{Operation, ProviderSessionState};
-use crate::policy::{ClientApiKeyId, ClientPolicy};
+use crate::policy::{AdmissionScopeId, ClientApiKeyId, ClientPolicy};
 use crate::routing::{
     PublicModelId, PublicModelProfile, RoutingContext, RuntimeSnapshot, UpstreamModelId,
 };
@@ -484,10 +484,14 @@ impl DefaultExecutionService {
         } = request;
         let admission_request = ClientAdmissionRequest {
             model_request_id: request_id.clone(),
-            client_api_key_id: client.policy.key_id().clone(),
             lease_ttl: MODEL_REQUEST_DEADLINE,
-            limits: client.policy.limits(),
+            scopes: client.policy.admission_scopes(),
         };
+        let admission_scope_ids = admission_request
+            .scopes
+            .iter()
+            .map(|scope| scope.id.clone())
+            .collect();
         let admission_started_at = Instant::now();
         match self
             .admissions
@@ -513,7 +517,7 @@ impl DefaultExecutionService {
         let admission_decision_ms = duration_ms(admission_started_at.elapsed());
         let admission = AdmissionLease {
             port: Arc::clone(&self.admissions),
-            client_api_key_id: client.policy.key_id().clone(),
+            scope_ids: admission_scope_ids,
             model_request_id: request_id.clone(),
         };
         let observation = plan
@@ -932,7 +936,7 @@ impl AccountProbe for DefaultExecutionService {
 
 struct AdmissionLease {
     port: Arc<dyn ClientAdmissionPort>,
-    client_api_key_id: ClientApiKeyId,
+    scope_ids: Vec<AdmissionScopeId>,
     model_request_id: ModelRequestId,
 }
 
@@ -940,7 +944,7 @@ impl AdmissionLease {
     async fn release(self) {
         if let Err(error) = self
             .port
-            .release(&self.client_api_key_id, &self.model_request_id)
+            .release(&self.scope_ids, &self.model_request_id)
             .await
         {
             tracing::warn!(%error, "Client admission 释放失败，依赖租约 TTL 收敛");

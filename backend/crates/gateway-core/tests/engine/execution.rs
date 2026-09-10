@@ -781,7 +781,7 @@ impl ClientAdmissionPort for UnusedAdmissions {
 
     fn release<'a>(
         &'a self,
-        _: &'a ClientApiKeyId,
+        _: &'a [gateway_core::policy::AdmissionScopeId],
         _: &'a ModelRequestId,
     ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
         Box::pin(async { Ok(true) })

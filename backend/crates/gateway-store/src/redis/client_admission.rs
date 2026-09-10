@@ -22,33 +22,46 @@ local clock = redis.call('TIME')
 local now_ms = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
 local cutoff = now_ms - 60000
 local lease_ttl_ms = tonumber(ARGV[2])
-if now_ms + lease_ttl_ms > tonumber(ARGV[5]) then return 3 end
-redis.call('ZREMRANGEBYSCORE', KEYS[1], '-inf', now_ms)
-redis.call('ZREMRANGEBYSCORE', KEYS[2], '-inf', cutoff)
+if now_ms + lease_ttl_ms > tonumber(ARGV[3]) then return 3 end
 
-if tonumber(ARGV[3]) > 0 and redis.call('ZCARD', KEYS[1]) >= tonumber(ARGV[3]) then
-  return 2
+-- Check every scope before reserving any of them. Replayed admissions use the
+-- same request ID and must not consume a second slot or move the RPM timestamp.
+for index = 1, #KEYS, 2 do
+  redis.call('ZREMRANGEBYSCORE', KEYS[index], '-inf', now_ms)
+  redis.call('ZREMRANGEBYSCORE', KEYS[index + 1], '-inf', cutoff)
+  local concurrency = tonumber(ARGV[index + 3])
+  local rpm = tonumber(ARGV[index + 4])
+  if concurrency > 0 and not redis.call('ZSCORE', KEYS[index], ARGV[1])
+      and redis.call('ZCARD', KEYS[index]) >= concurrency then return 2 end
+  if rpm > 0 and not redis.call('ZSCORE', KEYS[index + 1], ARGV[1])
+      and redis.call('ZCARD', KEYS[index + 1]) >= rpm then return 1 end
 end
-if tonumber(ARGV[4]) > 0 and redis.call('ZCARD', KEYS[2]) >= tonumber(ARGV[4]) then
-  return 1
-end
-
-redis.call('ZADD', KEYS[1], now_ms + lease_ttl_ms, ARGV[1])
-redis.call('ZADD', KEYS[2], now_ms, ARGV[1])
 
 local function extend_ttl(key, ttl)
   local current = redis.call('PTTL', key)
   if current < ttl then redis.call('PEXPIRE', key, ttl) end
 end
 
-local active_tail = redis.call('ZRANGE', KEYS[1], -1, -1, 'WITHSCORES')
-local active_ttl = 120000
-if #active_tail == 2 then
-  active_ttl = math.max(active_ttl, tonumber(active_tail[2]) - now_ms + 60000)
+for index = 1, #KEYS, 2 do
+  redis.call('ZADD', KEYS[index], 'NX', now_ms + lease_ttl_ms, ARGV[1])
+  redis.call('ZADD', KEYS[index + 1], 'NX', now_ms, ARGV[1])
+  local active_tail = redis.call('ZRANGE', KEYS[index], -1, -1, 'WITHSCORES')
+  local active_ttl = 120000
+  if #active_tail == 2 then
+    active_ttl = math.max(active_ttl, tonumber(active_tail[2]) - now_ms + 60000)
+  end
+  extend_ttl(KEYS[index], active_ttl)
+  extend_ttl(KEYS[index + 1], 120000)
 end
-extend_ttl(KEYS[1], active_ttl)
-extend_ttl(KEYS[2], 120000)
 return 0
+"#;
+
+const RELEASE_SCRIPT: &str = r#"
+local removed = 0
+for _, key in ipairs(KEYS) do
+  removed = removed + redis.call('ZREM', key, ARGV[1])
+end
+return removed
 "#;
 
 const RESTORE_SCRIPT: &str = r#"
@@ -118,11 +131,16 @@ pub struct ClientAdmissionLimits {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClientAdmissionScope {
+    pub scope_ref: String,
+    pub limits: ClientAdmissionLimits,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientAdmissionRequest {
     pub model_request_id: String,
-    pub client_api_key_ref: String,
     pub lease_ttl: Duration,
-    pub limits: ClientAdmissionLimits,
+    pub scopes: Vec<ClientAdmissionScope>,
 }
 
 impl ClientAdmissionRequest {
@@ -132,17 +150,22 @@ impl ClientAdmissionRequest {
             "model_request_id",
             &self.model_request_id,
         )?;
-        require_nonempty(
-            "client admission",
-            "client_api_key_ref",
-            &self.client_api_key_ref,
-        )?;
+        if self.scopes.is_empty() || self.scopes.len() > 32 {
+            return Err(invalid("admission requires between 1 and 32 scopes"));
+        }
+        let mut scopes = HashSet::new();
+        for scope in &self.scopes {
+            require_nonempty("client admission", "scope_ref", &scope.scope_ref)?;
+            if !scopes.insert(&scope.scope_ref) {
+                return Err(invalid("admission scopes must be unique"));
+            }
+            redis_integer(scope.limits.max_concurrency, "maximum concurrency")?;
+            redis_integer(scope.limits.requests_per_minute, "requests per minute")?;
+        }
         if self.lease_ttl.is_zero() {
             return Err(invalid("lease TTL must be positive"));
         }
         redis_duration_millis(self.lease_ttl)?;
-        redis_integer(self.limits.max_concurrency, "maximum concurrency")?;
-        redis_integer(self.limits.requests_per_minute, "requests per minute")?;
         Ok(())
     }
 }
@@ -161,18 +184,14 @@ pub struct ClientAdmissionRunningRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientAdmissionRestore {
-    pub client_api_key_ref: String,
+    pub scope_ref: String,
     pub recent_requests: Vec<ClientAdmissionRecentRequest>,
     pub running_requests: Vec<ClientAdmissionRunningRequest>,
 }
 
 impl ClientAdmissionRestore {
     pub fn validate(&self) -> StoreResult<()> {
-        require_nonempty(
-            "client admission",
-            "client_api_key_ref",
-            &self.client_api_key_ref,
-        )?;
+        require_nonempty("client admission", "scope_ref", &self.scope_ref)?;
         redis_len(self.recent_requests.len(), "recent request count")?;
         redis_len(self.running_requests.len(), "running request count")?;
 
@@ -223,14 +242,14 @@ pub trait ClientAdmissionRepository: Send + Sync {
     ) -> StoreResult<ClientAdmissionDecision>;
     async fn release_client_request(
         &self,
-        client_api_key_ref: &str,
+        scope_refs: &[String],
         model_request_id: &str,
     ) -> StoreResult<bool>;
     async fn restore_client_admission(
         &self,
         recovery: &ClientAdmissionRestore,
     ) -> StoreResult<ClientAdmissionRestoreResult>;
-    async fn clear_client_admission(&self, client_api_key_ref: &str) -> StoreResult<()>;
+    async fn clear_client_admission(&self, scope_ref: &str) -> StoreResult<()>;
 }
 
 #[derive(Clone)]
@@ -247,12 +266,17 @@ impl RedisClientAdmissionRepository {
         })
     }
 
-    fn keys(&self, client_api_key_ref: &str) -> StoreResult<[String; 2]> {
-        let fingerprint = resource_fingerprint("client admission", client_api_key_ref)?;
-        let tag = format!("{{{fingerprint}}}");
+    fn keys(&self, scope_ref: &str) -> StoreResult<[String; 2]> {
+        let fingerprint = resource_fingerprint("client admission", scope_ref)?;
         Ok([
-            format!("{}:client:{tag}:active", self.namespace),
-            format!("{}:client:{tag}:requests", self.namespace),
+            format!(
+                "{}:client:{{admission}}:{fingerprint}:active",
+                self.namespace
+            ),
+            format!(
+                "{}:client:{{admission}}:{fingerprint}:requests",
+                self.namespace
+            ),
         ])
     }
 }
@@ -264,18 +288,24 @@ impl ClientAdmissionRepository for RedisClientAdmissionRepository {
         request: &ClientAdmissionRequest,
     ) -> StoreResult<ClientAdmissionDecision> {
         request.validate()?;
-        let keys = self.keys(&request.client_api_key_ref)?;
         let lease_ttl_ms = u64::try_from(request.lease_ttl.as_millis())
             .map_err(|_| invalid("lease TTL is too large"))?;
         let mut connection = self.connection.clone();
-        let code = Script::new(ADMIT_SCRIPT)
-            .key(&keys[0])
-            .key(&keys[1])
+        let script = Script::new(ADMIT_SCRIPT);
+        let mut invocation = script.prepare_invoke();
+        invocation
             .arg(&request.model_request_id)
             .arg(lease_ttl_ms)
-            .arg(request.limits.max_concurrency)
-            .arg(request.limits.requests_per_minute)
-            .arg(MAX_REDIS_EXACT_INTEGER)
+            .arg(MAX_REDIS_EXACT_INTEGER);
+        for scope in &request.scopes {
+            let keys = self.keys(&scope.scope_ref)?;
+            invocation
+                .key(&keys[0])
+                .key(&keys[1])
+                .arg(scope.limits.max_concurrency)
+                .arg(scope.limits.requests_per_minute);
+        }
+        let code = invocation
             .invoke_async::<i64>(&mut connection)
             .await
             .map_err(|_| redis_unavailable("admit client request"))?;
@@ -294,19 +324,29 @@ impl ClientAdmissionRepository for RedisClientAdmissionRepository {
 
     async fn release_client_request(
         &self,
-        client_api_key_ref: &str,
+        scope_refs: &[String],
         model_request_id: &str,
     ) -> StoreResult<bool> {
         require_nonempty("client admission", "model_request_id", model_request_id)?;
-        let keys = self.keys(client_api_key_ref)?;
+        if scope_refs.is_empty() || scope_refs.len() > 32 {
+            return Err(invalid("release requires between 1 and 32 scopes"));
+        }
+        let keys = scope_refs
+            .iter()
+            .map(|scope| self.keys(scope).map(|keys| keys[0].clone()))
+            .collect::<StoreResult<Vec<_>>>()?;
         let mut connection = self.connection.clone();
-        let removed = redis::cmd("ZREM")
-            .arg(&keys[0])
+        let script = Script::new(RELEASE_SCRIPT);
+        let mut invocation = script.prepare_invoke();
+        for key in keys {
+            invocation.key(key);
+        }
+        let removed = invocation
             .arg(model_request_id)
-            .query_async::<i64>(&mut connection)
+            .invoke_async::<i64>(&mut connection)
             .await
             .map_err(|_| redis_unavailable("release client request"))?;
-        Ok(removed == 1)
+        Ok(removed > 0)
     }
 
     async fn restore_client_admission(
@@ -314,7 +354,7 @@ impl ClientAdmissionRepository for RedisClientAdmissionRepository {
         recovery: &ClientAdmissionRestore,
     ) -> StoreResult<ClientAdmissionRestoreResult> {
         recovery.validate()?;
-        let keys = self.keys(&recovery.client_api_key_ref)?;
+        let keys = self.keys(&recovery.scope_ref)?;
         let script = Script::new(RESTORE_SCRIPT);
         let mut invocation = script.prepare_invoke();
         invocation.key(&keys[0]).key(&keys[1]).arg(redis_len(
@@ -379,12 +419,18 @@ impl ClientAdmissionPort for RedisClientAdmissionRepository {
         Box::pin(async move {
             self.admit_client_request(&ClientAdmissionRequest {
                 model_request_id: request.model_request_id.as_str().to_owned(),
-                client_api_key_ref: request.client_api_key_id.as_str().to_owned(),
                 lease_ttl: request.lease_ttl,
-                limits: ClientAdmissionLimits {
-                    max_concurrency: request.limits.max_concurrency,
-                    requests_per_minute: request.limits.requests_per_minute,
-                },
+                scopes: request
+                    .scopes
+                    .into_iter()
+                    .map(|scope| ClientAdmissionScope {
+                        scope_ref: scope.id.to_string(),
+                        limits: ClientAdmissionLimits {
+                            max_concurrency: scope.limits.max_concurrency,
+                            requests_per_minute: scope.limits.requests_per_minute,
+                        },
+                    })
+                    .collect(),
             })
             .await
             .map(|decision| match decision {
@@ -402,11 +448,15 @@ impl ClientAdmissionPort for RedisClientAdmissionRepository {
 
     fn release<'a>(
         &'a self,
-        client_api_key_id: &'a gateway_core::policy::ClientApiKeyId,
+        scope_ids: &'a [gateway_core::policy::AdmissionScopeId],
         model_request_id: &'a gateway_core::engine::ModelRequestId,
     ) -> futures::future::BoxFuture<'a, Result<bool, CoreAdmissionError>> {
         Box::pin(async move {
-            self.release_client_request(client_api_key_id.as_str(), model_request_id.as_str())
+            let scope_refs = scope_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>();
+            self.release_client_request(&scope_refs, model_request_id.as_str())
                 .await
                 .map_err(|_| CoreAdmissionError)
         })
@@ -419,7 +469,7 @@ impl ClientAdmissionPort for RedisClientAdmissionRepository {
     {
         Box::pin(async move {
             self.restore_client_admission(&ClientAdmissionRestore {
-                client_api_key_ref: recovery.client_api_key_id.as_str().to_owned(),
+                scope_ref: recovery.scope_id.to_string(),
                 recent_requests: recovery
                     .recent_requests
                     .into_iter()

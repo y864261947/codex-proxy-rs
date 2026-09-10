@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+mod admission;
+
 use gateway_core::policy::{
     ClientApiKeyId, ClientPolicy, ClientVersionRejection, CodexClientKind, CodexClientMinVersions,
     CodexClientVersion, PlaintextClientApiKey, RateLimits,

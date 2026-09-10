@@ -5,7 +5,7 @@ use gateway_store::redis::{
     ClientAdmissionDecision, ClientAdmissionLimits, ClientAdmissionRecentRequest,
     ClientAdmissionRejection, ClientAdmissionRepository, ClientAdmissionRequest,
     ClientAdmissionRestore, ClientAdmissionRestoreResult, ClientAdmissionRunningRequest,
-    RedisClientAdmissionRepository,
+    ClientAdmissionScope, RedisClientAdmissionRepository,
 };
 use redis::aio::ConnectionManager;
 use uuid::Uuid;
@@ -17,9 +17,207 @@ fn client_admission_rejects_zero_ttl() {
 }
 
 #[test]
+fn admission_rejects_empty_and_duplicate_scopes() {
+    let mut request = admission_request("request-1", "key-1", Duration::from_secs(30));
+    request.scopes.push(request.scopes[0].clone());
+    assert!(request.validate().is_err());
+    request.scopes.clear();
+    assert!(request.validate().is_err());
+}
+
+#[tokio::test]
+async fn customer_capacity_is_atomic_across_concurrent_keys_and_released_together() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let requests = (0..20)
+        .map(|index| {
+            let mut request = admission_request(
+                &format!("request-{index}"),
+                &format!("key-{index}"),
+                Duration::from_secs(30),
+            );
+            request.scopes.push(ClientAdmissionScope {
+                scope_ref: "customer:shared".to_owned(),
+                limits: ClientAdmissionLimits {
+                    max_concurrency: 3,
+                    requests_per_minute: 0,
+                },
+            });
+            request
+        })
+        .collect::<Vec<_>>();
+    let results = futures::future::join_all(
+        requests
+            .iter()
+            .map(|request| repository.admit_client_request(request)),
+    )
+    .await;
+    let granted = results
+        .iter()
+        .enumerate()
+        .filter_map(|(index, decision)| {
+            let decision = decision.as_ref().expect("atomic admission");
+            if *decision == ClientAdmissionDecision::Granted {
+                Some(index)
+            } else {
+                assert_eq!(
+                    *decision,
+                    ClientAdmissionDecision::Rejected(ClientAdmissionRejection::ConcurrencyLimited)
+                );
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(granted.len(), 3);
+    let winner = &requests[granted[0]];
+    assert_eq!(
+        repository
+            .admit_client_request(winner)
+            .await
+            .expect("idempotent admission at capacity"),
+        ClientAdmissionDecision::Granted
+    );
+    let scopes = winner
+        .scopes
+        .iter()
+        .map(|scope| scope.scope_ref.clone())
+        .collect::<Vec<_>>();
+    assert!(
+        repository
+            .release_client_request(&scopes, &winner.model_request_id)
+            .await
+            .expect("release all scopes")
+    );
+    assert!(
+        !repository
+            .release_client_request(&scopes, &winner.model_request_id)
+            .await
+            .expect("idempotent release")
+    );
+    let rejected = (0..requests.len())
+        .find(|index| !granted.contains(index))
+        .expect("rejected request");
+    assert_eq!(
+        repository
+            .admit_client_request(&requests[rejected])
+            .await
+            .expect("reuse parent slot"),
+        ClientAdmissionDecision::Granted
+    );
+    let mut child_only = winner.clone();
+    child_only.model_request_id = "request-child-after-release".to_owned();
+    child_only.scopes.truncate(1);
+    child_only.scopes[0].limits.max_concurrency = 1;
+    assert_eq!(
+        repository
+            .admit_client_request(&child_only)
+            .await
+            .expect("child slot also released"),
+        ClientAdmissionDecision::Granted
+    );
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
+#[tokio::test]
+async fn rejected_parent_does_not_consume_child_rpm_and_release_preserves_parent_rpm() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let parent = ClientAdmissionScope {
+        scope_ref: "customer:rpm".to_owned(),
+        limits: ClientAdmissionLimits {
+            max_concurrency: 0,
+            requests_per_minute: 1,
+        },
+    };
+    let mut first = admission_request("first", "key-a", Duration::from_secs(30));
+    first.scopes.push(parent.clone());
+    assert_eq!(
+        repository
+            .admit_client_request(&first)
+            .await
+            .expect("first admission"),
+        ClientAdmissionDecision::Granted
+    );
+    let refs = first
+        .scopes
+        .iter()
+        .map(|scope| scope.scope_ref.clone())
+        .collect::<Vec<_>>();
+    repository
+        .release_client_request(&refs, "first")
+        .await
+        .expect("release first");
+    let mut second = admission_request("second", "key-b", Duration::from_secs(30));
+    second.scopes[0].limits.requests_per_minute = 1;
+    second.scopes.push(parent);
+    assert_eq!(
+        repository
+            .admit_client_request(&second)
+            .await
+            .expect("shared RPM after release"),
+        ClientAdmissionDecision::Rejected(ClientAdmissionRejection::RateLimited)
+    );
+    second.model_request_id = "third".to_owned();
+    second.scopes.truncate(1);
+    assert_eq!(
+        repository
+            .admit_client_request(&second)
+            .await
+            .expect("rejected request consumed no child quota"),
+        ClientAdmissionDecision::Granted
+    );
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
+#[tokio::test]
+async fn rejected_child_does_not_reserve_an_earlier_parent_scope() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let mut occupied = admission_request("occupied", "key-child", Duration::from_secs(30));
+    occupied.scopes[0].limits.max_concurrency = 1;
+    assert_eq!(
+        repository
+            .admit_client_request(&occupied)
+            .await
+            .expect("occupy child"),
+        ClientAdmissionDecision::Granted
+    );
+    let parent = ClientAdmissionScope {
+        scope_ref: "customer:ordered".to_owned(),
+        limits: ClientAdmissionLimits {
+            max_concurrency: 1,
+            requests_per_minute: 1,
+        },
+    };
+    let mut rejected = occupied.clone();
+    rejected.model_request_id = "rejected".to_owned();
+    rejected.scopes.insert(0, parent.clone());
+    assert_eq!(
+        repository
+            .admit_client_request(&rejected)
+            .await
+            .expect("child full"),
+        ClientAdmissionDecision::Rejected(ClientAdmissionRejection::ConcurrencyLimited)
+    );
+    let mut next = admission_request("next", "key-other", Duration::from_secs(30));
+    next.scopes.insert(0, parent);
+    assert_eq!(
+        repository
+            .admit_client_request(&next)
+            .await
+            .expect("parent remains free"),
+        ClientAdmissionDecision::Granted
+    );
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
+#[test]
 fn client_admission_rejects_values_outside_redis_exact_integer_range() {
     let mut request = admission_request("request-1", "key-1", Duration::from_secs(30));
-    request.limits.max_concurrency = 1_u64 << 53;
+    request.scopes[0].limits.max_concurrency = 1_u64 << 53;
     assert!(request.validate().is_err());
 }
 
@@ -27,7 +225,7 @@ fn client_admission_rejects_values_outside_redis_exact_integer_range() {
 fn client_admission_restore_rejects_duplicate_request_ids() {
     let started_at = Utc::now();
     let recovery = ClientAdmissionRestore {
-        client_api_key_ref: "key-1".to_owned(),
+        scope_ref: "key-1".to_owned(),
         recent_requests: vec![
             recent_request("request-1", started_at),
             recent_request("request-1", started_at),
@@ -63,7 +261,7 @@ async fn restore_rebuilds_lost_cache_without_overwriting_new_admission() {
     );
     let redis_now = redis_now(&mut connection).await;
     let recovery = ClientAdmissionRestore {
-        client_api_key_ref: key_ref.to_owned(),
+        scope_ref: key_ref.to_owned(),
         recent_requests: vec![
             recent_request(
                 "request-before-crash",
@@ -121,7 +319,7 @@ async fn restore_rebuilds_lost_cache_without_overwriting_new_admission() {
     assert!((230_000..=245_000).contains(&active_ttl));
 
     let mut probe = admission_request("request-probe", key_ref, Duration::from_secs(30));
-    probe.limits.requests_per_minute = 3;
+    probe.scopes[0].limits.requests_per_minute = 3;
     assert_eq!(
         repository
             .admit_client_request(&probe)
@@ -131,7 +329,7 @@ async fn restore_rebuilds_lost_cache_without_overwriting_new_admission() {
     );
     assert!(
         repository
-            .release_client_request(key_ref, "request-before-crash")
+            .release_client_request(&[key_ref.to_owned()], "request-before-crash")
             .await
             .expect("release restored request by durable ID")
     );
@@ -144,12 +342,12 @@ async fn restore_rebuilds_lost_cache_without_overwriting_new_admission() {
     );
     assert!(
         repository
-            .release_client_request(key_ref, "request-after-crash")
+            .release_client_request(&[key_ref.to_owned()], "request-after-crash")
             .await
             .expect("release admission created during recovery")
     );
     let mut rate_probe = admission_request("request-rate-probe", key_ref, Duration::from_secs(30));
-    rate_probe.limits.requests_per_minute = 3;
+    rate_probe.scopes[0].limits.requests_per_minute = 3;
     assert_eq!(
         repository
             .admit_client_request(&rate_probe)
@@ -172,7 +370,7 @@ async fn restore_uses_redis_time_for_window_and_running_expiry_boundaries() {
     let key_ref = "key-time-boundary";
     let redis_now = redis_now(&mut connection).await;
     let recovery = ClientAdmissionRestore {
-        client_api_key_ref: key_ref.to_owned(),
+        scope_ref: key_ref.to_owned(),
         recent_requests: vec![
             recent_request(
                 "request-at-cutoff",
@@ -211,7 +409,7 @@ async fn restore_uses_redis_time_for_window_and_running_expiry_boundaries() {
     assert!((230_000..=245_000).contains(&active_ttl));
     assert!(
         repository
-            .release_client_request(key_ref, "request-live")
+            .release_client_request(&[key_ref.to_owned()], "request-live")
             .await
             .expect("release live recovered request")
     );
@@ -229,7 +427,7 @@ async fn restore_rejects_future_window_fact_without_partial_write() {
     };
     let redis_now = redis_now(&mut connection).await;
     let recovery = ClientAdmissionRestore {
-        client_api_key_ref: "key-future-fact".to_owned(),
+        scope_ref: "key-future-fact".to_owned(),
         recent_requests: vec![
             recent_request("request-valid", redis_now - chrono::Duration::seconds(1)),
             recent_request("request-future", redis_now + chrono::Duration::seconds(10)),
@@ -248,17 +446,19 @@ async fn restore_rejects_future_window_fact_without_partial_write() {
 
 fn admission_request(
     model_request_id: &str,
-    client_api_key_ref: &str,
+    scope_ref: &str,
     lease_ttl: Duration,
 ) -> ClientAdmissionRequest {
     ClientAdmissionRequest {
         model_request_id: model_request_id.to_owned(),
-        client_api_key_ref: client_api_key_ref.to_owned(),
+        scopes: vec![ClientAdmissionScope {
+            scope_ref: scope_ref.to_owned(),
+            limits: ClientAdmissionLimits {
+                max_concurrency: 2,
+                requests_per_minute: 0,
+            },
+        }],
         lease_ttl,
-        limits: ClientAdmissionLimits {
-            max_concurrency: 2,
-            requests_per_minute: 0,
-        },
     }
 }
 

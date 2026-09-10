@@ -12,7 +12,7 @@ use gateway_core::{
             ClientAdmissionRecoveryPort, RecentAdmissionFact, RunningAdmissionFact,
         },
     },
-    policy::ClientApiKeyId,
+    policy::{AdmissionScopeId, ClientApiKeyId},
 };
 use sqlx::PgPool;
 
@@ -138,7 +138,7 @@ impl ClientAdmissionRecoveryPort for PgClientAdmissionRecoveryRepository {
                         })
                         .collect::<Result<Vec<_>, ClientAdmissionError>>()?;
                     Ok(CoreAdmissionRecovery {
-                        client_api_key_id,
+                        scope_id: AdmissionScopeId::Key(client_api_key_id),
                         recent_requests,
                         running_requests,
                     })

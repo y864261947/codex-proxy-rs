@@ -2,7 +2,10 @@
 //!
 //! Client API Key 冻结账号分组权限；模型名称不参与权限判断。
 
+mod admission;
 mod client_version;
+
+pub use admission::{AdmissionScope, AdmissionScopeId, CustomerId, CustomerPolicy};
 
 pub use client_version::{
     ClientVersionRejection, CodexClientKind, CodexClientMinVersions, CodexClientVersion,
@@ -93,6 +96,7 @@ impl RateLimits {
 /// 从 `client_api_keys` 冻结的公开准入事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientPolicy {
+    customer: Option<CustomerPolicy>,
     key_id: ClientApiKeyId,
     plaintext_key: PlaintextClientApiKey,
     account_scope: Arc<FrozenAccountScope>,
@@ -111,6 +115,7 @@ impl ClientPolicy {
     ) -> Self {
         Self {
             key_id,
+            customer: None,
             plaintext_key,
             account_scope,
             enabled,
@@ -121,6 +126,32 @@ impl ClientPolicy {
     #[must_use]
     pub const fn key_id(&self) -> &ClientApiKeyId {
         &self.key_id
+    }
+
+    #[must_use]
+    pub fn with_customer(mut self, customer: Option<CustomerPolicy>) -> Self {
+        self.customer = customer;
+        self
+    }
+
+    #[must_use]
+    pub const fn customer(&self) -> Option<&CustomerPolicy> {
+        self.customer.as_ref()
+    }
+
+    #[must_use]
+    pub fn admission_scopes(&self) -> Vec<AdmissionScope> {
+        let mut scopes = vec![AdmissionScope {
+            id: AdmissionScopeId::Key(self.key_id.clone()),
+            limits: self.limits,
+        }];
+        if let Some(customer) = &self.customer {
+            scopes.push(AdmissionScope {
+                id: AdmissionScopeId::Customer(customer.id.clone()),
+                limits: customer.limits,
+            });
+        }
+        scopes
     }
 
     #[must_use]
@@ -149,6 +180,15 @@ impl ClientPolicy {
     ///
     /// Key 已禁用时返回稳定拒绝原因。
     pub fn authorize(&self) -> Result<(), PolicyError> {
+        if self
+            .customer
+            .as_ref()
+            .is_some_and(|customer| !customer.enabled)
+        {
+            return Err(PolicyError::Denied {
+                reason: "customer is disabled",
+            });
+        }
         if self.enabled {
             Ok(())
         } else {
