@@ -22,7 +22,7 @@ local clock = redis.call('TIME')
 local now_ms = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
 local cutoff = now_ms - 60000
 local lease_ttl_ms = tonumber(ARGV[2])
-if now_ms + lease_ttl_ms > tonumber(ARGV[3]) then return 3 end
+if now_ms + lease_ttl_ms > tonumber(ARGV[3]) then return {3, 0} end
 
 -- Check every scope before reserving any of them. Replayed admissions use the
 -- same request ID and must not consume a second slot or move the RPM timestamp.
@@ -32,9 +32,9 @@ for index = 1, #KEYS, 2 do
   local concurrency = tonumber(ARGV[index + 3])
   local rpm = tonumber(ARGV[index + 4])
   if concurrency > 0 and not redis.call('ZSCORE', KEYS[index], ARGV[1])
-      and redis.call('ZCARD', KEYS[index]) >= concurrency then return 2 end
+      and redis.call('ZCARD', KEYS[index]) >= concurrency then return {2, index} end
   if rpm > 0 and not redis.call('ZSCORE', KEYS[index + 1], ARGV[1])
-      and redis.call('ZCARD', KEYS[index + 1]) >= rpm then return 1 end
+      and redis.call('ZCARD', KEYS[index + 1]) >= rpm then return {1, index} end
 end
 
 local function extend_ttl(key, ttl)
@@ -53,7 +53,7 @@ for index = 1, #KEYS, 2 do
   extend_ttl(KEYS[index], active_ttl)
   extend_ttl(KEYS[index + 1], 120000)
 end
-return 0
+return {0, 0}
 "#;
 
 const RELEASE_SCRIPT: &str = r#"
@@ -226,6 +226,8 @@ pub struct ClientAdmissionRestoreResult {
 pub enum ClientAdmissionRejection {
     RateLimited,
     ConcurrencyLimited,
+    GlobalRateLimited,
+    GlobalConcurrencyLimited,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,19 +307,28 @@ impl ClientAdmissionRepository for RedisClientAdmissionRepository {
                 .arg(scope.limits.max_concurrency)
                 .arg(scope.limits.requests_per_minute);
         }
-        let code = invocation
-            .invoke_async::<i64>(&mut connection)
+        let (code, scope_index) = invocation
+            .invoke_async::<(i64, usize)>(&mut connection)
             .await
             .map_err(|_| redis_unavailable("admit client request"))?;
-        match code {
-            0 => Ok(ClientAdmissionDecision::Granted),
-            1 => Ok(ClientAdmissionDecision::Rejected(
-                ClientAdmissionRejection::RateLimited,
-            )),
-            2 => Ok(ClientAdmissionDecision::Rejected(
-                ClientAdmissionRejection::ConcurrencyLimited,
-            )),
-            3 => Err(invalid("lease expiry is outside the supported range")),
+        match (code, scope_index) {
+            (0, 0) => Ok(ClientAdmissionDecision::Granted),
+            (1 | 2, index) if index > 0 && index % 2 == 1 => {
+                let scope = request
+                    .scopes
+                    .get((index - 1) / 2)
+                    .ok_or_else(|| invalid("Redis returned an invalid admission scope"))?;
+                let global =
+                    scope.scope_ref == gateway_core::policy::AdmissionScopeId::Global.to_string();
+                let reason = match (code, global) {
+                    (1, true) => ClientAdmissionRejection::GlobalRateLimited,
+                    (2, true) => ClientAdmissionRejection::GlobalConcurrencyLimited,
+                    (1, false) => ClientAdmissionRejection::RateLimited,
+                    _ => ClientAdmissionRejection::ConcurrencyLimited,
+                };
+                Ok(ClientAdmissionDecision::Rejected(reason))
+            }
+            (3, 0) => Err(invalid("lease expiry is outside the supported range")),
             _ => Err(invalid("Redis returned an unknown admission decision")),
         }
     }
@@ -435,6 +446,14 @@ impl ClientAdmissionPort for RedisClientAdmissionRepository {
             .await
             .map(|decision| match decision {
                 ClientAdmissionDecision::Granted => CoreAdmissionDecision::Granted,
+                ClientAdmissionDecision::Rejected(ClientAdmissionRejection::GlobalRateLimited) => {
+                    CoreAdmissionDecision::Rejected(CoreAdmissionRejection::GlobalRateLimited)
+                }
+                ClientAdmissionDecision::Rejected(
+                    ClientAdmissionRejection::GlobalConcurrencyLimited,
+                ) => CoreAdmissionDecision::Rejected(
+                    CoreAdmissionRejection::GlobalConcurrencyLimited,
+                ),
                 ClientAdmissionDecision::Rejected(ClientAdmissionRejection::RateLimited) => {
                     CoreAdmissionDecision::Rejected(CoreAdmissionRejection::RateLimited)
                 }

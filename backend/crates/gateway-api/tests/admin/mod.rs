@@ -349,6 +349,7 @@ impl AuthStore for MemoryAuthStore {
 }
 
 pub(super) struct MemorySettingsStore {
+    global_limits: Mutex<gateway_core::policy::RateLimits>,
     settings: Mutex<RuntimeSettings>,
     api_key: Arc<Mutex<Option<AdminApiKey>>>,
 }
@@ -357,6 +358,7 @@ impl MemorySettingsStore {
     fn new(api_key: Arc<Mutex<Option<AdminApiKey>>>) -> Self {
         Self {
             settings: Mutex::new(test_runtime_settings()),
+            global_limits: Mutex::new(gateway_core::policy::RateLimits::unlimited()),
             api_key,
         }
     }
@@ -368,6 +370,30 @@ impl MemorySettingsStore {
 
 #[async_trait]
 impl SettingsStore for MemorySettingsStore {
+    async fn load_global_admission(
+        &self,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        let settings = self.settings.lock().expect("settings");
+        Ok(gateway_admin::model::settings::GlobalAdmissionSettings {
+            limits: *self.global_limits.lock().expect("global limits"),
+            config_revision: settings.config_revision,
+        })
+    }
+
+    async fn replace_global_admission(
+        &self,
+        limits: gateway_core::policy::RateLimits,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        let mut settings = self.settings.lock().expect("settings");
+        *self.global_limits.lock().expect("global limits") = limits;
+        settings.config_revision = next_revision(settings.config_revision);
+        Ok(gateway_admin::model::settings::GlobalAdmissionSettings {
+            limits,
+            config_revision: settings.config_revision,
+        })
+    }
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Ok(self.settings.lock().expect("settings").clone())
     }

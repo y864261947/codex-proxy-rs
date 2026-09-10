@@ -242,6 +242,60 @@ fn facts(config_revision: u64, observed_current_revision: u64) -> SnapshotFacts 
     facts_with_min_versions(config_revision, observed_current_revision, None, None)
 }
 
+#[test]
+fn global_limits_are_frozen_for_every_key_and_invalid_values_fail_closed() {
+    use gateway_core::policy::AdmissionScopeId;
+    let build = |limits: RateLimits| {
+        SnapshotFacts::new(
+            revision(1),
+            revision(1),
+            SnapshotSettingsFacts::new(3, 0, "smart", BTreeMap::new(), None, None)
+                .with_global_limits(limits),
+            ["first", "second"]
+                .into_iter()
+                .map(|name| {
+                    SnapshotClientPolicyFacts::new(
+                        ClientApiKeyId::new(format!("key_{name}")).expect("key"),
+                        PlaintextClientApiKey::new(format!("sk_{name}")).expect("secret"),
+                        Vec::new(),
+                        RateLimits::unlimited(),
+                    )
+                })
+                .collect(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        )
+    };
+    let limits = RateLimits {
+        max_concurrency: 4,
+        requests_per_minute: 30,
+    };
+    let snapshot =
+        block_on(compiler(Arc::new(TestSnapshotStore::new(Ok(build(limits))))).compile())
+            .expect("snapshot");
+    for policy in snapshot.client_policies() {
+        let scopes = policy.admission_scopes();
+        let global = scopes
+            .iter()
+            .find(|scope| scope.id == AdmissionScopeId::Global)
+            .expect("global scope");
+        assert_eq!(global.limits, limits);
+        assert_eq!(policy.limits(), RateLimits::unlimited());
+    }
+    assert_eq!(
+        block_on(
+            compiler(Arc::new(TestSnapshotStore::new(Ok(build(RateLimits {
+                max_concurrency: u64::MAX,
+                requests_per_minute: 0
+            })))))
+            .compile()
+        )
+        .expect_err("invalid global limits"),
+        RuntimeSnapshotCompileError::InvalidData
+    );
+}
+
 fn facts_with_min_versions(
     config_revision: u64,
     observed_current_revision: u64,

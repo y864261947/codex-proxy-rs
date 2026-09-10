@@ -751,6 +751,28 @@ struct FixtureSettingsStore;
 
 #[async_trait]
 impl SettingsStore for FixtureSettingsStore {
+    async fn load_global_admission(
+        &self,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        Err(gateway_admin::ports::store::AdminStoreError::new(
+            gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+            "global admission",
+            "unused in this fixture",
+        ))
+    }
+
+    async fn replace_global_admission(
+        &self,
+        _: gateway_core::policy::RateLimits,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        Err(gateway_admin::ports::store::AdminStoreError::new(
+            gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+            "global admission",
+            "unused in this fixture",
+        ))
+    }
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Ok(RuntimeSettings {
             config_revision: Revision::new(1).expect("revision"),

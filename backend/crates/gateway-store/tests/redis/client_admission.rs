@@ -28,6 +28,134 @@ fn admission_rejects_empty_and_duplicate_scopes() {
 }
 
 #[tokio::test]
+async fn global_limit_lowering_counts_existing_work_and_failed_admission_reserves_nothing() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let global_ref = gateway_core::policy::AdmissionScopeId::Global.to_string();
+    let mut running = admission_request("before-limit", "key:first", Duration::from_secs(30));
+    running.scopes.push(ClientAdmissionScope {
+        scope_ref: global_ref.clone(),
+        limits: ClientAdmissionLimits {
+            max_concurrency: 0,
+            requests_per_minute: 0,
+        },
+    });
+    assert_eq!(
+        repository
+            .admit_client_request(&running)
+            .await
+            .expect("unlimited global admission"),
+        ClientAdmissionDecision::Granted
+    );
+    let mut next = admission_request("after-limit", "key:second", Duration::from_secs(30));
+    next.scopes[0].limits = ClientAdmissionLimits {
+        max_concurrency: 1,
+        requests_per_minute: 1,
+    };
+    next.scopes.push(ClientAdmissionScope {
+        scope_ref: global_ref.clone(),
+        limits: ClientAdmissionLimits {
+            max_concurrency: 1,
+            requests_per_minute: 0,
+        },
+    });
+    assert_eq!(
+        repository
+            .admit_client_request(&next)
+            .await
+            .expect("global full"),
+        ClientAdmissionDecision::Rejected(ClientAdmissionRejection::GlobalConcurrencyLimited)
+    );
+    let scopes = running
+        .scopes
+        .iter()
+        .map(|scope| scope.scope_ref.clone())
+        .collect::<Vec<_>>();
+    repository
+        .release_client_request(&scopes, &running.model_request_id)
+        .await
+        .expect("release running");
+    next.scopes[1].limits.requests_per_minute = 1;
+    assert_eq!(
+        repository
+            .admit_client_request(&next)
+            .await
+            .expect("global rpm retained"),
+        ClientAdmissionDecision::Rejected(ClientAdmissionRejection::GlobalRateLimited)
+    );
+    next.scopes[1].limits.requests_per_minute = 0;
+    assert_eq!(
+        repository
+            .admit_client_request(&next)
+            .await
+            .expect("rejected attempts did not consume key rpm"),
+        ClientAdmissionDecision::Granted
+    );
+    assert_eq!(
+        repository
+            .admit_client_request(&next)
+            .await
+            .expect("idempotent retry"),
+        ClientAdmissionDecision::Granted
+    );
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
+#[tokio::test]
+async fn unrelated_customers_and_keys_compete_for_the_same_global_capacity() {
+    let Some((repository, mut connection, namespace)) = repository().await else {
+        return;
+    };
+    let requests = (0..20)
+        .map(|index| {
+            let mut request = admission_request(
+                &format!("request-{index}"),
+                &format!("key:{index}"),
+                Duration::from_secs(30),
+            );
+            request.scopes.extend([
+                ClientAdmissionScope {
+                    scope_ref: format!("customer:{index}"),
+                    limits: ClientAdmissionLimits {
+                        max_concurrency: 2,
+                        requests_per_minute: 10,
+                    },
+                },
+                ClientAdmissionScope {
+                    scope_ref: gateway_core::policy::AdmissionScopeId::Global.to_string(),
+                    limits: ClientAdmissionLimits {
+                        max_concurrency: 3,
+                        requests_per_minute: 0,
+                    },
+                },
+            ]);
+            request
+        })
+        .collect::<Vec<_>>();
+    let decisions = futures::future::join_all(
+        requests
+            .iter()
+            .map(|request| repository.admit_client_request(request)),
+    )
+    .await;
+    let mut accepted = 0;
+    for result in decisions {
+        match result.expect("admission") {
+            ClientAdmissionDecision::Granted => accepted += 1,
+            rejected => assert_eq!(
+                rejected,
+                ClientAdmissionDecision::Rejected(
+                    ClientAdmissionRejection::GlobalConcurrencyLimited
+                )
+            ),
+        }
+    }
+    assert_eq!(accepted, 3);
+    delete_namespace_keys(&mut connection, &namespace).await;
+}
+
+#[tokio::test]
 async fn customer_capacity_is_atomic_across_concurrent_keys_and_released_together() {
     let Some((repository, mut connection, namespace)) = repository().await else {
         return;

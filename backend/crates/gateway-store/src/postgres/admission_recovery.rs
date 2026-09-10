@@ -66,8 +66,9 @@ impl ClientAdmissionRecoveryRepository for PgClientAdmissionRecoveryRepository {
         let rows = sqlx::query_as::<_, (String, String, String, DateTime<Utc>, DateTime<Utc>, String)>(
             "select scope.kind, scope.ref, r.id, r.started_at, r.deadline_at, r.outcome
              from model_requests r
-             cross join lateral (values ('key', r.client_api_key_ref), ('customer', r.customer_ref), ('access_group', r.access_group_ref)) scope(kind, ref)
-             where scope.ref is not null and (r.started_at >= $1 or r.outcome = 'running')
+             cross join lateral (values ('key', r.client_api_key_ref), ('customer', r.customer_ref), ('access_group', r.access_group_ref), ('global', 'requests')) scope(kind, ref)
+             where scope.ref is not null and r.client_transport <> 'internal'
+               and (r.started_at >= $1 or r.outcome = 'running')
              order by scope.kind, scope.ref, r.started_at, r.id",
         )
         .bind(window_started_at)
@@ -77,6 +78,7 @@ impl ClientAdmissionRecoveryRepository for PgClientAdmissionRecoveryRepository {
         let mut recoveries = BTreeMap::<AdmissionScopeId, ClientAdmissionRecovery>::new();
         for (kind, reference, model_request_id, started_at, deadline_at, outcome) in rows {
             let scope_id = match kind.as_str() {
+                "global" => AdmissionScopeId::Global,
                 "key" => AdmissionScopeId::Key(
                     ClientApiKeyId::new(reference)
                         .map_err(|_| postgres_unavailable("invalid admission key ref"))?,

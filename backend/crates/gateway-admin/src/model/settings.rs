@@ -11,6 +11,12 @@ use super::Revision;
 /// 客户端模型到上游模型的全局精确映射。
 pub type ModelMappings = BTreeMap<PublicModelId, UpstreamModelId>;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalAdmissionSettings {
+    pub limits: gateway_core::policy::RateLimits,
+    pub config_revision: Revision,
+}
+
 /// 账号调度策略；由 Core 拥有稳定值与 wire 映射。
 pub use gateway_core::account::RotationStrategy;
 

@@ -31,14 +31,14 @@ fn customer_disable_denies_enabled_keys_and_keeps_independent_limits() {
         "disabled customers must be excluded from the authentication snapshot"
     );
     let scopes = policy.admission_scopes();
-    assert_eq!(scopes.len(), 2);
+    assert_eq!(scopes.len(), 3);
     assert_eq!(scopes[0].limits.max_concurrency, 3);
     assert_eq!(scopes[1].id, AdmissionScopeId::Customer(customer.id));
     assert_eq!(scopes[1].limits.requests_per_minute, 60);
 }
 
 #[test]
-fn unassigned_keys_keep_a_single_scope_and_scope_types_cannot_collide() {
+fn unassigned_keys_keep_key_and_global_scopes_and_scope_types_cannot_collide() {
     let policy = ClientPolicy::new(
         ClientApiKeyId::new("cust_same").expect("key id"),
         plaintext("sk_child_secret"),
@@ -48,7 +48,9 @@ fn unassigned_keys_keep_a_single_scope_and_scope_types_cannot_collide() {
     );
     assert!(policy.authorize().is_ok());
     let scopes = policy.admission_scopes();
-    assert_eq!(scopes.len(), 1);
+    assert_eq!(scopes.len(), 2);
+    assert_eq!(scopes[1].id, AdmissionScopeId::Global);
+    assert_eq!(scopes[1].limits, RateLimits::unlimited());
     assert_ne!(
         scopes[0].id.to_string(),
         AdmissionScopeId::Customer(CustomerId::new("cust_same").expect("customer id")).to_string()

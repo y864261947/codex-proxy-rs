@@ -19,6 +19,7 @@ mod client_keys;
 mod customers;
 mod execution;
 mod execution_buffer;
+mod global_admission;
 mod health;
 mod observability;
 mod ops_events;

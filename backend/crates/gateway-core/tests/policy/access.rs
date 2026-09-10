@@ -8,7 +8,7 @@ use gateway_core::policy::{
 use super::{account_scope, plaintext};
 
 #[test]
-fn exact_public_model_permissions_and_three_independent_scopes_are_frozen() {
+fn exact_public_model_permissions_and_four_independent_scopes_are_frozen() {
     let group = AccessGroupPolicy {
         id: AccessGroupId::new("access_team").expect("access group"),
         enabled: true,
@@ -48,7 +48,7 @@ fn exact_public_model_permissions_and_three_independent_scopes_are_frozen() {
             .iter()
             .map(|scope| scope.limits.max_concurrency)
             .collect::<Vec<_>>(),
-        [2, 4, 10]
+        [2, 4, 10, 0]
     );
     assert_eq!(
         scopes[2].id,

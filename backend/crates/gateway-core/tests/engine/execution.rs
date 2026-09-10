@@ -771,6 +771,97 @@ impl ExecutionStore for TrackingExecutionStore {
 
 struct UnusedAdmissions;
 
+struct RejectingAdmissions {
+    reason: gateway_core::engine::admission::ClientAdmissionRejection,
+    requests: Mutex<Vec<ClientAdmissionRequest>>,
+}
+
+impl RejectingAdmissions {
+    fn new(reason: gateway_core::engine::admission::ClientAdmissionRejection) -> Self {
+        Self {
+            reason,
+            requests: Mutex::new(Vec::new()),
+        }
+    }
+}
+
+impl ClientAdmissionPort for RejectingAdmissions {
+    fn admit(
+        &self,
+        request: ClientAdmissionRequest,
+    ) -> BoxFuture<'_, Result<ClientAdmissionDecision, ClientAdmissionError>> {
+        assert!(
+            request
+                .scopes
+                .iter()
+                .any(|scope| scope.id == gateway_core::policy::AdmissionScopeId::Global)
+        );
+        self.requests.lock().expect("admissions").push(request);
+        Box::pin(async { Ok(ClientAdmissionDecision::Rejected(self.reason)) })
+    }
+
+    fn release<'a>(
+        &'a self,
+        _: &'a [gateway_core::policy::AdmissionScopeId],
+        _: &'a ModelRequestId,
+    ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
+        Box::pin(async { panic!("rejected admission cannot own a lease") })
+    }
+
+    fn restore(
+        &self,
+        _: ClientAdmissionRecovery,
+    ) -> BoxFuture<'_, Result<ClientAdmissionRestoreResult, ClientAdmissionError>> {
+        Box::pin(async { unreachable!("startup recovery not used") })
+    }
+}
+
+#[test]
+fn global_capacity_rejections_are_distinct_from_downstream_limits_and_do_not_start_execution() {
+    use gateway_core::engine::admission::ClientAdmissionRejection;
+    for (reason, expected) in [
+        (
+            ClientAdmissionRejection::GlobalConcurrencyLimited,
+            GatewayErrorKind::NoAvailableProvider,
+        ),
+        (
+            ClientAdmissionRejection::GlobalRateLimited,
+            GatewayErrorKind::NoAvailableProvider,
+        ),
+        (
+            ClientAdmissionRejection::ConcurrencyLimited,
+            GatewayErrorKind::RateLimited,
+        ),
+        (
+            ClientAdmissionRejection::RateLimited,
+            GatewayErrorKind::RateLimited,
+        ),
+    ] {
+        let store = Arc::new(TrackingExecutionStore::default());
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(start_snapshot()),
+            store.clone(),
+            ProviderRegistry::default(),
+            Arc::new(RejectingAdmissions::new(reason)),
+            Arc::new(UnusedCircuits),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let client = service.authenticate("sk_start_test").expect("client");
+        let error = block_on(service.start(StartExecution {
+            client,
+            public_model: PublicModelId::new("gpt-start").expect("model"),
+            operation: start_operation(),
+            metadata: access_test_metadata(),
+        }))
+        .err()
+        .expect("admission rejected");
+        assert_eq!(error.kind(), expected);
+        assert!(!store.touched.load(Ordering::SeqCst));
+        assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
+    }
+}
+
 impl ClientAdmissionPort for UnusedAdmissions {
     fn admit(
         &self,
@@ -977,6 +1068,13 @@ fn start_snapshot() -> RuntimeSnapshot {
 fn start_snapshot_with_access_group(
     group: Option<gateway_core::policy::AccessGroupPolicy>,
 ) -> RuntimeSnapshot {
+    start_snapshot_with_limits(group, RateLimits::unlimited())
+}
+
+fn start_snapshot_with_limits(
+    group: Option<gateway_core::policy::AccessGroupPolicy>,
+    global_limits: RateLimits,
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
     let capabilities =
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
@@ -1001,7 +1099,8 @@ fn start_snapshot_with_access_group(
                 true,
                 RateLimits::unlimited(),
             )
-            .with_access_group(group),
+            .with_access_group(group)
+            .with_global_limits(global_limits),
         ],
     )
     .expect("start snapshot")
@@ -1087,6 +1186,81 @@ fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoin
     .err()
     .expect("model-less endpoint must not bypass the model allowlist");
     assert_eq!(error.kind(), GatewayErrorKind::PolicyDenied);
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
+}
+
+#[test]
+fn each_websocket_generation_rechecks_current_limits_permissions_and_snapshot_availability() {
+    use gateway_core::engine::admission::ClientAdmissionRejection;
+    use gateway_core::policy::{AccessGroupId, AccessGroupPolicy, AdmissionScopeId};
+    let snapshots = RuntimeSnapshotHandle::new(start_snapshot());
+    let admissions = Arc::new(RejectingAdmissions::new(
+        ClientAdmissionRejection::GlobalConcurrencyLimited,
+    ));
+    let service = DefaultExecutionService::new(
+        snapshots.clone(),
+        Arc::new(TrackingExecutionStore::default()),
+        ProviderRegistry::default(),
+        admissions.clone(),
+        Arc::new(UnusedCircuits),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let connection_client = service
+        .authenticate("sk_start_test")
+        .expect("connection authentication");
+    let request = || {
+        let mut metadata = access_test_metadata();
+        metadata.transport = ClientTransport::WebSocket;
+        StartExecution {
+            client: connection_client.clone(),
+            public_model: PublicModelId::new("gpt-start").expect("model"),
+            operation: start_operation(),
+            metadata,
+        }
+    };
+    let limits = RateLimits {
+        max_concurrency: 1,
+        requests_per_minute: 10,
+    };
+    snapshots.publish(start_snapshot_with_limits(None, limits));
+    let error = block_on(service.start(request()))
+        .err()
+        .expect("new global limit");
+    assert_eq!(error.kind(), GatewayErrorKind::NoAvailableProvider);
+    let recorded = admissions.requests.lock().expect("admissions");
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(
+        recorded[0]
+            .scopes
+            .iter()
+            .find(|scope| scope.id == AdmissionScopeId::Global)
+            .expect("global")
+            .limits,
+        limits
+    );
+    drop(recorded);
+
+    snapshots.publish(start_snapshot_with_access_group(Some(AccessGroupPolicy {
+        id: AccessGroupId::new("access_revoked").expect("group"),
+        enabled: false,
+        limits: RateLimits::unlimited(),
+        allowed_models: BTreeSet::from(["gpt-start".to_owned()]),
+        pool_group_ids: BTreeSet::new(),
+    })));
+    let error = block_on(service.start(request()))
+        .err()
+        .expect("group disabled after connection authenticated");
+    assert_eq!(error.kind(), GatewayErrorKind::PolicyDenied);
+    snapshots.suspend();
+    assert_eq!(
+        block_on(service.start(request()))
+            .err()
+            .expect("snapshot suspended")
+            .kind(),
+        GatewayErrorKind::NoAvailableProvider
+    );
+    assert_eq!(admissions.requests.lock().expect("admissions").len(), 1);
     assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
 }
 

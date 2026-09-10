@@ -49,12 +49,22 @@ async fn recovery_loads_precise_window_and_running_request_facts() {
     )
     .await;
 
+    seed_request(
+        &database.pool,
+        "internal-probe",
+        now - Duration::seconds(5),
+        now + Duration::seconds(30),
+        "running",
+    )
+    .await;
+    sqlx::query("update model_requests set client_transport = 'internal', client_api_key_ref = 'internal_probe' where id = 'internal-probe'")
+        .execute(&database.pool).await.expect("internal probe is not customer admission");
     let repository = PgClientAdmissionRecoveryRepository::new(database.pool.clone());
     let actual = repository
         .load_client_admission_recovery(window_started_at)
         .await
         .expect("load precise admission recovery facts");
-    let expected = vec![ClientAdmissionRecovery {
+    let mut expected = vec![ClientAdmissionRecovery {
         scope_id: AdmissionScopeId::Key(ClientApiKeyId::new("key-recovery").expect("key ID")),
         recent_requests: vec![
             ClientAdmissionRecentRequest {
@@ -77,6 +87,9 @@ async fn recovery_loads_precise_window_and_running_request_facts() {
             },
         ],
     }];
+    let mut global = expected[0].clone();
+    global.scope_id = AdmissionScopeId::Global;
+    expected.push(global);
     assert_eq!(actual, expected);
 
     database.close().await;
@@ -161,7 +174,7 @@ async fn recovery_aggregates_frozen_customer_refs_after_key_reassignment_and_del
         .load_client_admission_recovery(now - Duration::seconds(60))
         .await
         .expect("load frozen recovery");
-    assert_eq!(recoveries.len(), 3);
+    assert_eq!(recoveries.len(), 4);
     let original =
         AdmissionScopeId::Customer(CustomerId::new("cust_original").expect("customer ID"));
     let customer = recoveries
@@ -217,7 +230,7 @@ async fn recovery_uses_access_group_at_admission_after_reassignment_and_deletion
         .load_client_admission_recovery(now - Duration::seconds(60))
         .await
         .expect("recovery");
-    assert_eq!(recoveries.len(), 3);
+    assert_eq!(recoveries.len(), 4);
     let original = AdmissionScopeId::AccessGroup(AccessGroupId::new("access_old").expect("group"));
     let group = recoveries
         .iter()

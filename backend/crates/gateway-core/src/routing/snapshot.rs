@@ -27,6 +27,7 @@ const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
 /// Store 在一个一致性读取中提供的调度设置事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotSettingsFacts {
+    global_limits: RateLimits,
     max_concurrent_per_account: u32,
     request_interval_ms: u64,
     rotation_strategy: String,
@@ -36,6 +37,12 @@ pub struct SnapshotSettingsFacts {
 }
 
 impl SnapshotSettingsFacts {
+    #[must_use]
+    pub const fn with_global_limits(mut self, limits: RateLimits) -> Self {
+        self.global_limits = limits;
+        self
+    }
+
     #[must_use]
     pub fn new(
         max_concurrent_per_account: u32,
@@ -47,6 +54,7 @@ impl SnapshotSettingsFacts {
     ) -> Self {
         Self {
             max_concurrent_per_account,
+            global_limits: RateLimits::unlimited(),
             request_interval_ms,
             rotation_strategy: rotation_strategy.into(),
             model_mappings,
@@ -372,6 +380,9 @@ async fn compile_runtime_snapshot(
             .ok_or(RuntimeSnapshotCompileError::InvalidData)?,
         Duration::from_millis(facts.settings.request_interval_ms),
     );
+    if !facts.settings.global_limits.is_valid() {
+        return Err(RuntimeSnapshotCompileError::InvalidData);
+    }
     let mut client_policies = Vec::with_capacity(facts.client_policies.len());
     for mut policy in facts.client_policies {
         if let Some(group) = &policy.access_group {
@@ -425,6 +436,7 @@ async fn compile_runtime_snapshot(
                 true,
                 policy.limits,
             )
+            .with_global_limits(facts.settings.global_limits)
             .with_customer(policy.customer)
             .with_access_group(policy.access_group),
         );

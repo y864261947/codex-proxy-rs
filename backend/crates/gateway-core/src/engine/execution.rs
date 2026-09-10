@@ -336,6 +336,33 @@ impl DefaultExecutionService {
         &self,
         mut request: PendingStartExecution,
     ) -> Result<StartedExecution, GatewayError> {
+        if request.metadata.transport == ClientTransport::WebSocket {
+            // 连接可以跨越多次配置发布；每次生成必须重新冻结当前权限和限额。
+            let snapshot = self.snapshots.acquire().map_err(|_| {
+                GatewayError::new(
+                    GatewayErrorKind::NoAvailableProvider,
+                    "runtime configuration is temporarily unavailable",
+                )
+            })?;
+            let policy = snapshot
+                .client_policies()
+                .find(|policy| {
+                    policy.key_id() == request.client.policy.key_id()
+                        && constant_time_equal(
+                            policy.plaintext_key().expose_for_auth(),
+                            request.client.policy.plaintext_key().expose_for_auth(),
+                        )
+                        && policy.authorize().is_ok()
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    GatewayError::new(
+                        GatewayErrorKind::PolicyDenied,
+                        "client API key is no longer authorized",
+                    )
+                })?;
+            request.client = AuthenticatedClient { snapshot, policy };
+        }
         request.client.policy.authorize().map_err(|_| {
             GatewayError::new(GatewayErrorKind::PolicyDenied, "client API key is disabled")
         })?;
@@ -533,7 +560,16 @@ impl DefaultExecutionService {
             ) => {
                 return Err(GatewayError::new(
                     GatewayErrorKind::RateLimited,
-                    "request exceeds client API key limits",
+                    "request exceeds downstream limits",
+                ));
+            }
+            ClientAdmissionDecision::Rejected(
+                ClientAdmissionRejection::GlobalRateLimited
+                | ClientAdmissionRejection::GlobalConcurrencyLimited,
+            ) => {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::NoAvailableProvider,
+                    "gateway request capacity is currently exhausted",
                 ));
             }
         }

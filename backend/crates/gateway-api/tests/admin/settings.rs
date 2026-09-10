@@ -54,6 +54,70 @@ fn update_body() -> Value {
     })
 }
 
+#[tokio::test]
+async fn global_admission_settings_require_auth_validate_limits_and_round_trip_without_cache() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let router = app(fixture.state());
+    let path = "/api/admin/settings/admission";
+    let unauth = Request::builder()
+        .uri(path)
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(unauth)
+            .await
+            .expect("unauthenticated")
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    for (body, expected) in [
+        (
+            json!({"maxConcurrency": 9007199254740992u64, "requestsPerMinute": 0}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"maxConcurrency": 1}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!({"maxConcurrency": -1, "requestsPerMinute": 0}),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        assert_eq!(
+            router
+                .clone()
+                .oneshot(request(Method::POST, path, Some(body)))
+                .await
+                .expect("invalid update")
+                .status(),
+            expected
+        );
+    }
+    let response = router
+        .clone()
+        .oneshot(request(
+            Method::POST,
+            path,
+            Some(json!({"maxConcurrency": 7, "requestsPerMinute": 100})),
+        ))
+        .await
+        .expect("update");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let body = response_json(response).await;
+    assert_eq!(body["data"]["maxConcurrency"], 7);
+    let response = router
+        .oneshot(request(Method::GET, path, None))
+        .await
+        .expect("read");
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    assert_eq!(response_json(response).await["data"], body["data"]);
+}
+
 #[test]
 fn settings_request_should_reject_unknown_rotation_strategy() {
     let mut body = update_body();

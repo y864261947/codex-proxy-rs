@@ -48,6 +48,7 @@ pub enum AdmissionScopeId {
     Key(ClientApiKeyId),
     Customer(CustomerId),
     AccessGroup(AccessGroupId),
+    Global,
 }
 
 impl fmt::Display for AdmissionScopeId {
@@ -56,6 +57,7 @@ impl fmt::Display for AdmissionScopeId {
             Self::Key(id) => write!(formatter, "key:{id}"),
             Self::Customer(id) => write!(formatter, "customer:{id}"),
             Self::AccessGroup(id) => write!(formatter, "access_group:{id}"),
+            Self::Global => formatter.write_str("global:requests"),
         }
     }
 }

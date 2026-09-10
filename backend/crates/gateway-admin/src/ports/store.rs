@@ -380,6 +380,16 @@ pub trait ObservabilityStore: Send + Sync {
 /// Runtime settings 与管理员 API Key 写入。
 #[async_trait]
 pub trait SettingsStore: Send + Sync {
+    async fn load_global_admission(
+        &self,
+    ) -> AdminStoreResult<crate::model::settings::GlobalAdmissionSettings>;
+
+    async fn replace_global_admission(
+        &self,
+        limits: gateway_core::policy::RateLimits,
+        context: &MutationContext,
+    ) -> AdminStoreResult<crate::model::settings::GlobalAdmissionSettings>;
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings>;
 
     async fn admin_api_key_exists(&self) -> AdminStoreResult<bool>;

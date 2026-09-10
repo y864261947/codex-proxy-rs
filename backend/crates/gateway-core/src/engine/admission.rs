@@ -19,6 +19,8 @@ pub struct ClientAdmissionRequest {
 pub enum ClientAdmissionRejection {
     RateLimited,
     ConcurrencyLimited,
+    GlobalRateLimited,
+    GlobalConcurrencyLimited,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

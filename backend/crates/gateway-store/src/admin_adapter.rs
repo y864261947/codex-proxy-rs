@@ -14,6 +14,22 @@ pub(crate) struct AdminSettingsStoreAdapter {
 
 #[async_trait::async_trait]
 impl SettingsStore for AdminSettingsStoreAdapter {
+    async fn load_global_admission(
+        &self,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        self.control_plane.load_global_admission().await
+    }
+
+    async fn replace_global_admission(
+        &self,
+        limits: gateway_core::policy::RateLimits,
+        context: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        self.control_plane
+            .replace_global_admission(limits, context)
+            .await
+    }
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<AdminRuntimeSettings> {
         let snapshot = postgres::ControlPlaneRepository::load_control_plane(&self.control_plane)
             .await

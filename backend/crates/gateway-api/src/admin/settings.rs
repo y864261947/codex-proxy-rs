@@ -28,6 +28,33 @@ use super::{
 /// 客户端模型到上游模型的全局精确映射。
 pub type ModelMappings = BTreeMap<String, String>;
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct GlobalAdmissionLimitsWire {
+    max_concurrency: u64,
+    requests_per_minute: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GlobalAdmissionView {
+    #[serde(flatten)]
+    limits: GlobalAdmissionLimitsWire,
+    config_revision: u64,
+}
+
+impl From<gateway_admin::model::settings::GlobalAdmissionSettings> for GlobalAdmissionView {
+    fn from(value: gateway_admin::model::settings::GlobalAdmissionSettings) -> Self {
+        Self {
+            limits: GlobalAdmissionLimitsWire {
+                max_concurrency: value.limits.max_concurrency,
+                requests_per_minute: value.limits.requests_per_minute,
+            },
+            config_revision: value.config_revision.get(),
+        }
+    }
+}
+
 /// 运行配置投影与设置页字段的聚合响应。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -231,6 +258,10 @@ where
     S: AdminSessionState + Clone + Send + Sync + 'static,
 {
     Router::new()
+        .route(
+            "/api/admin/settings/admission",
+            get(global_admission::<S>).post(update_global_admission::<S>),
+        )
         .route("/api/admin/settings", get(settings::<S>))
         .route("/api/admin/settings/update", post(update_settings::<S>))
         .route(
@@ -268,6 +299,49 @@ where
         StatusCode::OK,
         AdminEnvelope::ok(CodexDesktopWindowsDownloadsView::from(downloads)),
     )
+}
+
+async fn global_admission<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let result = state
+        .admin_services()
+        .settings()
+        .global_admission()
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(GlobalAdmissionView::from(result)),
+    ))
+}
+
+async fn update_global_admission<S>(
+    auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<GlobalAdmissionLimitsWire>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let limits = gateway_core::policy::RateLimits {
+        max_concurrency: request.max_concurrency,
+        requests_per_minute: request.requests_per_minute,
+    };
+    let result = state
+        .admin_services()
+        .settings()
+        .replace_global_admission(&auth.context().mutation_context(), limits)
+        .await
+        .map_err(map_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(GlobalAdmissionView::from(result)),
+    ))
 }
 
 async fn settings<S>(
