@@ -17,6 +17,8 @@ import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import { toast } from '@/components/base/BaseToast'
+import QuotaScopePicker from '@/components/QuotaScopePicker.vue'
+import UpstreamNavigation from '@/components/UpstreamNavigation.vue'
 import { useChannelsQuery } from '@/composables/useChannelsQuery'
 import { errorMessage } from '@/utils/async'
 
@@ -33,6 +35,10 @@ const deleteOpen = ref(false)
 const editing = ref<Channel | null>(null)
 const deleting = ref<Channel | null>(null)
 const saving = ref(false)
+const quotaReady = ref(false)
+watch(open, () => {
+  quotaReady.value = false
+})
 const connectionLoading = ref(false)
 const connectionError = ref('')
 const providers = ref<string[]>([])
@@ -60,7 +66,7 @@ const urlValid = computed(() => {
   }
   catch { return false }
 })
-const valid = computed(() => !connectionLoading.value && !connectionError.value && !providersError.value
+const valid = computed(() => quotaReady.value && !connectionLoading.value && !connectionError.value && !providersError.value
   && providers.value.includes('openai_api') && (!editing.value || editing.value.provider === 'openai_api')
   && !!form.value.name.trim() && urlValid.value
   && models.value.length > 0 && models.value.length <= 1000 && new Set(models.value).size === models.value.length
@@ -191,6 +197,7 @@ onScopeDispose(() => {
 <template>
   <div class="flex h-full min-h-0 w-full flex-col">
     <BasePageHeader title="上游渠道" description="集中管理官方 API 和第三方上游，每个渠道独立配置连接、模型和调度策略" />
+    <UpstreamNavigation />
     <BaseCard class="mt-5 flex min-h-125 flex-col">
       <template #header>
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -288,6 +295,9 @@ onScopeDispose(() => {
         <BaseFormItem label="RPM 上限" description="0 表示本渠道不额外限制">
           <BaseNumberInput v-model="form.requestsPerMinute" label="渠道 RPM 上限" :min="0" :max="Number.MAX_SAFE_INTEGER" :disabled="saving" />
         </BaseFormItem>
+        <div v-if="open" class="sm:col-span-2">
+          <QuotaScopePicker v-model="form.quotaScopeId" :disabled="saving || connectionLoading || !!connectionError" @ready="quotaReady = $event" />
+        </div>
         <BaseFormItem label="备注" class="sm:col-span-2">
           <BaseTextarea :model-value="form.note || ''" aria-label="渠道备注" :maxlength="1024" :disabled="saving" @update:model-value="form.note = $event" />
         </BaseFormItem>

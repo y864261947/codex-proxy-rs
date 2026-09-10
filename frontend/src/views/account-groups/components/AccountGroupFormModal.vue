@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import type { AccountGroupFormValue } from '../composables/useAccountGroups'
 import type { AccountGroup } from '@/api'
-import { computed } from 'vue'
-
+import { computed, ref, watch } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
+
 import BaseColorPicker from '@/components/base/BaseColorPicker/index.vue'
 import BaseFormItem from '@/components/base/BaseForm/FormItem.vue'
 import BaseForm from '@/components/base/BaseForm/index.vue'
@@ -11,6 +11,7 @@ import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import BaseNumberInput from '@/components/base/BaseNumberInput.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
+import QuotaScopePicker from '@/components/QuotaScopePicker.vue'
 import { ACCOUNT_GROUP_COLOR_PRESETS } from '../constants'
 
 const props = defineProps<{
@@ -22,6 +23,10 @@ const emit = defineEmits<{
 }>()
 const open = defineModel<boolean>({ required: true })
 const form = defineModel<AccountGroupFormValue>('form', { required: true })
+const quotaReady = ref(false)
+watch(open, () => {
+  quotaReady.value = false
+})
 const title = computed(() => props.group ? '编辑分组' : '创建分组')
 const description = computed(() => props.group
   ? '设置号池用途、来源优先级和共享容量。'
@@ -82,9 +87,7 @@ const controlsValid = computed(() => {
           <BaseNumberInput v-model="form.sourceControls.requestsPerMinute" label="号池 RPM 上限" :min="0" :disabled="saving" />
         </BaseFormItem>
       </div>
-      <BaseFormItem label="共享配额范围（可选）" description="填写已有配额范围 ID，共享同一上游容量时使用">
-        <BaseInput :model-value="form.sourceControls.quotaScopeId || ''" aria-label="共享配额范围" placeholder="quota_…" :disabled="saving" @update:model-value="form.sourceControls.quotaScopeId = $event || null" />
-      </BaseFormItem>
+      <QuotaScopePicker v-if="open" v-model="form.sourceControls.quotaScopeId" :disabled="saving" @ready="quotaReady = $event" />
     </BaseForm>
 
     <template #footer>
@@ -94,7 +97,7 @@ const controlsValid = computed(() => {
       <BaseButton
         variant="primary"
         :loading="saving"
-        :disabled="!form.name.trim() || !controlsValid"
+        :disabled="!form.name.trim() || !controlsValid || !quotaReady"
         @click="emit('save')"
       >
         保存分组

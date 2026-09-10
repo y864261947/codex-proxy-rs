@@ -725,7 +725,6 @@ fn shared_quota_is_required_enabled_and_frozen_for_each_channel_candidate() {
     };
     assert!(plan(&base).is_err(), "missing quota cannot mean unlimited");
     let enabled = base
-        .clone()
         .with_quota_policies(vec![quota.clone()])
         .expect("enabled");
     let frozen = plan(&enabled).expect("shared quota routes");

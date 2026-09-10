@@ -24,6 +24,11 @@ export const routes: RouteRecordRaw[] = [
         redirect: '/pools/groups',
       },
       {
+        path: 'channels/quotas',
+        name: 'quota-scopes',
+        component: () => import('@/views/quota-scopes/index.vue'),
+      },
+      {
         path: 'channels',
         name: 'channels',
         component: () => import('@/views/channels/index.vue'),

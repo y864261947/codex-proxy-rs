@@ -15,9 +15,10 @@ export * from './modules/auth'
 export * from './modules/backups'
 export * from './modules/channels'
 export * from './modules/customers'
-
 // Dashboard 聚合
 export * from './modules/dashboard'
+
+export * from './modules/quota-scopes'
 
 // 设置管理
 export * from './modules/settings'
