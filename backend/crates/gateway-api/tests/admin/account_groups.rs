@@ -12,6 +12,61 @@ use super::{AdminTestFixture, AdminTestState, PRIMARY_GROUP_ID};
 const SESSION_COOKIE: &str = "cpr_admin_session=valid-session";
 
 #[tokio::test]
+async fn pool_source_controls_validate_and_survive_description_only_updates() {
+    let fixture = authenticated_fixture().await;
+    let controls = json!({"priority":2,"weight":3,"maxConcurrency":7,"requestsPerMinute":80,"quotaScopeId":"quota_shared"});
+    let body = json!({"id":PRIMARY_GROUP_ID,"name":"Controlled pool","description":null,"color":"#2563EBFF","sourceControls":controls});
+    let response = request(
+        router(&fixture),
+        Method::POST,
+        "/api/admin/account-groups/update",
+        Some(body.clone()),
+        true,
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response_json(response).await["data"]["record"]["sourceControls"],
+        controls
+    );
+    let mut description_only = body.clone();
+    description_only
+        .as_object_mut()
+        .expect("body")
+        .remove("sourceControls");
+    let response = request(
+        router(&fixture),
+        Method::POST,
+        "/api/admin/account-groups/update",
+        Some(description_only),
+        true,
+    )
+    .await;
+    assert_eq!(
+        response_json(response).await["data"]["record"]["sourceControls"],
+        controls
+    );
+    for (field, invalid) in [
+        ("priority", json!(0)),
+        ("weight", json!(0)),
+        ("maxConcurrency", json!(9007199254740992_u64)),
+        ("quotaScopeId", json!("invalid")),
+    ] {
+        let mut invalid_body = body.clone();
+        invalid_body["sourceControls"][field] = invalid;
+        let response = request(
+            router(&fixture),
+            Method::POST,
+            "/api/admin/account-groups/update",
+            Some(invalid_body),
+            true,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{field}");
+    }
+}
+
+#[tokio::test]
 async fn list_route_should_keep_camel_case_group_and_page_wire() {
     let fixture = authenticated_fixture().await;
     let response = request(

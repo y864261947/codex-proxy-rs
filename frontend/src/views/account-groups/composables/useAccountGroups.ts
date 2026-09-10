@@ -1,4 +1,4 @@
-import type { AccountGroup, ApiKey } from '@/api'
+import type { AccountGroup, AccountGroupSourceControls, ApiKey } from '@/api'
 import { watchDebounced } from '@vueuse/core'
 import { computed, onMounted, ref, shallowRef, watch } from 'vue'
 
@@ -21,6 +21,7 @@ import { formatDateTime } from '@/utils/date'
 import { DEFAULT_ACCOUNT_GROUP_COLOR } from '../constants'
 
 export interface AccountGroupFormValue {
+  sourceControls: AccountGroupSourceControls
   name: string
   description: string
   color: string
@@ -109,6 +110,7 @@ export function useAccountGroups() {
   function openEdit(group: AccountGroup) {
     editingGroup.value = group
     form.value = {
+      sourceControls: { ...group.sourceControls },
       name: group.name,
       description: group.description ?? '',
       color: group.color,
@@ -134,10 +136,11 @@ export function useAccountGroups() {
       const updating = Boolean(editingGroup.value)
       const description = form.value.description.trim() || null
       if (editingGroup.value) {
-        await updateAccountGroup({ id: editingGroup.value.id, name, description, color })
+        await updateAccountGroup({ id: editingGroup.value.id, name, description, color, sourceControls: form.value.sourceControls })
       }
       else {
         await createAccountGroup({
+          sourceControls: form.value.sourceControls,
           name,
           description,
           color,
@@ -314,5 +317,5 @@ export function useAccountGroups() {
 }
 
 function emptyForm(): AccountGroupFormValue {
-  return { name: '', description: '', color: DEFAULT_ACCOUNT_GROUP_COLOR }
+  return { name: '', description: '', color: DEFAULT_ACCOUNT_GROUP_COLOR, sourceControls: { priority: 1, weight: 1, maxConcurrency: 0, requestsPerMinute: 0, quotaScopeId: null } }
 }

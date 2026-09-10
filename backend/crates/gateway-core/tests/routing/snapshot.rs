@@ -58,6 +58,62 @@ struct PublishingCatalogProvider {
 
 struct UnavailableCatalogProvider;
 
+#[test]
+fn pool_source_settings_are_frozen_in_the_compiled_routing_policy() {
+    use gateway_core::{
+        identity::QuotaScopeId,
+        routing::{
+            AccountGroupId,
+            source::{SourceControls, SourceId, SourcePreference},
+        },
+    };
+    let id = AccountGroupId::new("grp_00000000000000000000000000000019").expect("pool");
+    let controls = SourceControls::new(
+        SourcePreference::new(3, 7).expect("preference"),
+        RateLimits {
+            max_concurrency: 5,
+            requests_per_minute: 70,
+        },
+        Some(QuotaScopeId::new("quota_shared").expect("quota")),
+    )
+    .expect("controls");
+    let compile = |controls| {
+        let facts = SnapshotFacts::new(
+            ConfigRevision::new(1).expect("revision"),
+            ConfigRevision::new(1).expect("revision"),
+            SnapshotSettingsFacts::new(3, 50, "smart", BTreeMap::new(), None, None),
+            Vec::new(),
+            vec![
+                SnapshotAccountGroupFacts::new(id.clone(), "Named pool".to_owned(), true)
+                    .with_controls(controls),
+            ],
+            Vec::new(),
+            Vec::new(),
+        );
+        block_on(
+            RuntimeSnapshotCompiler::new(
+                Arc::new(TestSnapshotStore::new(Ok(facts))),
+                ProviderRegistry::new([Arc::new(UnavailableCatalogProvider) as Arc<dyn Provider>])
+                    .expect("registry"),
+            )
+            .compile(),
+        )
+        .expect("snapshot")
+    };
+    let old = compile(controls.clone());
+    let new = compile(SourceControls::default());
+    let source = SourceId::AccountPool(id);
+    let old_policy = old.source_policy(&source).expect("old policy");
+    assert_eq!(old_policy.effective_preference(None), controls.preference());
+    assert_eq!(old_policy.limits(), controls.limits());
+    assert_eq!(old_policy.quota_scope_id(), controls.quota_scope_id());
+    assert_eq!(old_policy.snapshot().name(), Some("Named pool"));
+    assert_eq!(
+        new.source_policy(&source).expect("new policy").limits(),
+        RateLimits::unlimited()
+    );
+}
+
 struct ChannelCatalogProvider(gateway_core::channel::ChannelBinding);
 
 #[async_trait]

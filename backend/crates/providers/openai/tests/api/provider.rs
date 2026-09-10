@@ -194,9 +194,8 @@ async fn cold_channel_call_preserves_protocol_parameters_usage_and_wire_without_
         .and(path("/prefix/v1/responses"))
         .respond_with(
             ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream; charset=utf-8")
                 .insert_header("x-request-id", "upstream_api_req")
-                .set_body_string(SSE),
+                .set_body_raw(SSE, "text/event-stream; charset=utf-8"),
         )
         .expect(1)
         .mount(&server)
@@ -385,7 +384,7 @@ async fn errors_and_redirects_are_single_attempt_and_never_follow_a_new_origin()
 #[tokio::test]
 async fn incomplete_sse_and_cancelled_inflight_calls_cannot_be_reclassified_as_unsent() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).insert_header("content-type", "text/event-stream").set_body_string("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_partial\"}}\n\n")).expect(1).mount(&server).await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_raw("event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_partial\"}}\n\n", "text/event-stream")).expect(1).mount(&server).await;
     let channel = channel("chan_a", 1, &server.uri());
     let provider = ApiChannelProvider::new(Arc::new(Store(Mutex::new(vec![channel.clone()]))))
         .expect("provider");
@@ -398,6 +397,12 @@ async fn incomplete_sse_and_cancelled_inflight_calls_cannot_be_reclassified_as_u
         .expect("cold")
         .collect::<Vec<_>>()
         .await;
+    assert!(
+        events
+            .iter()
+            .filter_map(|event| event.as_ref().ok())
+            .any(|event| event.wire_event().is_some())
+    );
     let error = events.into_iter().find_map(Result::err).expect("truncated");
     assert_eq!(error.kind(), ProviderErrorKind::Protocol);
     assert_eq!(error.send_state(), UpstreamSendState::Sent);

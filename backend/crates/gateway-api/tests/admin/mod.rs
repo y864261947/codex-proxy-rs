@@ -481,6 +481,7 @@ impl MemoryAccountGroupStore {
             (
                 primary_id.clone(),
                 AccountGroupRecord {
+                    source_controls: Default::default(),
                     id: primary_id,
                     name: "Alpha routing".to_owned(),
                     description: Some("Primary traffic".to_owned()),
@@ -502,6 +503,7 @@ impl MemoryAccountGroupStore {
             (
                 secondary_id.clone(),
                 AccountGroupRecord {
+                    source_controls: Default::default(),
                     id: secondary_id,
                     name: "Beta routing".to_owned(),
                     description: None,
@@ -617,6 +619,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         let mut state = self.state.lock().expect("account groups");
         let now = Utc::now();
         let record = AccountGroupRecord {
+            source_controls: command.source_controls.unwrap_or_default(),
             id: command.id.clone(),
             name: command.name,
             description: command.description,
@@ -648,6 +651,9 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         record.name = command.name;
         record.description = command.description;
         record.color = command.color;
+        if let Some(controls) = command.source_controls {
+            record.source_controls = controls;
+        }
         record.updated_at = Utc::now();
         mutation(&mut state, command.id, true)
     }

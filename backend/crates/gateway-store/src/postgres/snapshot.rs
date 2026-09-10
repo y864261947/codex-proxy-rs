@@ -12,7 +12,7 @@ use gateway_core::routing::{
         SnapshotStorePort,
     },
 };
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
 use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
 
@@ -45,6 +45,7 @@ pub struct RuntimeSnapshotData {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAccountGroupData {
+    pub source_controls: gateway_core::routing::source::SourceControls,
     pub id: AccountGroupId,
     pub name: String,
     pub enabled: bool,
@@ -170,7 +171,10 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
             let account_groups = data
                 .account_groups
                 .into_iter()
-                .map(|group| SnapshotAccountGroupFacts::new(group.id, group.name, group.enabled))
+                .map(|group| {
+                    SnapshotAccountGroupFacts::new(group.id, group.name, group.enabled)
+                        .with_controls(group.source_controls)
+                })
                 .collect();
             let provider_accounts = data
                 .provider_accounts
@@ -427,18 +431,27 @@ async fn load_client_keys(
 async fn load_account_groups(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<Vec<SnapshotAccountGroupData>> {
-    let rows = sqlx::query_as::<_, (String, String, bool)>(
-        "select id, name, enabled from account_groups order by id",
+    let rows = sqlx::query(
+        "select id, name, enabled, source_priority, source_weight, max_concurrency, requests_per_minute, quota_scope_id from account_groups order by id",
     )
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("load snapshot account groups"))?;
     rows.into_iter()
-        .map(|(id, name, enabled)| {
+        .map(|row| {
             Ok(SnapshotAccountGroupData {
-                id: AccountGroupId::new(id).map_err(|_| invalid("invalid account group id"))?,
-                name,
-                enabled,
+                source_controls: super::account_groups::source_controls_from_row(&row)?,
+                id: AccountGroupId::new(
+                    row.try_get::<String, _>("id")
+                        .map_err(|_| invalid("invalid account group id"))?,
+                )
+                .map_err(|_| invalid("invalid account group id"))?,
+                name: row
+                    .try_get("name")
+                    .map_err(|_| invalid("invalid group name"))?,
+                enabled: row
+                    .try_get("enabled")
+                    .map_err(|_| invalid("invalid group enabled"))?,
             })
         })
         .collect()

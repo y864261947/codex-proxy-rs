@@ -141,6 +141,7 @@ impl AccountGroupService for DefaultAccountGroupService {
             self.store
                 .create_account_group(
                     NewAccountGroup {
+                        source_controls: command.source_controls,
                         id,
                         name: command.name,
                         description: command.description,

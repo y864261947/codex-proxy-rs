@@ -112,12 +112,24 @@ pub struct SnapshotAccountGroupFacts {
     id: AccountGroupId,
     name: String,
     enabled: bool,
+    controls: super::source::SourceControls,
 }
 
 impl SnapshotAccountGroupFacts {
     #[must_use]
     pub fn new(id: AccountGroupId, name: String, enabled: bool) -> Self {
-        Self { id, name, enabled }
+        Self {
+            id,
+            name,
+            enabled,
+            controls: super::source::SourceControls::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_controls(mut self, controls: super::source::SourceControls) -> Self {
+        self.controls = controls;
+        self
     }
 }
 
@@ -510,9 +522,9 @@ async fn compile_runtime_snapshot(
             super::source::SourcePolicy::new(
                 super::source::SourceId::AccountPool(group.id.clone()),
                 group.enabled,
-                super::source::SourcePreference::default(),
-                crate::policy::RateLimits::unlimited(),
-                None,
+                group.controls.preference(),
+                group.controls.limits(),
+                group.controls.quota_scope_id().cloned(),
             )
             .and_then(|policy| policy.with_name(group.name.clone()))
             .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
