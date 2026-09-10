@@ -426,6 +426,18 @@ impl DefaultExecutionService {
         let request_id = new_request_id()?;
         let routing_context = self.route_context(&request.client.policy).await;
         let account_scope = Arc::clone(request.client.policy.account_scope());
+        let target = match &request.target {
+            ExecutionTarget::Model(model) => crate::routing::SourceRoutingTarget::Model(model),
+            ExecutionTarget::ProviderEndpoint(provider) => {
+                crate::routing::SourceRoutingTarget::ProviderEndpoint(provider)
+            }
+        };
+        let seed = request_id
+            .as_str()
+            .bytes()
+            .fold(0xcbf29ce484222325_u64, |seed, byte| {
+                (seed ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
         let plan = if let Some(group) = request.client.policy.access_group() {
             let allowed = crate::routing::source::AllowedSources::new(
                 group
@@ -441,18 +453,6 @@ impl DefaultExecutionService {
                             .map(crate::routing::source::SourceId::Channel),
                     ),
             );
-            let target = match &request.target {
-                ExecutionTarget::Model(model) => crate::routing::SourceRoutingTarget::Model(model),
-                ExecutionTarget::ProviderEndpoint(provider) => {
-                    crate::routing::SourceRoutingTarget::ProviderEndpoint(provider)
-                }
-            };
-            let seed = request_id
-                .as_str()
-                .bytes()
-                .fold(0xcbf29ce484222325_u64, |seed, byte| {
-                    (seed ^ u64::from(byte)).wrapping_mul(0x100000001b3)
-                });
             request.client.snapshot.plan_sources(
                 target,
                 &request.operation,
@@ -462,22 +462,13 @@ impl DefaultExecutionService {
                 seed,
             )
         } else {
-            match &request.target {
-                ExecutionTarget::ProviderEndpoint(provider) => {
-                    request.client.snapshot.plan_provider_endpoint(
-                        provider,
-                        &request.operation,
-                        account_scope,
-                        &routing_context,
-                    )
-                }
-                ExecutionTarget::Model(public_model) => request.client.snapshot.plan(
-                    public_model,
-                    &request.operation,
-                    account_scope,
-                    &routing_context,
-                ),
-            }
+            request.client.snapshot.plan_account_sources(
+                target,
+                &request.operation,
+                account_scope,
+                &routing_context,
+                seed,
+            )
         }
         .map_err(map_routing_error)?;
         let continuation = match request.metadata.previous_response_id.as_ref() {
@@ -725,10 +716,19 @@ impl DefaultExecutionService {
         } else {
             policy
                 .account_scope()
-                .provider_kinds()
-                .iter()
-                .cloned()
-                .map(ProviderCircuitScope::Provider)
+                .pool_group_ids()
+                .into_iter()
+                .map(SourceId::AccountPool)
+                .map(ProviderCircuitScope::Source)
+                .chain(
+                    policy
+                        .account_scope()
+                        .only_unpooled()
+                        .provider_kinds()
+                        .iter()
+                        .cloned()
+                        .map(ProviderCircuitScope::Provider),
+                )
                 .collect()
         };
         let mut remaining = scopes.len();
@@ -802,11 +802,12 @@ impl DefaultExecutionService {
             ..RoutingContext::default()
         };
         let plan = snapshot
-            .plan(
-                &public_model,
+            .plan_account_sources(
+                crate::routing::SourceRoutingTarget::Model(&public_model),
                 &operation,
-                snapshot.all_account_scope(),
+                Arc::new(snapshot.all_account_scope().only_account(&account_id)),
                 &routing_context,
+                0,
             )
             .map_err(map_routing_error)?;
         let started_at = SystemTime::now();
@@ -911,7 +912,12 @@ impl DefaultExecutionService {
                     || provider_error.upstream_code().is_some()
                     || provider_error.client_visible_upstream_error().is_some()
                     || upstream_response.is_some();
-                let source = if has_upstream_facts {
+                let source = if provider_error.kind()
+                    == ProviderErrorKind::SourceCapacityUnavailable
+                    && !has_upstream_facts
+                {
+                    AccountProbeErrorSource::Gateway
+                } else if has_upstream_facts {
                     AccountProbeErrorSource::Upstream
                 } else {
                     AccountProbeErrorSource::Provider

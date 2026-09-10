@@ -20,6 +20,77 @@ use gateway_core::routing::{
     ClientRoutingScope, FrozenAccountScope, ProviderKind, RuntimeAccount, RuntimeAccountDirectory,
 };
 
+#[test]
+fn account_selection_subsets_preserve_permissions_history_and_pool_membership() {
+    use gateway_core::routing::{AccountGroupId, RoutingGroupSnapshot};
+    let a = AccountGroupId::new("grp_00000000000000000000000000000001").expect("A");
+    let b = AccountGroupId::new("grp_00000000000000000000000000000002").expect("B");
+    let account = |id: &str| ProviderAccountId::new(id).expect("account");
+    let provider = ProviderKind::new("openai").expect("provider");
+    let directory = Arc::new(RuntimeAccountDirectory::new(
+        [
+            ("acct_a", BTreeSet::from([a.clone()])),
+            ("acct_b", BTreeSet::from([b.clone()])),
+            ("acct_shared", BTreeSet::from([a.clone(), b.clone()])),
+            ("acct_unpooled", BTreeSet::new()),
+        ]
+        .into_iter()
+        .map(|(id, groups)| (account(id), RuntimeAccount::new(provider.clone(), groups)))
+        .collect(),
+    ));
+    let all = FrozenAccountScope::new(directory, ClientRoutingScope::all_accounts());
+    let free = all.only_unpooled();
+    assert!(free.allows(&account("acct_unpooled")));
+    assert!(!free.allows(&account("acct_a")));
+    assert!(!free.allows(&account("acct_shared")));
+    assert!(free.pool_group_ids().is_empty());
+    assert_eq!(free.routing_snapshot(), all.routing_snapshot());
+    assert_eq!(all.pool_group_ids(), BTreeSet::from([a.clone(), b.clone()]));
+    let restricted = all.within_group(RoutingGroupSnapshot::new(a.clone(), "A".to_owned()));
+    assert!(restricted.only_unpooled().provider_kinds().is_empty());
+    assert!(!restricted.only_unpooled().allows(&account("acct_unpooled")));
+    assert_eq!(
+        restricted.only_unpooled().routing_snapshot(),
+        restricted.routing_snapshot()
+    );
+    let fixed = restricted.only_account(&account("acct_shared"));
+    assert!(fixed.allows(&account("acct_shared")));
+    assert!(!fixed.allows(&account("acct_a")));
+    assert_eq!(fixed.pool_group_ids(), BTreeSet::from([a.clone()]));
+    assert!(
+        fixed
+            .within_group(RoutingGroupSnapshot::new(a, "A".to_owned()))
+            .allows(&account("acct_shared"))
+    );
+    assert!(
+        fixed
+            .within_group(RoutingGroupSnapshot::new(b, "B".to_owned()))
+            .provider_kinds()
+            .is_empty()
+    );
+    assert!(
+        restricted
+            .only_account(&account("acct_b"))
+            .provider_kinds()
+            .is_empty()
+    );
+    assert!(
+        all.only_account(&account("acct_missing"))
+            .provider_kinds()
+            .is_empty()
+    );
+    assert!(
+        !free
+            .only_account(&account("acct_shared"))
+            .allows(&account("acct_shared"))
+    );
+    assert!(
+        !all.only_account(&account("acct_a"))
+            .only_unpooled()
+            .allows(&account("acct_unpooled"))
+    );
+}
+
 fn account(id: &str) -> ProviderAccount {
     ProviderAccount::new(
         ProviderAccountId::new(id).expect("valid account"),

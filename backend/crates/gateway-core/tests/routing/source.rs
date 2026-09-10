@@ -11,6 +11,194 @@ fn binding(id: ChannelId) -> ChannelBinding {
 }
 
 #[test]
+fn legacy_account_routes_cannot_bypass_pool_state_or_grant_channels_through_unpooled_fallback() {
+    use gateway_core::{
+        account::ProviderAccountId,
+        routing::{
+            ConfigRevision, ProviderKind, PublicModelId, RoutingContext, RoutingGroupSnapshot,
+            RuntimeAccount, RuntimeAccountDirectory, RuntimeSnapshot, SourceRoutingTarget,
+        },
+    };
+    use std::{collections::BTreeSet, sync::Arc};
+    let account = |id: &str| ProviderAccountId::new(id).expect("account");
+    let provider = ProviderKind::new("openai").expect("provider");
+    let a = AccountGroupId::new("grp_00000000000000000000000000000001").expect("A");
+    let b = AccountGroupId::new("grp_00000000000000000000000000000002").expect("B");
+    let source_a = SourceId::AccountPool(a.clone());
+    let directory = Arc::new(RuntimeAccountDirectory::new(
+        [
+            ("acct_a", BTreeSet::from([a.clone()])),
+            ("acct_b", BTreeSet::from([b.clone()])),
+            ("acct_shared", BTreeSet::from([a.clone(), b.clone()])),
+            ("acct_unpooled", BTreeSet::new()),
+        ]
+        .into_iter()
+        .map(|(id, groups)| (account(id), RuntimeAccount::new(provider.clone(), groups)))
+        .collect(),
+    ));
+    let quota = QuotaScopeId::new("quota_legacy").expect("quota");
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        super::scheduling(),
+        vec![provider.clone()],
+        vec![
+            super::model("openai", "shared", super::capabilities()),
+            super::model("openai", "shared", super::capabilities())
+                .with_channel(binding(ChannelId::new("chan_hidden").expect("channel"))),
+        ],
+        Vec::new(),
+    )
+    .expect("snapshot")
+    .with_account_directory(directory)
+    .with_source_policies(vec![
+        SourcePolicy::new(
+            source_a.clone(),
+            true,
+            SourcePreference::default(),
+            RateLimits {
+                max_concurrency: 3,
+                requests_per_minute: 40,
+            },
+            Some(quota.clone()),
+        )
+        .expect("A"),
+        SourcePolicy::new(
+            SourceId::AccountPool(b.clone()),
+            false,
+            SourcePreference::default(),
+            RateLimits::unlimited(),
+            None,
+        )
+        .expect("B"),
+        channel_policy("chan_hidden", true),
+    ])
+    .expect("policies")
+    .with_quota_policies(vec![
+        gateway_core::routing::source::QuotaScopePolicy::new(
+            quota,
+            true,
+            RateLimits {
+                max_concurrency: 2,
+                requests_per_minute: 30,
+            },
+        )
+        .expect("quota"),
+    ])
+    .expect("quotas");
+    let model = PublicModelId::new("shared").expect("model");
+    for target in [
+        SourceRoutingTarget::Model(&model),
+        SourceRoutingTarget::ProviderEndpoint(&provider),
+    ] {
+        let all = snapshot.all_account_scope();
+        let plan = snapshot
+            .plan_account_sources(
+                target,
+                &super::operation(),
+                all.clone(),
+                &RoutingContext::default(),
+                0,
+            )
+            .expect("plan");
+        assert_eq!(plan.candidates().len(), 2);
+        let pooled = &plan.candidates()[0];
+        assert_eq!(pooled.source(), Some(&source_a));
+        assert_eq!(pooled.source_controls().limits().max_concurrency, 3);
+        assert_eq!(
+            pooled
+                .shared_quota()
+                .expect("shared quota")
+                .limits()
+                .max_concurrency,
+            2
+        );
+        assert!(pooled.account_scope().allows(&account("acct_a")));
+        assert!(pooled.account_scope().allows(&account("acct_shared")));
+        let unpooled = &plan.candidates()[1];
+        assert!(unpooled.source().is_none());
+        assert!(unpooled.account_scope().allows(&account("acct_unpooled")));
+        for id in ["acct_a", "acct_b", "acct_shared"] {
+            assert!(!unpooled.account_scope().allows(&account(id)));
+        }
+        assert_eq!(
+            plan.account_scope().routing_snapshot(),
+            all.routing_snapshot()
+        );
+        for context in [
+            RoutingContext {
+                blocked_sources: BTreeSet::from([source_a.clone()]),
+                ..RoutingContext::default()
+            },
+            RoutingContext {
+                blocked_providers: BTreeSet::from([provider.clone()]),
+                ..RoutingContext::default()
+            },
+        ] {
+            let filtered = snapshot
+                .plan_account_sources(target, &super::operation(), all.clone(), &context, 0)
+                .expect("independent scope remains");
+            assert_eq!(filtered.candidates().len(), 1);
+            assert_eq!(
+                filtered.candidates()[0].source().is_none(),
+                !context.blocked_sources.is_empty()
+            );
+        }
+        let fixed = Arc::new(all.only_account(&account("acct_a")));
+        let fixed_plan = snapshot
+            .plan_account_sources(
+                target,
+                &super::operation(),
+                fixed,
+                &RoutingContext::default(),
+                0,
+            )
+            .expect("fixed A");
+        assert_eq!(fixed_plan.candidates().len(), 1);
+        assert!(
+            !fixed_plan.candidates()[0]
+                .account_scope()
+                .allows(&account("acct_shared"))
+        );
+        for scope in [
+            all.only_account(&account("acct_b")),
+            all.within_group(RoutingGroupSnapshot::new(b.clone(), "B".to_owned())),
+        ] {
+            assert!(
+                snapshot
+                    .plan_account_sources(
+                        target,
+                        &super::operation(),
+                        Arc::new(scope),
+                        &RoutingContext::default(),
+                        0
+                    )
+                    .is_err()
+            );
+        }
+        let missing = snapshot
+            .clone()
+            .with_source_policies(Vec::new())
+            .expect("removed policies");
+        let only_free = missing
+            .plan_account_sources(
+                target,
+                &super::operation(),
+                all,
+                &RoutingContext::default(),
+                0,
+            )
+            .expect("unpooled still available");
+        assert_eq!(only_free.candidates().len(), 1);
+        assert!(only_free.candidates()[0].source().is_none());
+        assert!(
+            !only_free.candidates()[0]
+                .account_scope()
+                .allows(&account("acct_shared"))
+        );
+    }
+}
+
+#[test]
 fn one_channel_catalog_cannot_combine_models_from_different_configuration_versions() {
     use gateway_core::routing::{ConfigRevision, ProviderKind, RuntimeSnapshot};
     let id = ChannelId::new("chan_versions").expect("channel");

@@ -757,6 +757,79 @@ impl RuntimeSnapshot {
         self.source_policies.get(source)
     }
 
+    /// 旧 Key 和固定账号诊断也使用真实号池来源；只有未分池账号保留无来源路径。
+    pub fn plan_account_sources(
+        &self,
+        target: super::SourceRoutingTarget<'_>,
+        operation: &Operation,
+        account_scope: Arc<FrozenAccountScope>,
+        context: &RoutingContext,
+        seed: u64,
+    ) -> Result<RoutingPlan, RoutingError> {
+        let allowed = super::source::AllowedSources::new(
+            account_scope
+                .pool_group_ids()
+                .into_iter()
+                .map(super::source::SourceId::AccountPool),
+        );
+        // 原 Provider circuit 只约束未分池路径，不能连带阻断已独立计健康的号池。
+        let pool_context = RoutingContext {
+            required_provider: context.required_provider.clone(),
+            blocked_sources: context.blocked_sources.clone(),
+            ..RoutingContext::default()
+        };
+        let pool_plan = self.plan_sources(
+            target,
+            operation,
+            Arc::clone(&account_scope),
+            &pool_context,
+            &allowed,
+            seed,
+        );
+        let unpooled = Arc::new(account_scope.only_unpooled());
+        let unpooled_plan = match target {
+            super::SourceRoutingTarget::Model(model) => {
+                self.plan(model, operation, unpooled, context)
+            }
+            super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                self.plan_provider_endpoint(provider, operation, unpooled, context)
+            }
+        };
+        let mut candidates = Vec::new();
+        for plan in [pool_plan, unpooled_plan] {
+            match plan {
+                Ok(plan) => candidates.extend(plan.candidates().iter().cloned()),
+                Err(
+                    RoutingError::EmptyAccountScope
+                    | RoutingError::NoCapableProvider { .. }
+                    | RoutingError::NoCapableProviderEndpoint { .. },
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if candidates.is_empty() {
+            return Err(match target {
+                super::SourceRoutingTarget::Model(model) => RoutingError::NoCapableProvider {
+                    model: model.to_string(),
+                },
+                super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                    RoutingError::NoCapableProviderEndpoint {
+                        provider: provider.to_string(),
+                    }
+                }
+            });
+        }
+        Ok(RoutingPlan {
+            config_revision: self.revision,
+            account_selection_policy: self.account_selection_policy,
+            operation: operation.kind(),
+            max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
+                .expect("constant request attempt limit is non-zero"),
+            account_scope,
+            candidates: Arc::from(candidates),
+        })
+    }
+
     /// 接入分组选定来源后，号池候选使用该池与请求权限的交集。
     pub fn plan_sources(
         &self,

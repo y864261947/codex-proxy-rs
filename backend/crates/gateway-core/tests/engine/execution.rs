@@ -1114,6 +1114,14 @@ fn start_snapshot_with_limits(
     group: Option<gateway_core::policy::AccessGroupPolicy>,
     global_limits: RateLimits,
 ) -> RuntimeSnapshot {
+    start_snapshot_with_legacy_pools(group, global_limits, BTreeSet::new())
+}
+
+fn start_snapshot_with_legacy_pools(
+    group: Option<gateway_core::policy::AccessGroupPolicy>,
+    global_limits: RateLimits,
+    legacy_pools: BTreeSet<gateway_core::routing::AccountGroupId>,
+) -> RuntimeSnapshot {
     use gateway_core::routing::{
         RoutingGroupSnapshot,
         source::{SourceId, SourcePolicy, SourcePreference},
@@ -1122,7 +1130,7 @@ fn start_snapshot_with_limits(
     let pools = group
         .as_ref()
         .map(|group| group.pool_group_ids.clone())
-        .unwrap_or_default();
+        .unwrap_or(legacy_pools);
     let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
         ProviderAccountId::new("acct_start").expect("account"),
         RuntimeAccount::new(provider.clone(), pools.clone()),
@@ -1734,6 +1742,147 @@ struct HealthProvider {
     failure: Option<ProviderErrorKind>,
     fail_during_stream: bool,
     calls: Mutex<Vec<gateway_core::routing::source::SourceId>>,
+}
+
+#[derive(Default)]
+struct LegacySourceGate {
+    deny: bool,
+    requests: Mutex<Vec<gateway_core::engine::source_admission::SourceAdmissionRequest>>,
+}
+
+impl gateway_core::engine::source_admission::SourceAdmissionPort for LegacySourceGate {
+    fn acquire(
+        &self,
+        request: gateway_core::engine::source_admission::SourceAdmissionRequest,
+    ) -> BoxFuture<
+        '_,
+        Result<
+            Box<dyn gateway_core::engine::provider::ResourceLease>,
+            gateway_core::engine::source_admission::SourceAdmissionError,
+        >,
+    > {
+        Box::pin(async move {
+            self.requests.lock().expect("requests").push(request);
+            if self.deny {
+                return Err(gateway_core::engine::source_admission::SourceAdmissionError::Capacity);
+            }
+            Ok(Box::new(()) as Box<dyn gateway_core::engine::provider::ResourceLease>)
+        })
+    }
+}
+
+#[test]
+fn unbound_keys_and_fixed_account_probes_use_the_pool_admission_and_health_scope() {
+    use gateway_core::{
+        engine::EngineError,
+        routing::{AccountGroupId, source::SourceId},
+    };
+    let pool = AccountGroupId::new("grp_00000000000000000000000000000001").expect("pool");
+    for deny in [true, false] {
+        for entry in ["model", "endpoint", "probe"] {
+            // The native endpoint path is only needed for the admission rejection case.
+            if !deny && entry == "endpoint" {
+                continue;
+            }
+            let snapshot = start_snapshot_with_legacy_pools(
+                None,
+                RateLimits::unlimited(),
+                BTreeSet::from([pool.clone()]),
+            );
+            let gate = Arc::new(LegacySourceGate {
+                deny,
+                ..Default::default()
+            });
+            let provider = Arc::new(HealthProvider::default());
+            let circuits = Arc::new(SourceCircuits::default());
+            let store = Arc::new(TrackingExecutionStore::default());
+            let service = DefaultExecutionService::new(
+                RuntimeSnapshotHandle::new(snapshot),
+                store.clone(),
+                ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).expect("registry"),
+                (Arc::new(UnusedAdmissions), gate.clone()),
+                circuits.clone(),
+                Arc::new(UnusedContinuation),
+                Arc::new(RecordingClientApiKeyUsage::default()),
+            );
+            if entry == "probe" {
+                let result = block_on(service.probe(AccountProbeRequest {
+                    account_id: ProviderAccountId::new("acct_start").expect("account"),
+                    provider_kind: ProviderKind::new("openai").expect("provider"),
+                    upstream_model: UpstreamModelId::new("gpt-start").expect("model"),
+                    operation: start_operation(),
+                }));
+                if deny {
+                    let error = result.expect_err("probe pool capacity");
+                    assert_eq!(error.kind(), GatewayErrorKind::SourceCapacityUnavailable);
+                    assert_eq!(error.source(), AccountProbeErrorSource::Gateway);
+                    assert_eq!(error.send_state(), Some(UpstreamSendState::NotSent));
+                } else {
+                    result.expect("probe succeeds");
+                }
+                assert!(
+                    !store.touched.load(Ordering::SeqCst),
+                    "probe does not persist a customer request"
+                );
+                assert_eq!(
+                    service
+                        .traffic_monitor()
+                        .snapshot()
+                        .ingress_requests_last_minute,
+                    0
+                );
+            } else {
+                let request = health_request(&service, "sk_start_test");
+                let mut started = if entry == "endpoint" {
+                    block_on(
+                        service.start_provider_endpoint(StartProviderExecution {
+                            client: request.client,
+                            provider: ProviderKind::new("openai").expect("provider"),
+                            operation: Operation::GenerateImage(ImageRequest::from_raw_json(
+                                ImageRequestKind::Generation,
+                                RawJsonPayload::new(
+                                    "openai",
+                                    Bytes::from_static(br#"{"prompt":"fixture"}"#),
+                                )
+                                .expect("image"),
+                            )),
+                            metadata: request.metadata,
+                        }),
+                    )
+                    .expect("start native endpoint")
+                } else {
+                    block_on(service.start(request)).expect("start model")
+                };
+                let result = block_on(started.session.collect_uncommitted());
+                if deny {
+                    assert!(
+                        matches!(result, Err(EngineError::Provider(error)) if error.kind() == ProviderErrorKind::SourceCapacityUnavailable)
+                    );
+                } else {
+                    result.expect("legacy key succeeds through pool");
+                }
+            }
+            let acquired = gate.requests.lock().expect("requests");
+            assert_eq!(acquired.len(), 1, "{entry}");
+            assert_eq!(acquired[0].source, SourceId::AccountPool(pool.clone()));
+            if deny {
+                assert!(provider.calls.lock().expect("calls").is_empty());
+                assert!(circuits.feedback.lock().expect("feedback").is_empty());
+            } else {
+                assert_eq!(
+                    *provider.calls.lock().expect("calls"),
+                    [SourceId::AccountPool(pool.clone())]
+                );
+                assert_eq!(
+                    *circuits.feedback.lock().expect("feedback"),
+                    [(
+                        ProviderCircuitScope::Source(SourceId::AccountPool(pool.clone())),
+                        true
+                    )]
+                );
+            }
+        }
+    }
 }
 
 #[async_trait]
