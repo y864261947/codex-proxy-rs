@@ -1058,6 +1058,7 @@ fn account_scope(provider: &ProviderKind, account_id: &str) -> Arc<FrozenAccount
 
 fn probe_snapshot() -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
+    let directory = Arc::clone(account_scope(&provider, "acct_probe").directory());
     let capabilities =
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
     RuntimeSnapshot::new(
@@ -1076,6 +1077,37 @@ fn probe_snapshot() -> RuntimeSnapshot {
         Vec::new(),
     )
     .expect("probe snapshot")
+    .with_account_directory(directory)
+}
+
+#[test]
+fn fixed_account_probe_rejects_missing_accounts_and_provider_mismatch_before_dispatch() {
+    let store = Arc::new(TrackingExecutionStore::default());
+    let gate = Arc::new(LegacySourceGate::default());
+    let provider = Arc::new(HealthProvider::default());
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(probe_snapshot()),
+        store.clone(),
+        ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).expect("registry"),
+        (Arc::new(UnusedAdmissions), gate.clone()),
+        Arc::new(UnusedCircuits),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    for (account, provider_kind) in [("acct_missing", "openai"), ("acct_probe", "xai")] {
+        let error = block_on(service.probe(AccountProbeRequest {
+            account_id: ProviderAccountId::new(account).expect("account"),
+            provider_kind: ProviderKind::new(provider_kind).expect("provider"),
+            upstream_model: UpstreamModelId::new("gpt-probe").expect("model"),
+            operation: probe_operation(),
+        }))
+        .expect_err("invalid diagnostic scope");
+        assert_eq!(error.kind(), GatewayErrorKind::NoAvailableProvider);
+        assert_eq!(error.source(), AccountProbeErrorSource::Gateway);
+    }
+    assert!(provider.calls.lock().expect("calls").is_empty());
+    assert!(gate.requests.lock().expect("requests").is_empty());
+    assert!(!store.touched.load(Ordering::SeqCst));
 }
 
 fn client_snapshot() -> RuntimeSnapshot {
