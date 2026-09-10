@@ -96,6 +96,7 @@ async fn channel_update_requires_explicit_revision_and_keeps_provider_identity_i
                 Request::builder()
                     .method("POST")
                     .uri("/api/admin/channels/update")
+                    .header("x-request-id", "req_channel_update")
                     .header(header::COOKIE, "cpr_admin_session=valid-session")
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(Body::from(body.to_string()))

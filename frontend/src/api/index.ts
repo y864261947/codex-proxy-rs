@@ -13,6 +13,7 @@ export * from './modules/auth'
 
 // 备份管理
 export * from './modules/backups'
+export * from './modules/channels'
 export * from './modules/customers'
 
 // Dashboard 聚合

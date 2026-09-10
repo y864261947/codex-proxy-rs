@@ -24,6 +24,11 @@ export const routes: RouteRecordRaw[] = [
         redirect: '/pools/groups',
       },
       {
+        path: 'channels',
+        name: 'channels',
+        component: () => import('@/views/channels/index.vue'),
+      },
+      {
         path: 'pools',
         component: () => import('@/views/pools/index.vue'),
         children: [

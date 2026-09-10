@@ -11,6 +11,7 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   Settings,
   Sun,
   Users,
@@ -57,6 +58,7 @@ const preferredMotion = usePreferredReducedMotion()
 
 const navItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
+  { label: '上游渠道', icon: Plug, path: '/channels' },
   { label: '自建号池', icon: Users, path: '/pools' },
   { label: '下游接入', icon: KeyRound, path: '/access' },
   { label: '监控中心', icon: Activity, path: '/monitoring' },
