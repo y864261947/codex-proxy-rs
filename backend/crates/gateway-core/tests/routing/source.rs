@@ -29,7 +29,7 @@ fn legacy_account_routes_cannot_bypass_pool_state_or_grant_channels_through_unpo
         [
             ("acct_a", BTreeSet::from([a.clone()])),
             ("acct_b", BTreeSet::from([b.clone()])),
-            ("acct_shared", BTreeSet::from([a.clone(), b.clone()])),
+            ("acct_shared", BTreeSet::from([a, b.clone()])),
             ("acct_unpooled", BTreeSet::new()),
         ]
         .into_iter()
