@@ -40,6 +40,23 @@ impl gateway_admin::ports::store::CustomerStore for UnusedStore {
     }
 }
 
+#[async_trait]
+impl gateway_admin::ports::store::QuotaScopeStore for UnusedStore {
+    async fn list_quota_scopes(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::quota_scopes::QuotaScopePage> {
+        Err(unavailable("quota_scope"))
+    }
+    async fn change_quota_scope(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("quota_scope"))
+    }
+}
+
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures::future::BoxFuture;
@@ -119,6 +136,7 @@ mod client_keys;
 mod customers;
 mod errors;
 mod observability;
+mod quota_scopes;
 mod settings;
 mod system;
 mod wire;
@@ -171,7 +189,7 @@ impl AdminTestFixture {
             unused.clone(),
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
-            unused,
+            gateway_admin::ports::store::AdminUpstreamStorePorts::new(unused.clone(), unused),
         );
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new("openai")),

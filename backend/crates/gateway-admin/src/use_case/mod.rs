@@ -11,6 +11,7 @@ pub mod client_keys;
 pub mod customers;
 pub mod observability;
 pub mod openai;
+pub mod quota_scopes;
 pub mod settings;
 pub mod system;
 pub mod xai;

@@ -19,6 +19,7 @@ pub mod customers;
 mod extract;
 pub mod observability;
 pub mod presenter;
+pub mod quota_scopes;
 pub mod settings;
 pub mod system;
 pub mod wire;
@@ -43,6 +44,7 @@ where
         .merge(channels::router::<S>())
         .merge(client_keys::router::<S>())
         .merge(customers::router::<S>())
+        .merge(quota_scopes::router::<S>())
         .merge(access_groups::router::<S>())
         .merge(observability::router::<S>())
         .merge(settings::router::<S>())

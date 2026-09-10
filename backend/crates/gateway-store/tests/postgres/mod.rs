@@ -26,6 +26,7 @@ mod observability;
 mod ops_events;
 mod provider_accounts;
 mod query_budget;
+mod quota_scopes;
 mod retention;
 mod runtime_settings;
 mod schema_integrity;

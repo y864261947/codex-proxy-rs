@@ -152,6 +152,7 @@ pub enum AdminConfigError {
 pub struct AdminServices {
     channels: Arc<dyn use_case::channels::ChannelService>,
     customers: Arc<dyn use_case::customers::CustomerService>,
+    quota_scopes: Arc<dyn use_case::quota_scopes::QuotaScopeService>,
     access_groups: Arc<dyn use_case::access_groups::AccessGroupService>,
     auth: Arc<dyn AuthService>,
     accounts: Arc<dyn AccountsService>,
@@ -171,6 +172,11 @@ impl AdminServices {
     pub fn channels(&self) -> &dyn use_case::channels::ChannelService {
         self.channels.as_ref()
     }
+    #[must_use]
+    pub fn quota_scopes(&self) -> &dyn use_case::quota_scopes::QuotaScopeService {
+        self.quota_scopes.as_ref()
+    }
+
     #[must_use]
     pub fn customers(&self) -> &dyn use_case::customers::CustomerService {
         self.customers.as_ref()
@@ -316,6 +322,10 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        quota_scopes: Arc::new(use_case::quota_scopes::DefaultQuotaScopeService::new(
+            store.quota_scopes(),
+            snapshot.clone(),
+        )),
         channels: Arc::new(use_case::channels::DefaultChannelService::new(
             store.channels(),
             channel_registry,

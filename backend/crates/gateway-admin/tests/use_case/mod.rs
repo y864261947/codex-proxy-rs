@@ -49,6 +49,23 @@ impl gateway_admin::ports::store::CustomerStore for UnavailableStore {
     }
 }
 
+#[async_trait]
+impl gateway_admin::ports::store::QuotaScopeStore for UnavailableStore {
+    async fn list_quota_scopes(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::quota_scopes::QuotaScopePage> {
+        Err(unavailable("quota_scope"))
+    }
+    async fn change_quota_scope(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("quota_scope"))
+    }
+}
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -262,7 +279,10 @@ impl AdminHarness {
                 self.observability,
                 self.settings,
                 self.backup,
-                self.channels,
+                gateway_admin::ports::store::AdminUpstreamStorePorts::new(
+                    self.channels,
+                    Arc::new(UnavailableStore),
+                ),
             ),
             gateway_admin::ProviderAdminContributions {
                 accounts: self.providers,

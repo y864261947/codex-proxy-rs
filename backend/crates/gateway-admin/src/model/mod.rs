@@ -13,6 +13,7 @@ pub mod client_keys;
 pub mod customers;
 pub mod observability;
 pub mod provider_credentials;
+pub mod quota_scopes;
 pub mod settings;
 pub mod system;
 

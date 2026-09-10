@@ -117,6 +117,19 @@ pub trait CustomerStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait QuotaScopeStore: Send + Sync {
+    async fn list_quota_scopes(
+        &self,
+        query: crate::model::quota_scopes::QuotaScopeListQuery,
+    ) -> AdminStoreResult<crate::model::quota_scopes::QuotaScopePage>;
+    async fn change_quota_scope(
+        &self,
+        change: crate::model::quota_scopes::QuotaScopeChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
+#[async_trait]
 pub trait AccessGroupStore: Send + Sync {
     async fn list_access_groups(
         &self,
@@ -481,7 +494,7 @@ impl AdminDownstreamStorePorts {
 
 #[derive(Clone)]
 pub struct AdminStorePorts {
-    channels: Arc<dyn ChannelStore>,
+    upstream: AdminUpstreamStorePorts,
     downstream: AdminDownstreamStorePorts,
     accounts: AdminAccountStorePorts,
     auth: Arc<dyn AuthStore>,
@@ -499,7 +512,7 @@ impl AdminStorePorts {
         observability: Arc<dyn ObservabilityStore>,
         settings: Arc<dyn SettingsStore>,
         backup: BackupStorePorts,
-        channels: Arc<dyn ChannelStore>,
+        upstream: AdminUpstreamStorePorts,
     ) -> Self {
         Self {
             accounts,
@@ -508,7 +521,7 @@ impl AdminStorePorts {
             observability,
             settings,
             backup,
-            channels,
+            upstream,
         }
     }
 
@@ -519,7 +532,12 @@ impl AdminStorePorts {
 
     #[must_use]
     pub fn channels(&self) -> Arc<dyn ChannelStore> {
-        self.channels.clone()
+        self.upstream.channels.clone()
+    }
+
+    #[must_use]
+    pub fn quota_scopes(&self) -> Arc<dyn QuotaScopeStore> {
+        self.upstream.quotas.clone()
     }
 
     #[must_use]
@@ -565,5 +583,18 @@ impl AdminStorePorts {
     #[must_use]
     pub fn backup(&self) -> BackupStorePorts {
         self.backup.clone()
+    }
+}
+
+/// 渠道及其共享配额，独立于下游客户和权限分组。
+#[derive(Clone)]
+pub struct AdminUpstreamStorePorts {
+    channels: Arc<dyn ChannelStore>,
+    quotas: Arc<dyn QuotaScopeStore>,
+}
+impl AdminUpstreamStorePorts {
+    #[must_use]
+    pub fn new(channels: Arc<dyn ChannelStore>, quotas: Arc<dyn QuotaScopeStore>) -> Self {
+        Self { channels, quotas }
     }
 }
