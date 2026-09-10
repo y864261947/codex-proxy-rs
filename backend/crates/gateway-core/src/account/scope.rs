@@ -215,6 +215,16 @@ impl ClientRoutingScope {
         Self::AllAccounts
     }
 
+    /// 接入分组尚未授权任何号池时的显式空范围。
+    #[must_use]
+    pub fn no_accounts() -> Self {
+        Self::Restricted {
+            bound_groups: Arc::from([]),
+            enabled_group_ids: Arc::new(BTreeSet::new()),
+            provider_kinds: Arc::new(BTreeSet::new()),
+        }
+    }
+
     pub fn restricted(
         bound_groups: Vec<RoutingGroupSnapshot>,
         enabled_group_ids: BTreeSet<AccountGroupId>,

@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+mod access;
 mod admission;
 
 use gateway_core::policy::{

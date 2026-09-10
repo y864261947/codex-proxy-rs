@@ -159,6 +159,7 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                         key.limits,
                     )
                     .with_customer(key.customer)
+                    .with_access_group(key.access_group)
                 })
                 .collect();
             let account_groups = data
@@ -274,18 +275,28 @@ async fn load_client_keys(
             Option<bool>,
             Option<i64>,
             Option<i64>,
+            Option<String>,
+            Option<bool>,
+            Option<i64>,
+            Option<i64>,
+            Option<Vec<String>>,
+            Vec<String>,
         ),
     >(
         "select k.id, k.key,
                 coalesce(array_agg(kg.account_group_id order by kg.account_group_id)
                   filter (where kg.account_group_id is not null), '{}') as group_ids,
                 k.max_concurrency, k.requests_per_minute,
-                c.id, c.enabled, c.max_concurrency, c.requests_per_minute
+                c.id, c.enabled, c.max_concurrency, c.requests_per_minute,
+                a.id, a.enabled, a.max_concurrency, a.requests_per_minute, a.allowed_models,
+                array(select p.account_group_id from access_group_pools p
+                      where p.access_group_id = a.id order by p.account_group_id)
          from client_api_keys k
          left join client_api_key_groups kg on kg.client_api_key_id = k.id
          left join customers c on c.id = k.customer_id
+         left join access_groups a on a.id = k.access_group_id
          where k.enabled
-         group by k.id, c.id
+         group by k.id, c.id, a.id
          order by k.id",
     )
     .fetch_all(&mut **transaction)
@@ -311,6 +322,44 @@ async fn load_client_keys(
                             )?,
                         },
                     })
+                })
+                .transpose()?;
+            key.access_group = row
+                .9
+                .map(|id| {
+                    let group = gateway_core::policy::AccessGroupPolicy {
+                        id: gateway_core::policy::AccessGroupId::new(id)
+                            .map_err(|_| invalid("invalid access group ID"))?,
+                        enabled: row
+                            .10
+                            .ok_or_else(|| invalid("missing access group state"))?,
+                        limits: gateway_core::policy::RateLimits {
+                            max_concurrency: to_u64(
+                                row.11
+                                    .ok_or_else(|| invalid("missing access group concurrency"))?,
+                            )?,
+                            requests_per_minute: to_u64(
+                                row.12.ok_or_else(|| invalid("missing access group RPM"))?,
+                            )?,
+                        },
+                        allowed_models: row
+                            .13
+                            .ok_or_else(|| invalid("missing access group models"))?
+                            .into_iter()
+                            .collect(),
+                        pool_group_ids: row
+                            .14
+                            .into_iter()
+                            .map(|id| {
+                                AccountGroupId::new(id)
+                                    .map_err(|_| invalid("invalid access pool ID"))
+                            })
+                            .collect::<StoreResult<_>>()?,
+                    };
+                    group
+                        .validate()
+                        .map_err(|_| invalid("invalid access group policy"))?;
+                    Ok::<_, StoreError>(group)
                 })
                 .transpose()?;
             Ok(key)

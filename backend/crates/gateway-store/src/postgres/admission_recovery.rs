@@ -12,7 +12,7 @@ use gateway_core::{
             ClientAdmissionRecoveryPort, RecentAdmissionFact, RunningAdmissionFact,
         },
     },
-    policy::{AdmissionScopeId, ClientApiKeyId, CustomerId},
+    policy::{AccessGroupId, AdmissionScopeId, ClientApiKeyId, CustomerId},
 };
 use sqlx::PgPool;
 
@@ -66,7 +66,7 @@ impl ClientAdmissionRecoveryRepository for PgClientAdmissionRecoveryRepository {
         let rows = sqlx::query_as::<_, (String, String, String, DateTime<Utc>, DateTime<Utc>, String)>(
             "select scope.kind, scope.ref, r.id, r.started_at, r.deadline_at, r.outcome
              from model_requests r
-             cross join lateral (values ('key', r.client_api_key_ref), ('customer', r.customer_ref)) scope(kind, ref)
+             cross join lateral (values ('key', r.client_api_key_ref), ('customer', r.customer_ref), ('access_group', r.access_group_ref)) scope(kind, ref)
              where scope.ref is not null and (r.started_at >= $1 or r.outcome = 'running')
              order by scope.kind, scope.ref, r.started_at, r.id",
         )
@@ -84,6 +84,10 @@ impl ClientAdmissionRecoveryRepository for PgClientAdmissionRecoveryRepository {
                 "customer" => AdmissionScopeId::Customer(
                     CustomerId::new(reference)
                         .map_err(|_| postgres_unavailable("invalid admission customer ref"))?,
+                ),
+                "access_group" => AdmissionScopeId::AccessGroup(
+                    AccessGroupId::new(reference)
+                        .map_err(|_| postgres_unavailable("invalid admission access group ref"))?,
                 ),
                 _ => return Err(postgres_unavailable("unknown admission scope kind")),
             };

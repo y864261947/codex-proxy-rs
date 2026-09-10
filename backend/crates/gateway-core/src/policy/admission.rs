@@ -4,7 +4,7 @@ use std::fmt;
 
 use crate::validation::{IdentifierError, validate_text};
 
-use super::{ClientApiKeyId, RateLimits};
+use super::{AccessGroupId, ClientApiKeyId, RateLimits};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CustomerId(String);
@@ -47,6 +47,7 @@ pub struct CustomerPolicy {
 pub enum AdmissionScopeId {
     Key(ClientApiKeyId),
     Customer(CustomerId),
+    AccessGroup(AccessGroupId),
 }
 
 impl fmt::Display for AdmissionScopeId {
@@ -54,6 +55,7 @@ impl fmt::Display for AdmissionScopeId {
         match self {
             Self::Key(id) => write!(formatter, "key:{id}"),
             Self::Customer(id) => write!(formatter, "customer:{id}"),
+            Self::AccessGroup(id) => write!(formatter, "access_group:{id}"),
         }
     }
 }

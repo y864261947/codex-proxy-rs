@@ -641,6 +641,7 @@ fn new_request_bytes(request: &NewModelRequest) -> usize {
             .map(|value| value.as_str()),
         Some(request.client_api_key_ref.as_str()),
         request.customer_ref.as_ref().map(|id| id.as_str()),
+        request.access_group_ref.as_ref().map(|id| id.as_str()),
         Some(request.protocol.as_str()),
         Some(request.endpoint.as_str()),
         Some(request.client_transport.as_str()),

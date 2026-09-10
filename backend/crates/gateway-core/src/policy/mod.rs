@@ -1,10 +1,12 @@
 //! 下游 Client API Key 的准入策略。
 //!
-//! Client API Key 冻结账号分组权限；模型名称不参与权限判断。
+//! 旧 Client API Key 保留账号分组权限；接入分组同时约束模型与可用号池。
 
+mod access;
 mod admission;
 mod client_version;
 
+pub use access::{AccessGroupId, AccessGroupPolicy};
 pub use admission::{AdmissionScope, AdmissionScopeId, CustomerId, CustomerPolicy};
 
 pub use client_version::{
@@ -97,6 +99,7 @@ impl RateLimits {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientPolicy {
     customer: Option<CustomerPolicy>,
+    access_group: Option<AccessGroupPolicy>,
     key_id: ClientApiKeyId,
     plaintext_key: PlaintextClientApiKey,
     account_scope: Arc<FrozenAccountScope>,
@@ -116,6 +119,7 @@ impl ClientPolicy {
         Self {
             key_id,
             customer: None,
+            access_group: None,
             plaintext_key,
             account_scope,
             enabled,
@@ -140,6 +144,27 @@ impl ClientPolicy {
     }
 
     #[must_use]
+    pub fn with_access_group(mut self, access_group: Option<AccessGroupPolicy>) -> Self {
+        self.access_group = access_group;
+        self
+    }
+
+    #[must_use]
+    pub const fn access_group(&self) -> Option<&AccessGroupPolicy> {
+        self.access_group.as_ref()
+    }
+
+    /// 未迁入接入分组的旧 Key 继续使用原有模型可见性。
+    #[must_use]
+    pub fn allows_model(&self, public_model: &str) -> bool {
+        self.enabled()
+            && self
+                .access_group
+                .as_ref()
+                .is_none_or(|group| group.allows_model(public_model))
+    }
+
+    #[must_use]
     pub fn admission_scopes(&self) -> Vec<AdmissionScope> {
         let mut scopes = vec![AdmissionScope {
             id: AdmissionScopeId::Key(self.key_id.clone()),
@@ -149,6 +174,12 @@ impl ClientPolicy {
             scopes.push(AdmissionScope {
                 id: AdmissionScopeId::Customer(customer.id.clone()),
                 limits: customer.limits,
+            });
+        }
+        if let Some(group) = &self.access_group {
+            scopes.push(AdmissionScope {
+                id: AdmissionScopeId::AccessGroup(group.id.clone()),
+                limits: group.limits,
             });
         }
         scopes
@@ -171,6 +202,10 @@ impl ClientPolicy {
                 Some(customer) => customer.enabled,
                 None => true,
             }
+            && match &self.access_group {
+                Some(group) => group.enabled,
+                None => true,
+            }
     }
 
     #[must_use]
@@ -184,6 +219,15 @@ impl ClientPolicy {
     ///
     /// Key 已禁用时返回稳定拒绝原因。
     pub fn authorize(&self) -> Result<(), PolicyError> {
+        if self
+            .access_group
+            .as_ref()
+            .is_some_and(|group| !group.enabled)
+        {
+            return Err(PolicyError::Denied {
+                reason: "access group is disabled",
+            });
+        }
         if self
             .customer
             .as_ref()

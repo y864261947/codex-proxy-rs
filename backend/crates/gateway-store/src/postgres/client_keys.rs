@@ -52,6 +52,7 @@ const CLIENT_API_KEY_LAST_USED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientApiKeySnapshot {
     pub customer: Option<gateway_core::policy::CustomerPolicy>,
+    pub access_group: Option<gateway_core::policy::AccessGroupPolicy>,
     pub id: ClientApiKeyId,
     pub plaintext_key: PlaintextClientApiKey,
     pub group_ids: Vec<AccountGroupId>,
@@ -69,6 +70,7 @@ impl ClientApiKeySnapshot {
         Ok(Self {
             id: ClientApiKeyId::new(id).map_err(|_| invalid("persisted key ID is invalid"))?,
             customer: None,
+            access_group: None,
             plaintext_key: PlaintextClientApiKey::new(key)
                 .map_err(|_| invalid("persisted plaintext key is invalid"))?,
             group_ids: group_ids
@@ -1178,7 +1180,7 @@ fn client_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<ClientApiK
 
 async fn count_client_api_keys(pool: &PgPool, search: Option<&str>) -> StoreResult<u64> {
     let mut statement =
-        QueryBuilder::<Postgres>::new("select count(*)::bigint from client_api_keys where true");
+        QueryBuilder::<Postgres>::new("select count(*)::bigint from client_api_keys k where true");
     push_client_key_search(&mut statement, search);
     let count = statement
         .build_query_scalar::<i64>()
@@ -1191,13 +1193,13 @@ async fn count_client_api_keys(pool: &PgPool, search: Option<&str>) -> StoreResu
 fn push_client_key_search(statement: &mut QueryBuilder<Postgres>, search: Option<&str>) {
     if let Some(search) = search {
         let prefix = literal_prefix_pattern(search);
-        statement.push(" and (lower(name) like ");
+        statement.push(" and (lower(k.name) like ");
         statement.push_bind(prefix.clone());
         statement.push(" escape '\\'");
-        statement.push(" or lower(coalesce(label, '')) like ");
+        statement.push(" or lower(coalesce(k.label, '')) like ");
         statement.push_bind(prefix.clone());
         statement.push(" escape '\\'");
-        statement.push(" or lower(left(key, 10)) like ");
+        statement.push(" or lower(left(k.key, 10)) like ");
         statement.push_bind(prefix);
         statement.push(" escape '\\'");
         statement.push(")");

@@ -321,3 +321,87 @@ fn compiled_snapshot_excludes_keys_of_disabled_customers() {
 fn revision(value: u64) -> ConfigRevision {
     ConfigRevision::new(value).expect("positive revision")
 }
+
+#[test]
+fn access_groups_freeze_explicit_pools_without_expanding_empty_or_legacy_permissions() {
+    use gateway_core::account::{ProviderAccountId, scope::AccountGroupId};
+    use gateway_core::policy::{AccessGroupId, AccessGroupPolicy};
+    use std::collections::BTreeSet;
+    let first = AccountGroupId::new("grp_00000000000000000000000000000001").expect("pool");
+    let second = AccountGroupId::new("grp_00000000000000000000000000000002").expect("pool");
+    let account_a = ProviderAccountId::new("acct_a").expect("account");
+    let account_b = ProviderAccountId::new("acct_b").expect("account");
+    let mut policies = Vec::new();
+    for label in ["legacy", "selected", "empty", "disabled"] {
+        let mut policy = SnapshotClientPolicyFacts::new(
+            ClientApiKeyId::new(label).expect("key"),
+            PlaintextClientApiKey::new(format!("sk_{label}")).expect("secret"),
+            Vec::new(),
+            RateLimits::unlimited(),
+        );
+        if label != "legacy" {
+            policy = policy.with_access_group(Some(AccessGroupPolicy {
+                id: AccessGroupId::new(format!("access_{label}")).expect("access group"),
+                enabled: label != "disabled",
+                limits: RateLimits::unlimited(),
+                allowed_models: BTreeSet::from(["public-model".to_owned()]),
+                pool_group_ids: if label == "empty" {
+                    BTreeSet::new()
+                } else {
+                    BTreeSet::from([first.clone()])
+                },
+            }));
+        }
+        policies.push(policy);
+    }
+    let facts = SnapshotFacts::new(
+        revision(1),
+        revision(1),
+        SnapshotSettingsFacts::new(3, 50, "smart", BTreeMap::new(), None, None),
+        policies,
+        vec![
+            SnapshotAccountGroupFacts::new(first.clone(), "First".to_owned(), true),
+            SnapshotAccountGroupFacts::new(second.clone(), "Second".to_owned(), true),
+        ],
+        vec![
+            SnapshotProviderAccountFacts::new(account_a.clone(), "alpha"),
+            SnapshotProviderAccountFacts::new(account_b.clone(), "alpha"),
+        ],
+        vec![
+            SnapshotAccountGroupMemberFacts::new(first, account_a.clone()),
+            SnapshotAccountGroupMemberFacts::new(second, account_b.clone()),
+        ],
+    );
+    let providers =
+        ProviderRegistry::new([Arc::new(UnavailableCatalogProvider) as Arc<dyn Provider>])
+            .expect("providers");
+    let snapshot = block_on(
+        RuntimeSnapshotCompiler::new(Arc::new(TestSnapshotStore::new(Ok(facts))), providers)
+            .compile(),
+    )
+    .expect("snapshot");
+    let policies = snapshot
+        .client_policies()
+        .map(|policy| (policy.key_id().as_str(), policy))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(policies.len(), 3);
+    assert!(policies["legacy"].account_scope().allows(&account_a));
+    assert!(policies["legacy"].account_scope().allows(&account_b));
+    assert!(policies["selected"].account_scope().allows(&account_a));
+    assert!(!policies["selected"].account_scope().allows(&account_b));
+    assert!(!policies["empty"].account_scope().allows(&account_a));
+    assert!(
+        policies["empty"]
+            .account_scope()
+            .provider_kinds()
+            .is_empty()
+    );
+    assert_eq!(
+        policies["empty"]
+            .account_scope()
+            .routing_snapshot()
+            .kind()
+            .as_str(),
+        "groups"
+    );
+}

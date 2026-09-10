@@ -971,6 +971,12 @@ fn client_snapshot() -> RuntimeSnapshot {
 }
 
 fn start_snapshot() -> RuntimeSnapshot {
+    start_snapshot_with_access_group(None)
+}
+
+fn start_snapshot_with_access_group(
+    group: Option<gateway_core::policy::AccessGroupPolicy>,
+) -> RuntimeSnapshot {
     let provider = ProviderKind::new("openai").expect("provider kind");
     let capabilities =
         ModelCapabilities::new(BTreeSet::from([OperationKind::Generate]), Some(16_000));
@@ -987,15 +993,111 @@ fn start_snapshot() -> RuntimeSnapshot {
             UpstreamModelId::new("gpt-start").expect("model ID"),
             capabilities,
         )],
-        vec![ClientPolicy::new(
-            ClientApiKeyId::new("key_start_test").expect("client API key ID"),
-            PlaintextClientApiKey::new("sk_start_test").expect("plaintext client API key"),
-            account_scope(&provider, "acct_start"),
-            true,
-            RateLimits::unlimited(),
-        )],
+        vec![
+            ClientPolicy::new(
+                ClientApiKeyId::new("key_start_test").expect("client API key ID"),
+                PlaintextClientApiKey::new("sk_start_test").expect("plaintext client API key"),
+                account_scope(&provider, "acct_start"),
+                true,
+                RateLimits::unlimited(),
+            )
+            .with_access_group(group),
+        ],
     )
     .expect("start snapshot")
+}
+
+#[test]
+fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoints() {
+    use gateway_core::policy::{AccessGroupId, AccessGroupPolicy};
+    let snapshot = start_snapshot_with_access_group(Some(AccessGroupPolicy {
+        id: AccessGroupId::new("access_alias").expect("group"),
+        enabled: true,
+        limits: RateLimits::unlimited(),
+        allowed_models: BTreeSet::from(["public-alias".to_owned()]),
+        pool_group_ids: BTreeSet::new(),
+    }))
+    .with_model_mappings(BTreeMap::from([(
+        "public-alias".to_owned(),
+        "gpt-start".to_owned(),
+    )]));
+    let store = Arc::new(TrackingExecutionStore::default());
+    let service = DefaultExecutionService::new(
+        RuntimeSnapshotHandle::new(snapshot),
+        store.clone(),
+        ProviderRegistry::default(),
+        Arc::new(UnusedAdmissions),
+        Arc::new(UnusedCircuits),
+        Arc::new(UnusedContinuation),
+        Arc::new(RecordingClientApiKeyUsage::default()),
+    );
+    let client = service.authenticate("sk_start_test").expect("client");
+    assert_eq!(
+        service
+            .public_models(&client)
+            .iter()
+            .map(|model| model.as_str())
+            .collect::<Vec<_>>(),
+        ["public-alias"]
+    );
+    assert!(
+        !service.contains_public_model(&client, &PublicModelId::new("gpt-start").expect("model"))
+    );
+    assert!(
+        service.contains_public_model(&client, &PublicModelId::new("public-alias").expect("model"))
+    );
+    assert!(
+        service
+            .public_model_profiles(&client)
+            .iter()
+            .all(|profile| profile.model().as_str() == "public-alias")
+    );
+    for model in ["gpt-start", "unlisted"] {
+        let error = block_on(service.start(StartExecution {
+            client: client.clone(),
+            public_model: PublicModelId::new(model).expect("model"),
+            operation: start_operation_for_model(model),
+            metadata: access_test_metadata(),
+        }))
+        .expect_err("unauthorized model");
+        assert_eq!(error.kind(), GatewayErrorKind::PolicyDenied);
+        assert!(!store.touched.load(Ordering::SeqCst));
+    }
+    let started = block_on(service.start(StartExecution {
+        client: client.clone(),
+        public_model: PublicModelId::new("public-alias").expect("model"),
+        operation: start_operation_for_model("public-alias"),
+        metadata: access_test_metadata(),
+    }))
+    .expect("authorized alias routes to upstream model");
+    drop(started);
+    let error = block_on(
+        service.start_provider_endpoint(StartProviderExecution {
+            client,
+            provider: ProviderKind::new("openai").expect("provider"),
+            operation: Operation::GenerateImage(ImageRequest::from_raw_json(
+                ImageRequestKind::Generation,
+                RawJsonPayload::new("openai", Bytes::from_static(br#"{"prompt":"hello"}"#))
+                    .expect("image payload"),
+            )),
+            metadata: access_test_metadata(),
+        }),
+    )
+    .expect_err("model-less endpoint must not bypass the model allowlist");
+    assert_eq!(error.kind(), GatewayErrorKind::PolicyDenied);
+    assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
+}
+
+fn access_test_metadata() -> ExecutionRequestMetadata {
+    ExecutionRequestMetadata {
+        protocol: "openai".to_owned(),
+        endpoint: "/v1/responses".to_owned(),
+        transport: ClientTransport::HttpJson,
+        stream: false,
+        client_ip: None,
+        user_agent: None,
+        previous_response_id: None,
+    }
 }
 
 fn probe_operation() -> Operation {

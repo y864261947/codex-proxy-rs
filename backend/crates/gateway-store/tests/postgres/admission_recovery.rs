@@ -174,3 +174,58 @@ async fn recovery_aggregates_frozen_customer_refs_after_key_reassignment_and_del
         == AdmissionScopeId::Customer(CustomerId::new("cust_new").expect("customer ID"))));
     database.close().await;
 }
+
+#[tokio::test]
+async fn recovery_uses_access_group_at_admission_after_reassignment_and_deletion() {
+    use gateway_core::policy::AccessGroupId;
+    let Some(database) = TestDatabase::create("access_recovery").await else {
+        return;
+    };
+    let now = Utc::now();
+    sqlx::raw_sql(
+        "insert into access_groups (id, name) values ('access_old', 'Old'), ('access_new', 'New');
+         insert into client_api_keys (id, name, key, access_group_id, created_at, updated_at)
+         values ('key-recovery', 'Key', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'access_old', now(), now());"
+    ).execute(&database.pool).await.expect("seed group and key");
+    seed_request(
+        &database.pool,
+        "req_group_first",
+        now,
+        now + Duration::seconds(60),
+        "running",
+    )
+    .await;
+    seed_request(
+        &database.pool,
+        "req_group_second",
+        now,
+        now + Duration::seconds(60),
+        "succeeded",
+    )
+    .await;
+    sqlx::raw_sql(
+        "update model_requests set access_group_ref = 'access_old';
+         update model_requests set client_api_key_ref = 'key-other' where id = 'req_group_second';
+         update client_api_keys set access_group_id = 'access_new' where id = 'key-recovery';
+         delete from access_groups where id = 'access_old';
+         delete from client_api_keys where id = 'key-recovery';",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("reassign and remove live records");
+    let recoveries = PgClientAdmissionRecoveryRepository::new(database.pool.clone())
+        .load_client_admission_recovery(now - Duration::seconds(60))
+        .await
+        .expect("recovery");
+    assert_eq!(recoveries.len(), 3);
+    let original = AdmissionScopeId::AccessGroup(AccessGroupId::new("access_old").expect("group"));
+    let group = recoveries
+        .iter()
+        .find(|recovery| recovery.scope_id == original)
+        .expect("original group");
+    assert_eq!(group.recent_requests.len(), 2);
+    assert_eq!(group.running_requests.len(), 1);
+    assert!(!recoveries.iter().any(|recovery| recovery.scope_id
+        == AdmissionScopeId::AccessGroup(AccessGroupId::new("access_new").expect("group"))));
+    database.close().await;
+}

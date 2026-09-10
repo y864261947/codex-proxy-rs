@@ -29,6 +29,7 @@ fn model_request_rejects_mismatched_client_key_live_id() {
         client_api_key_id: Some("key-live".to_owned()),
         client_api_key_ref: "key-history".to_owned(),
         customer_ref: None,
+        access_group_ref: None,
         config_revision: 1,
         protocol: "openai".to_owned(),
         operation: "responses".to_owned(),
@@ -82,6 +83,7 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
         client_api_key_id: None,
         client_api_key_ref: "key_merged".to_owned(),
         customer_ref: Some("cust_history".to_owned()),
+        access_group_ref: Some("access_history".to_owned()),
         config_revision: 1,
         protocol: "openai".to_owned(),
         operation: "generate_image".to_owned(),
@@ -155,6 +157,12 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
             .await
             .expect("merged customer ref");
     assert_eq!(customer.as_deref(), Some("cust_history"));
+    let access: Option<String> =
+        sqlx::query_scalar("select access_group_ref from model_requests where id = 'req_merged'")
+            .fetch_one(&database.pool)
+            .await
+            .expect("merged access group ref");
+    assert_eq!(access.as_deref(), Some("access_history"));
     // 后续 attempt 沿用常规 CAS 递增路径；已持久化的 sent 水位不被重试重置。
     repository
         .mark_upstream_send_state(
@@ -204,6 +212,7 @@ async fn model_request_persists_group_routing_snapshot_without_live_group_foreig
             client_api_key_id: None,
             client_api_key_ref: "key_group_history".to_owned(),
             customer_ref: Some("cust_history".to_owned()),
+            access_group_ref: Some("access_history".to_owned()),
             config_revision: 7,
             routing_scope: "groups".to_owned(),
             routing_group_refs: vec![
@@ -245,6 +254,13 @@ async fn model_request_persists_group_routing_snapshot_without_live_group_foreig
     .await
     .expect("sequential customer ref");
     assert_eq!(customer.as_deref(), Some("cust_history"));
+    let access: Option<String> = sqlx::query_scalar(
+        "select access_group_ref from model_requests where id = 'req_group_history'",
+    )
+    .fetch_one(&database.pool)
+    .await
+    .expect("sequential access group ref");
+    assert_eq!(access.as_deref(), Some("access_history"));
     assert_eq!(stored.0, "groups");
     assert_eq!(
         stored.1,

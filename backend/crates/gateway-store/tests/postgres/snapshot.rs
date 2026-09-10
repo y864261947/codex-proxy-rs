@@ -9,6 +9,7 @@ use super::TestDatabase;
 fn snapshot_client_policy_contains_only_common_limits() {
     let policy = ClientApiKeySnapshot {
         customer: None,
+        access_group: None,
         id: ClientApiKeyId::new("key-1").expect("client key ID"),
         plaintext_key: PlaintextClientApiKey::new("sk_snapshot_secret").expect("plaintext key"),
         group_ids: Vec::new(),
@@ -99,5 +100,67 @@ async fn snapshot_freezes_customer_status_and_limits_without_changing_key_limits
         customer.enabled,
         "already frozen requests retain their policy"
     );
+    database.close().await;
+}
+
+#[tokio::test]
+async fn snapshot_reads_access_models_pools_and_limits_in_one_consistent_revision() {
+    let Some(database) = TestDatabase::create("access_snapshot").await else {
+        return;
+    };
+    sqlx::raw_sql(
+        "insert into account_groups (id, name, color, created_at, updated_at) values
+         ('grp_00000000000000000000000000000001', 'First', '#123456', now(), now()),
+         ('grp_00000000000000000000000000000002', 'Second', '#654321', now(), now());
+         insert into access_groups (id, name, max_concurrency, requests_per_minute, allowed_models)
+         values ('access_snapshot', 'Access', 5, 90, array['public-model']);
+         insert into access_group_pools values ('access_snapshot', 'grp_00000000000000000000000000000001');
+         insert into client_api_keys (id, name, key, access_group_id, max_concurrency, created_at, updated_at)
+         values ('key_snapshot', 'Key', 'sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ', 'access_snapshot', 2, now(), now());
+         insert into client_api_key_groups (client_api_key_id, account_group_id, created_at)
+         values ('key_snapshot', 'grp_00000000000000000000000000000002', now());"
+    ).execute(&database.pool).await.expect("seed access group and legacy binding");
+    let repository = PgRuntimeSnapshotRepository::new(database.pool.clone());
+    let original = repository.load_runtime_snapshot().await.expect("snapshot");
+    let key = &original.client_api_keys[0];
+    assert_eq!(key.limits.max_concurrency, 2);
+    assert_eq!(
+        key.group_ids[0].as_str(),
+        "grp_00000000000000000000000000000002"
+    );
+    let group = key.access_group.as_ref().expect("access group");
+    assert_eq!(group.limits.max_concurrency, 5);
+    assert_eq!(group.limits.requests_per_minute, 90);
+    assert!(group.allows_model("public-model"));
+    assert_eq!(
+        group.pool_group_ids.iter().next().expect("pool").as_str(),
+        "grp_00000000000000000000000000000001"
+    );
+    let error = sqlx::query("delete from access_groups where id = 'access_snapshot'")
+        .execute(&database.pool)
+        .await
+        .expect_err("bound group deletion is restricted");
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23001")
+    );
+    sqlx::raw_sql("update access_groups set enabled = false, allowed_models = '{}' where id = 'access_snapshot'; delete from access_group_pools;")
+        .execute(&database.pool).await.expect("change group permissions");
+    let current = repository
+        .load_runtime_snapshot()
+        .await
+        .expect("new snapshot");
+    let changed = current.client_api_keys[0]
+        .access_group
+        .as_ref()
+        .expect("changed group");
+    assert!(!changed.enabled);
+    assert!(changed.allowed_models.is_empty());
+    assert!(changed.pool_group_ids.is_empty());
+    assert!(group.enabled);
+    assert!(group.allows_model("public-model"));
     database.close().await;
 }

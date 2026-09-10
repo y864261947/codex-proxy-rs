@@ -60,6 +60,7 @@ impl SnapshotSettingsFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotClientPolicyFacts {
     customer: Option<crate::policy::CustomerPolicy>,
+    access_group: Option<crate::policy::AccessGroupPolicy>,
     key_id: ClientApiKeyId,
     plaintext_key: PlaintextClientApiKey,
     group_ids: Vec<AccountGroupId>,
@@ -67,6 +68,12 @@ pub struct SnapshotClientPolicyFacts {
 }
 
 impl SnapshotClientPolicyFacts {
+    #[must_use]
+    pub fn with_access_group(mut self, group: Option<crate::policy::AccessGroupPolicy>) -> Self {
+        self.access_group = group;
+        self
+    }
+
     #[must_use]
     pub fn with_customer(mut self, customer: Option<crate::policy::CustomerPolicy>) -> Self {
         self.customer = customer;
@@ -83,6 +90,7 @@ impl SnapshotClientPolicyFacts {
         Self {
             key_id,
             customer: None,
+            access_group: None,
             plaintext_key,
             group_ids,
             limits,
@@ -365,8 +373,19 @@ async fn compile_runtime_snapshot(
         Duration::from_millis(facts.settings.request_interval_ms),
     );
     let mut client_policies = Vec::with_capacity(facts.client_policies.len());
-    for policy in facts.client_policies {
-        let account_scope = if policy.group_ids.is_empty() {
+    for mut policy in facts.client_policies {
+        if let Some(group) = &policy.access_group {
+            group
+                .validate()
+                .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?;
+            policy.group_ids = group.pool_group_ids.iter().cloned().collect();
+        }
+        let account_scope = if policy.group_ids.is_empty() && policy.access_group.is_some() {
+            FrozenAccountScope::new(
+                Arc::clone(&account_directory),
+                ClientRoutingScope::no_accounts(),
+            )
+        } else if policy.group_ids.is_empty() {
             FrozenAccountScope::new(
                 Arc::clone(&account_directory),
                 ClientRoutingScope::all_accounts(),
@@ -406,7 +425,8 @@ async fn compile_runtime_snapshot(
                 true,
                 policy.limits,
             )
-            .with_customer(policy.customer),
+            .with_customer(policy.customer)
+            .with_access_group(policy.access_group),
         );
     }
 

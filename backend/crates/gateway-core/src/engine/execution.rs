@@ -339,6 +339,29 @@ impl DefaultExecutionService {
         request.client.policy.authorize().map_err(|_| {
             GatewayError::new(GatewayErrorKind::PolicyDenied, "client API key is disabled")
         })?;
+        if request.client.policy.access_group().is_some() {
+            let requested_model = match &request.target {
+                ExecutionTarget::Model(model) => Some(model.clone()),
+                ExecutionTarget::ProviderEndpoint(provider) => {
+                    self.providers
+                        .request_observation(
+                            provider,
+                            &request.operation,
+                            request.client.policy.key_id(),
+                        )
+                        .requested_model
+                }
+            };
+            if requested_model
+                .as_ref()
+                .is_none_or(|model| !request.client.policy.allows_model(model.as_str()))
+            {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::PolicyDenied,
+                    "model is not allowed by the access group; an explicit authorized model is required",
+                ));
+            }
+        }
         let started_at = SystemTime::now();
         let deadline_at = started_at
             .checked_add(MODEL_REQUEST_DEADLINE)
@@ -535,6 +558,7 @@ impl DefaultExecutionService {
             client_api_key_id: Some(client.policy.key_id().clone()),
             client_api_key_ref: client.policy.key_id().clone(),
             customer_ref: client.policy.customer().map(|customer| customer.id.clone()),
+            access_group_ref: client.policy.access_group().map(|group| group.id.clone()),
             config_revision: plan.config_revision(),
             routing: client.policy.account_scope().routing_snapshot(),
             protocol: metadata.protocol,
@@ -681,6 +705,7 @@ impl DefaultExecutionService {
             client_api_key_id: None,
             client_api_key_ref: actor,
             customer_ref: None,
+            access_group_ref: None,
             config_revision: plan.config_revision(),
             routing: crate::routing::AccountRoutingSnapshot::all(),
             protocol: "admin_connection_test".to_owned(),
@@ -898,18 +923,25 @@ impl ExecutionService for DefaultExecutionService {
         client
             .snapshot
             .public_models_for_scope(client.policy.account_scope())
+            .into_iter()
+            .filter(|model| client.policy.allows_model(model.as_str()))
+            .collect()
     }
 
     fn public_model_profiles(&self, client: &AuthenticatedClient) -> Vec<PublicModelProfile> {
         client
             .snapshot
             .public_model_profiles_for_scope(client.policy.account_scope())
+            .into_iter()
+            .filter(|profile| client.policy.allows_model(profile.model().as_str()))
+            .collect()
     }
 
     fn contains_public_model(&self, client: &AuthenticatedClient, model: &PublicModelId) -> bool {
-        client
-            .snapshot
-            .contains_public_model_for_scope(model, client.policy.account_scope())
+        client.policy.allows_model(model.as_str())
+            && client
+                .snapshot
+                .contains_public_model_for_scope(model, client.policy.account_scope())
     }
 
     fn start(
