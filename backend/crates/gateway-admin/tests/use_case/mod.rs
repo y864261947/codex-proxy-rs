@@ -15,6 +15,23 @@ use std::{
 };
 
 #[async_trait]
+impl gateway_admin::ports::store::AccessGroupStore for UnavailableStore {
+    async fn list_access_groups(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::access_groups::AccessGroupPage> {
+        Err(unavailable("access_group"))
+    }
+    async fn change_access_group(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("access_group"))
+    }
+}
+
+#[async_trait]
 impl gateway_admin::ports::store::CustomerStore for UnavailableStore {
     async fn list_customers(
         &self,
@@ -215,8 +232,11 @@ impl AdminHarness {
                     self.account_groups,
                 ),
                 self.auth,
-                self.client_keys,
-                Arc::new(UnavailableStore),
+                gateway_admin::ports::store::AdminDownstreamStorePorts::new(
+                    self.client_keys,
+                    Arc::new(UnavailableStore),
+                    Arc::new(UnavailableStore),
+                ),
                 self.observability,
                 self.settings,
                 self.backup,

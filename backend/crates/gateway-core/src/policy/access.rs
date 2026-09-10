@@ -48,14 +48,22 @@ pub struct AccessGroupPolicy {
 
 impl AccessGroupPolicy {
     pub fn validate(&self) -> Result<(), IdentifierError> {
-        if self.allowed_models.len() > 2048
-            || self.pool_group_ids.len() > 256
-            || self.limits.max_concurrency > 9_007_199_254_740_991
-            || self.limits.requests_per_minute > 9_007_199_254_740_991
+        Self::validate_permissions(self.limits, &self.allowed_models, &self.pool_group_ids)
+    }
+
+    pub fn validate_permissions(
+        limits: RateLimits,
+        allowed_models: &BTreeSet<String>,
+        pool_group_ids: &BTreeSet<AccountGroupId>,
+    ) -> Result<(), IdentifierError> {
+        if allowed_models.len() > 2048
+            || pool_group_ids.len() > 256
+            || limits.max_concurrency > 9_007_199_254_740_991
+            || limits.requests_per_minute > 9_007_199_254_740_991
         {
             return Err(IdentifierError::InvalidFormat);
         }
-        for model in &self.allowed_models {
+        for model in allowed_models {
             validate_text(model, 256, true, None)?;
             if model.trim() != model || model == "*" {
                 return Err(IdentifierError::InvalidFormat);

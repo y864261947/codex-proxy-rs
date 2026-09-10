@@ -11,6 +11,7 @@ use crate::{
     StoreBackend, StoreError, StorePoolConfig, StoreResult, postgres_unavailable,
 };
 
+mod access_groups;
 mod account_groups;
 mod admin_security_audit;
 mod admission_recovery;
@@ -27,6 +28,7 @@ mod runtime_settings;
 mod snapshot;
 mod usage_facts;
 
+pub use access_groups::*;
 pub use account_groups::*;
 pub use admin_security_audit::*;
 pub use admission_recovery::*;

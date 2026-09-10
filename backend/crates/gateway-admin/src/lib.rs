@@ -150,6 +150,7 @@ pub enum AdminConfigError {
 #[derive(Clone)]
 pub struct AdminServices {
     customers: Arc<dyn use_case::customers::CustomerService>,
+    access_groups: Arc<dyn use_case::access_groups::AccessGroupService>,
     auth: Arc<dyn AuthService>,
     accounts: Arc<dyn AccountsService>,
     account_groups: Arc<dyn AccountGroupService>,
@@ -167,6 +168,11 @@ impl AdminServices {
     #[must_use]
     pub fn customers(&self) -> &dyn use_case::customers::CustomerService {
         self.customers.as_ref()
+    }
+
+    #[must_use]
+    pub fn access_groups(&self) -> &dyn use_case::access_groups::AccessGroupService {
+        self.access_groups.as_ref()
     }
     #[must_use]
     pub fn auth(&self) -> &dyn AuthService {
@@ -295,6 +301,10 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        access_groups: Arc::new(use_case::access_groups::DefaultAccessGroupService::new(
+            store.access_groups(),
+            snapshot.clone(),
+        )),
         customers: Arc::new(use_case::customers::DefaultCustomerService::new(
             store.customers(),
             snapshot.clone(),

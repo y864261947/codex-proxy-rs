@@ -1,5 +1,6 @@
 //! 管理控制面的用例实现。
 
+pub mod access_groups;
 pub mod account_groups;
 pub mod accounts;
 pub mod auth;

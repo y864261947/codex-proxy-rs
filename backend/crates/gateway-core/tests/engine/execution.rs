@@ -1059,7 +1059,8 @@ fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoin
             operation: start_operation_for_model(model),
             metadata: access_test_metadata(),
         }))
-        .expect_err("unauthorized model");
+        .err()
+        .expect("unauthorized model");
         assert_eq!(error.kind(), GatewayErrorKind::PolicyDenied);
         assert!(!store.touched.load(Ordering::SeqCst));
     }
@@ -1083,7 +1084,8 @@ fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoin
             metadata: access_test_metadata(),
         }),
     )
-    .expect_err("model-less endpoint must not bypass the model allowlist");
+    .err()
+    .expect("model-less endpoint must not bypass the model allowlist");
     assert_eq!(error.kind(), GatewayErrorKind::PolicyDenied);
     assert_eq!(service.traffic_monitor().snapshot().in_flight_requests, 0);
 }

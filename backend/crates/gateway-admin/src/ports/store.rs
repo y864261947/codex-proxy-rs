@@ -97,6 +97,19 @@ pub trait CustomerStore: Send + Sync {
     ) -> AdminStoreResult<Revision>;
 }
 
+#[async_trait]
+pub trait AccessGroupStore: Send + Sync {
+    async fn list_access_groups(
+        &self,
+        query: crate::model::access_groups::AccessGroupListQuery,
+    ) -> AdminStoreResult<crate::model::access_groups::AccessGroupPage>;
+    async fn change_access_group(
+        &self,
+        change: crate::model::access_groups::AccessGroupChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
@@ -416,11 +429,32 @@ impl AdminAccountStorePorts {
 ///
 /// 字段保持私有，每个 getter 只交出一种明确能力。该类型不提供通用拆包入口。
 #[derive(Clone)]
-pub struct AdminStorePorts {
+pub struct AdminDownstreamStorePorts {
+    client_keys: Arc<dyn ClientKeyStore>,
     customers: Arc<dyn CustomerStore>,
+    access_groups: Arc<dyn AccessGroupStore>,
+}
+
+impl AdminDownstreamStorePorts {
+    #[must_use]
+    pub fn new(
+        client_keys: Arc<dyn ClientKeyStore>,
+        customers: Arc<dyn CustomerStore>,
+        access_groups: Arc<dyn AccessGroupStore>,
+    ) -> Self {
+        Self {
+            client_keys,
+            customers,
+            access_groups,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AdminStorePorts {
+    downstream: AdminDownstreamStorePorts,
     accounts: AdminAccountStorePorts,
     auth: Arc<dyn AuthStore>,
-    client_keys: Arc<dyn ClientKeyStore>,
     observability: Arc<dyn ObservabilityStore>,
     settings: Arc<dyn SettingsStore>,
     backup: BackupStorePorts,
@@ -431,8 +465,7 @@ impl AdminStorePorts {
     pub fn new(
         accounts: AdminAccountStorePorts,
         auth: Arc<dyn AuthStore>,
-        client_keys: Arc<dyn ClientKeyStore>,
-        customers: Arc<dyn CustomerStore>,
+        downstream: AdminDownstreamStorePorts,
         observability: Arc<dyn ObservabilityStore>,
         settings: Arc<dyn SettingsStore>,
         backup: BackupStorePorts,
@@ -440,8 +473,7 @@ impl AdminStorePorts {
         Self {
             accounts,
             auth,
-            client_keys,
-            customers,
+            downstream,
             observability,
             settings,
             backup,
@@ -470,12 +502,17 @@ impl AdminStorePorts {
 
     #[must_use]
     pub fn client_keys(&self) -> Arc<dyn ClientKeyStore> {
-        self.client_keys.clone()
+        self.downstream.client_keys.clone()
     }
 
     #[must_use]
     pub fn customers(&self) -> Arc<dyn CustomerStore> {
-        self.customers.clone()
+        self.downstream.customers.clone()
+    }
+
+    #[must_use]
+    pub fn access_groups(&self) -> Arc<dyn AccessGroupStore> {
+        self.downstream.access_groups.clone()
     }
 
     #[must_use]

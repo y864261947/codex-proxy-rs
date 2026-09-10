@@ -7,6 +7,23 @@ use std::{
 };
 
 #[async_trait]
+impl gateway_admin::ports::store::AccessGroupStore for UnusedStore {
+    async fn list_access_groups(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::access_groups::AccessGroupPage> {
+        Err(unavailable("access_group"))
+    }
+    async fn change_access_group(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("access_group"))
+    }
+}
+
+#[async_trait]
 impl gateway_admin::ports::store::CustomerStore for UnusedStore {
     async fn list_customers(
         &self,
@@ -93,6 +110,7 @@ use gateway_core::{
     runtime::SnapshotControl,
 };
 
+mod access_groups;
 mod account_groups;
 mod accounts;
 mod auth;
@@ -144,8 +162,11 @@ impl AdminTestFixture {
         let stores = AdminStorePorts::new(
             AdminAccountStorePorts::new(unused.clone(), unused.clone(), account_groups.clone()),
             auth.clone(),
-            client_keys.clone(),
-            unused.clone(),
+            gateway_admin::ports::store::AdminDownstreamStorePorts::new(
+                client_keys.clone(),
+                unused.clone(),
+                unused.clone(),
+            ),
             unused,
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),

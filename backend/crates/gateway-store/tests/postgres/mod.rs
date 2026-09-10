@@ -10,6 +10,7 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+mod access_groups;
 mod account_groups;
 mod admin_security_audit;
 mod admission_recovery;

@@ -8,6 +8,7 @@ use axum::{
     routing::any,
 };
 
+pub mod access_groups;
 pub mod account_groups;
 pub mod accounts;
 pub mod auth;
@@ -40,6 +41,7 @@ where
         .merge(backups::router::<S>())
         .merge(client_keys::router::<S>())
         .merge(customers::router::<S>())
+        .merge(access_groups::router::<S>())
         .merge(observability::router::<S>())
         .merge(settings::router::<S>())
         .merge(system::router::<S>())
