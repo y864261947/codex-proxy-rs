@@ -11,6 +11,68 @@ fn binding(id: ChannelId) -> ChannelBinding {
 }
 
 #[test]
+fn explicit_provider_cannot_expand_an_empty_or_other_provider_account_scope() {
+    use gateway_core::{
+        account::ProviderAccountId,
+        routing::{
+            ClientRoutingScope, FrozenAccountScope, ProviderKind, PublicModelId, RoutingContext,
+            RuntimeAccount, RuntimeAccountDirectory, SourceRoutingTarget,
+        },
+    };
+    use std::{
+        collections::{BTreeMap, BTreeSet},
+        sync::Arc,
+    };
+    let snapshot = super::snapshot();
+    let provider = ProviderKind::new("openai").expect("provider");
+    let context = RoutingContext {
+        required_provider: Some(provider.clone()),
+        ..RoutingContext::default()
+    };
+    let model = PublicModelId::new("gpt-5.5").expect("model");
+    let directory = Arc::new(RuntimeAccountDirectory::new(BTreeMap::from([(
+        ProviderAccountId::new("acct_other").expect("account"),
+        RuntimeAccount::new(
+            ProviderKind::new("xai").expect("other provider"),
+            BTreeSet::new(),
+        ),
+    )])));
+    for permissions in [
+        ClientRoutingScope::no_accounts(),
+        ClientRoutingScope::all_accounts(),
+    ] {
+        let scope = Arc::new(FrozenAccountScope::new(directory.clone(), permissions));
+        assert!(
+            snapshot
+                .plan(&model, &super::operation(), scope.clone(), &context)
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .plan_account_sources(
+                    SourceRoutingTarget::Model(&model),
+                    &super::operation(),
+                    scope.clone(),
+                    &context,
+                    0
+                )
+                .is_err()
+        );
+        assert!(
+            snapshot
+                .plan_account_sources(
+                    SourceRoutingTarget::ProviderEndpoint(&provider),
+                    &super::operation(),
+                    scope,
+                    &context,
+                    0
+                )
+                .is_err()
+        );
+    }
+}
+
+#[test]
 fn legacy_account_routes_cannot_bypass_pool_state_or_grant_channels_through_unpooled_fallback() {
     use gateway_core::{
         account::ProviderAccountId,
@@ -144,14 +206,12 @@ fn legacy_account_routes_cannot_bypass_pool_state_or_grant_channels_through_unpo
             );
         }
         let fixed = Arc::new(all.only_account(&account("acct_a")));
+        let diagnostic_context = RoutingContext {
+            required_provider: Some(provider.clone()),
+            ..RoutingContext::default()
+        };
         let fixed_plan = snapshot
-            .plan_account_sources(
-                target,
-                &super::operation(),
-                fixed,
-                &RoutingContext::default(),
-                0,
-            )
+            .plan_account_sources(target, &super::operation(), fixed, &diagnostic_context, 0)
             .expect("fixed A");
         assert_eq!(fixed_plan.candidates().len(), 1);
         assert!(
@@ -169,7 +229,7 @@ fn legacy_account_routes_cannot_bypass_pool_state_or_grant_channels_through_unpo
                         target,
                         &super::operation(),
                         Arc::new(scope),
-                        &RoutingContext::default(),
+                        &diagnostic_context,
                         0
                     )
                     .is_err()

@@ -18,9 +18,14 @@ Codex 原生生图配置还会携带 `X-OpenAI-Actor-Authorization: proxy-manage
 它仅用于客户端识别服务端托管认证，不能代替 Client Key。网关和 OpenAI Provider 都会过滤该请求头，
 上游账号身份只由服务端选中的账号提供；不要把真实账号 token 放进该标记。
 
-Client Key 通过账号分组限定路由范围：未绑定分组时可使用全部账号，绑定一个或多个分组时只能使用
-已启用分组成员的并集。分组可以混合 `openai` 与 `xai` 账号；同一请求只会在模型能力明确匹配且满足
-重放安全边界时跨 Provider fallback。
+Client Key 绑定接入分组时，以该组显式授权的模型、号池和渠道为准，空集合不会获得全部权限。
+未绑定接入分组的旧 Key 保留账号分组范围：无账号分组关联时可使用全部账号，有关联时只能使用已启用
+分组成员的并集。实际调用继续检查来源启停、健康与容量；旧 Key 的无来源后备只包含未分池账号。
+账号分组可混合 `openai` 与 `xai`；同一请求只会在能力匹配且满足重放安全边界时切换来源。
+
+Key、所属客户或接入分组停用后拒绝新请求。全站、客户、接入分组、Key 的并发/RPM 分别检查，来源和
+共享配额按实际尝试另行准入。来源容量不足返回 HTTP `503`，OpenAI 风格错误码为
+`source_capacity_unavailable`；没有可用候选为 `no_available_provider`，不向下游泄露来源凭据。
 
 运行设置可以分别配置 `minCodexDesktopVersion` 与 `minCodexCliVersion`。两者只接受 SemVer，`null`
 表示不限制。API 在 Client Key 鉴权成功后识别官方 Desktop/CLI 请求头；已识别客户端没有合法版本，或版本
@@ -607,3 +612,46 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 在线更新仅在当前部署模式、Release 资产和进程重启能力都满足要求时可用，且只在同一 major 版本内
 提供：跨大版本目标会以 `40901` 冲突拒绝，需按发布说明重新部署。
 实例升级和仓库发版见 [部署文档](../deploy/README.md#镜像升级与源码构建)。
+
+## 12. 网关管理扩展
+
+本节对应网关改造分支的源码合同，部署可用性和各批次验证状态见 [实施记录](implementation-progress.md)。
+所有接口沿用管理员鉴权、成功/错误信封与 `no-store`。下面四类列表均支持 `page`、`pageSize`、`search`，
+返回 `items`、`total`、`configRevision`；配置写入同时提交版本与审计，事务失败不留下半完成配置。
+
+| 方法 | 路由 | 主要内容 |
+| --- | --- | --- |
+| `GET` | `/api/admin/customers` | 轻量客户列表及关联 Key 数量 |
+| `POST` | `/api/admin/customers/create`、`/update`、`/delete` | 创建、修改、删除客户；关联 Key 的客户不可删除 |
+| `POST` | `/api/admin/customers/assign-key` | `{ keyId, customerId }`；`null` 解除归属 |
+| `GET` | `/api/admin/access-groups` | 模型白名单、号池/渠道授权及组限额 |
+| `POST` | `/api/admin/access-groups/create`、`/update`、`/delete` | 分组配置及来源关系一起提交；有关联 Key 时不可删除 |
+| `POST` | `/api/admin/access-groups/assign-key` | `{ keyId, accessGroupId }`；`null` 解除归属 |
+| `GET` | `/api/admin/channels` | 渠道来源、默认优先级/权重、限额、共享配额及配置版本 |
+| `GET` | `/api/admin/channels/providers` | 可用的渠道适配器配置说明 |
+| `GET` | `/api/admin/channels/connection?id=...` | Provider 脱敏后的编辑配置；不是明文凭据导出 |
+| `POST` | `/api/admin/channels/create`、`/update`、`/delete` | 渠道 CRUD；修改和删除要求 `expectedRevision` |
+| `GET` | `/api/admin/quota-scopes` | 具名共享配额及 `sourceCount` 引用数量 |
+| `POST` | `/api/admin/quota-scopes/create`、`/update`、`/delete` | 共享并发/RPM；仍被渠道或号池引用时不可删除 |
+| `GET`、`POST` | `/api/admin/settings/admission` | 读取、替换全站 `maxConcurrency`、`requestsPerMinute` |
+| `GET` | `/api/admin/dashboard/realtime` | 当前进程实时并发和最近 60 秒请求量 |
+
+表中缩写的 `/update`、`/delete` 均属于同一行的资源前缀，例如客户修改完整路径为
+`/api/admin/customers/update`。客户和共享配额创建/修改使用 `name`、`note`、`enabled`、
+`maxConcurrency`、`requestsPerMinute`；修改另带 `id`。分组在这些字段之外使用 `allowedModels`、
+`poolGroupIds`、`channelIds`。不因模型列表为空或渠道未勾选而隐式授权。
+
+渠道公开配置包括 `provider`、`priority`、`weight`、`quotaScopeId`；创建时还需要 Provider 验证的
+`config`。配置版本 `connectionRevision` 和更新时的 `expectedRevision` 为字符串，避免数字精度损失。
+版本冲突需重新读取；旧请求候选不能使用轮换后的配置。首个 `openai_api` 渠道仅开放已验证的 Responses
+路径，不因录入模型 ID 自动获得 Chat Completions、图片或视频适配。
+
+号池在既有账号分组接口的 `sourceControls` 中配置 `priority`、`weight`、`maxConcurrency`、
+`requestsPerMinute`、`quotaScopeId`。更新省略整个 `sourceControls` 时保留已有值。优先级 1 最高，
+权重只比较同级来源；限额 0 表示不限。设置 `quotaScopeId: null` 解除共享配额关联，停用共享配额会阻止
+其关联来源的新调用，不能把它理解为不限额。
+
+实时视图返回 `scope: "process"`、`observedAt`、`windowSeconds`、`uptimeSeconds`、
+`ingressRequestsLastMinute`、`inFlightRequests`、`preparingRequests`、`executingRequests`。
+重试不新增下游逻辑请求，固定账号诊断与 WebSocket 心跳不计入业务请求；进程重启后该实时窗口重新积累。
+历史统计继续使用既有用量接口，实时 RPM 与各级准入 RPM 不是同一个计数器。

@@ -1297,15 +1297,12 @@ impl RuntimeSnapshot {
         let requirements = operation.capability_requirements();
         let mut candidates = Vec::new();
 
-        if context.required_provider.is_none() && account_scope.provider_kinds().is_empty() {
+        if account_scope.provider_kinds().is_empty() {
             return Err(RoutingError::EmptyAccountScope);
         }
 
-        let providers = context.required_provider.as_ref().map_or_else(
-            || account_scope.provider_kinds().clone(),
-            |provider| BTreeSet::from([provider.clone()]),
-        );
-        for provider in &providers {
+        // 显式 Provider 是过滤条件，不能给空范围或其他 Provider 的账号授予权限。
+        for provider in account_scope.provider_kinds() {
             if !self.providers.contains(provider) {
                 continue;
             }
