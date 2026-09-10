@@ -86,6 +86,12 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 
 #[async_trait]
 pub trait ChannelStore: Send + Sync {
+    /// 包括停用渠道，仅转交对应 Provider 做编辑合并和脱敏投影。
+    async fn load_channel_for_edit(
+        &self,
+        id: &gateway_core::identity::ChannelId,
+    ) -> AdminStoreResult<Option<gateway_core::channel::StoredChannel>>;
+
     async fn list_channels(
         &self,
         query: crate::model::channels::ChannelListQuery,
@@ -475,6 +481,7 @@ impl AdminDownstreamStorePorts {
 
 #[derive(Clone)]
 pub struct AdminStorePorts {
+    channels: Arc<dyn ChannelStore>,
     downstream: AdminDownstreamStorePorts,
     accounts: AdminAccountStorePorts,
     auth: Arc<dyn AuthStore>,
@@ -492,6 +499,7 @@ impl AdminStorePorts {
         observability: Arc<dyn ObservabilityStore>,
         settings: Arc<dyn SettingsStore>,
         backup: BackupStorePorts,
+        channels: Arc<dyn ChannelStore>,
     ) -> Self {
         Self {
             accounts,
@@ -500,12 +508,18 @@ impl AdminStorePorts {
             observability,
             settings,
             backup,
+            channels,
         }
     }
 
     #[must_use]
     pub fn accounts(&self) -> Arc<dyn AccountStore> {
         self.accounts.accounts.clone()
+    }
+
+    #[must_use]
+    pub fn channels(&self) -> Arc<dyn ChannelStore> {
+        self.channels.clone()
     }
 
     #[must_use]

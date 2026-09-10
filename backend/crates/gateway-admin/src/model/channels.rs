@@ -8,7 +8,38 @@ use gateway_core::{
     routing::source::{SourceId, SourcePolicy, SourcePreference},
 };
 
+use super::provider_credentials::ProviderDocument;
 use super::{AdminError, PageSize, Revision};
+
+#[derive(Debug, Clone)]
+pub struct NewChannel {
+    pub provider: ProviderKind,
+    pub fields: ChannelFields,
+    pub config: ProviderDocument,
+}
+
+#[derive(Debug, Clone)]
+pub struct UpdateChannel {
+    pub id: ChannelId,
+    pub expected_revision: ChannelRevision,
+    pub fields: ChannelFields,
+    pub config: Option<ProviderDocument>,
+}
+
+/// Provider 显式脱敏后的编辑投影，版本随投影返回以避免覆盖更新。
+#[derive(Debug, Clone)]
+pub struct ChannelConnection {
+    pub id: ChannelId,
+    pub provider: ProviderKind,
+    pub revision: ChannelRevision,
+    pub config: ProviderDocument,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelMutation {
+    pub id: ChannelId,
+    pub config_revision: Revision,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelFields {

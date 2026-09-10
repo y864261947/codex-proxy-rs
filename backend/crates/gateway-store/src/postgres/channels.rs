@@ -1,4 +1,4 @@
-//! 渠道配置、版本及安全审计的事务 owner；凭据读取仅实现 Provider 端口。
+//! 渠道配置、版本及安全审计的事务 owner；私密读取供 Provider 调用或编辑合并。
 
 use async_trait::async_trait;
 use futures::future::BoxFuture;
@@ -38,6 +38,17 @@ impl PgChannelRepository {
 
 #[async_trait]
 impl ChannelStore for PgChannelRepository {
+    async fn load_channel_for_edit(
+        &self,
+        id: &ChannelId,
+    ) -> AdminStoreResult<Option<StoredChannel>> {
+        let row = sqlx::query("select id, provider_kind, connection_revision, provider_config_json from upstream_channels where id=$1")
+            .bind(id.as_str()).fetch_optional(&self.pool).await.map_err(sql_error)?;
+        row.as_ref()
+            .map(|row| stored_record(row).map_err(|_| invalid()))
+            .transpose()
+    }
+
     async fn list_channels(&self, query: ChannelListQuery) -> AdminStoreResult<ChannelPage> {
         query.validate().map_err(|_| invalid())?;
         let mut tx = self.pool.begin().await.map_err(sql_error)?;

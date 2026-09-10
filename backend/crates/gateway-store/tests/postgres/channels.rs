@@ -192,6 +192,16 @@ async fn channel_rotation_is_revision_fenced_and_public_reads_and_audits_do_not_
             .expect("disabled")
             .is_none()
     );
+    let editable = repo
+        .load_channel_for_edit(&id())
+        .await
+        .expect("disabled channel can be edited")
+        .expect("editable");
+    assert_eq!(editable.revision, revision(3));
+    assert_eq!(
+        editable.config.expose_to_provider()["token"],
+        "second-sensitive-token"
+    );
     assert!(
         repo.list_enabled_channels(&provider())
             .await

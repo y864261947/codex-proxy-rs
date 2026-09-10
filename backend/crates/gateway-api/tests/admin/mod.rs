@@ -114,6 +114,7 @@ mod access_groups;
 mod account_groups;
 mod accounts;
 mod auth;
+mod channels;
 mod client_keys;
 mod customers;
 mod errors;
@@ -167,9 +168,10 @@ impl AdminTestFixture {
                 unused.clone(),
                 unused.clone(),
             ),
-            unused,
+            unused.clone(),
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
+            unused,
         );
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new("openai")),
@@ -182,7 +184,10 @@ impl AdminTestFixture {
                 default_password: InitialAdminPassword::new("strong-admin-password"),
             },
             stores,
-            providers,
+            gateway_admin::ProviderAdminContributions {
+                accounts: providers,
+                channels: vec![],
+            },
             Arc::new(NoopSnapshot),
             Arc::new(NoopProbe),
             Arc::new(StaticClientDistribution),

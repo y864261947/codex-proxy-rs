@@ -13,6 +13,7 @@ pub mod account_groups;
 pub mod accounts;
 pub mod auth;
 pub mod backups;
+pub mod channels;
 pub mod client_keys;
 pub mod customers;
 mod extract;
@@ -39,6 +40,7 @@ where
         .merge(accounts::router::<S>())
         .merge(auth::router::<S>())
         .merge(backups::router::<S>())
+        .merge(channels::router::<S>())
         .merge(client_keys::router::<S>())
         .merge(customers::router::<S>())
         .merge(access_groups::router::<S>())

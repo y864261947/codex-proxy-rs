@@ -2,6 +2,7 @@ mod account_groups;
 mod accounts;
 mod auth;
 mod backup;
+mod channels;
 mod client_keys;
 mod observability;
 mod openai;
@@ -123,6 +124,9 @@ pub(super) struct AdminHarness {
     observability: Arc<dyn ObservabilityStore>,
     settings: Arc<dyn SettingsStore>,
     backup: BackupStorePorts,
+    channels: Arc<dyn gateway_admin::ports::store::ChannelStore>,
+    channel_providers: Vec<Arc<dyn gateway_admin::ports::channels::ChannelProviderAdmin>>,
+    snapshot: Arc<dyn SnapshotControl>,
     providers: Vec<Arc<dyn ProviderAdmin>>,
     probe: Arc<dyn AccountProbe>,
     system: Arc<dyn SystemOperations>,
@@ -142,6 +146,9 @@ impl AdminHarness {
             observability: unavailable.clone(),
             settings: unavailable,
             backup: BackupStorePorts::disabled(),
+            channels: Arc::new(UnavailableStore),
+            channel_providers: Vec::new(),
+            snapshot: Arc::new(NoopSnapshot),
             providers: vec![
                 Arc::new(UnavailableProvider::new("openai")),
                 Arc::new(UnavailableProvider::new("xai")),
@@ -153,6 +160,21 @@ impl AdminHarness {
 
     pub(super) fn default_password(mut self, password: &str) -> Self {
         self.default_password = password.to_owned();
+        self
+    }
+
+    pub(super) fn snapshot(mut self, snapshot: Arc<dyn SnapshotControl>) -> Self {
+        self.snapshot = snapshot;
+        self
+    }
+
+    pub(super) fn channels(
+        mut self,
+        store: Arc<dyn gateway_admin::ports::store::ChannelStore>,
+        provider: Arc<dyn gateway_admin::ports::channels::ChannelProviderAdmin>,
+    ) -> Self {
+        self.channels = store;
+        self.channel_providers.push(provider);
         self
     }
 
@@ -240,9 +262,13 @@ impl AdminHarness {
                 self.observability,
                 self.settings,
                 self.backup,
+                self.channels,
             ),
-            self.providers,
-            Arc::new(NoopSnapshot),
+            gateway_admin::ProviderAdminContributions {
+                accounts: self.providers,
+                channels: self.channel_providers,
+            },
+            self.snapshot,
             self.probe,
             Arc::new(NoopClientDistribution),
             self.system,

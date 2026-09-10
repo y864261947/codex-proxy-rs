@@ -76,7 +76,12 @@ pub async fn run() -> Result<(), BootstrapError> {
     let mut admin = gateway_admin::initialize(
         admin,
         store.admin_ports(),
-        vec![openai.admin_provider(), xai.admin_provider()],
+        gateway_admin::ProviderAdminContributions {
+            accounts: vec![openai.admin_provider(), xai.admin_provider()],
+            channels: vec![std::sync::Arc::new(
+                provider_openai::api::admin::ApiChannelAdmin::default(),
+            )],
+        },
         core.snapshot_control(),
         core.account_probe(),
         host.client_distribution_resolver(),

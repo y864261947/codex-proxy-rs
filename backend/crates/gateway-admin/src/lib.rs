@@ -30,6 +30,7 @@ pub use use_case::{
 
 use model::{AdminError, AdminErrorKind};
 use ports::{
+    channels::{ChannelAdminRegistry, ChannelProviderAdmin},
     client_distribution::ClientDistributionResolver,
     provider::{ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind, ProviderAdminRegistry},
     store::AdminStorePorts,
@@ -149,6 +150,7 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    channels: Arc<dyn use_case::channels::ChannelService>,
     customers: Arc<dyn use_case::customers::CustomerService>,
     access_groups: Arc<dyn use_case::access_groups::AccessGroupService>,
     auth: Arc<dyn AuthService>,
@@ -165,6 +167,10 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    #[must_use]
+    pub fn channels(&self) -> &dyn use_case::channels::ChannelService {
+        self.channels.as_ref()
+    }
     #[must_use]
     pub fn customers(&self) -> &dyn use_case::customers::CustomerService {
         self.customers.as_ref()
@@ -248,6 +254,12 @@ impl AdminBundle {
     }
 }
 
+/// 账号与 API 渠道贡献分别注册，不以虚构账号承载渠道凭据。
+pub struct ProviderAdminContributions {
+    pub accounts: Vec<Arc<dyn ProviderAdmin>>,
+    pub channels: Vec<Arc<dyn ChannelProviderAdmin>>,
+}
+
 /// 校验配置、建立动态 Provider 注册表并完成默认管理员幂等初始化。
 ///
 /// # Errors
@@ -256,7 +268,7 @@ impl AdminBundle {
 pub async fn initialize(
     mut config: AdminConfig,
     store: AdminStorePorts,
-    providers: Vec<Arc<dyn ProviderAdmin>>,
+    providers: ProviderAdminContributions,
     snapshot: Arc<dyn SnapshotControl>,
     probe: Arc<dyn AccountProbe>,
     client_distribution: Arc<dyn ClientDistributionResolver>,
@@ -265,7 +277,10 @@ pub async fn initialize(
     config
         .resolve_and_validate(Path::new("."))
         .map_err(|error| AdminError::invalid(error.to_string()))?;
-    let registry = ProviderAdminRegistry::new(providers).map_err(map_provider_registry_error)?;
+    let registry =
+        ProviderAdminRegistry::new(providers.accounts).map_err(map_provider_registry_error)?;
+    let channel_registry =
+        ChannelAdminRegistry::new(providers.channels).map_err(map_provider_registry_error)?;
     let openai = registry
         .require(&provider_kind(OPENAI_PROVIDER_KIND)?)
         .map_err(map_provider_registry_error)?;
@@ -301,6 +316,11 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        channels: Arc::new(use_case::channels::DefaultChannelService::new(
+            store.channels(),
+            channel_registry,
+            snapshot.clone(),
+        )),
         access_groups: Arc::new(use_case::access_groups::DefaultAccessGroupService::new(
             store.access_groups(),
             snapshot.clone(),
