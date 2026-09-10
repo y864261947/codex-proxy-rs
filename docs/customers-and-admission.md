@@ -16,7 +16,7 @@
 | `POST /api/admin/customers/delete` | `id` | `id`、`configRevision` |
 | `POST /api/admin/customers/assign-key` | `keyId`、必填 `customerId`（客户 ID 或显式 `null`） | Key 的 `id`、`configRevision` |
 
-客户列表包含名称、备注、启用状态、独立限额、关联 Key 数量和创建/更新时间。Key 列表新增 `customer`：未关联时为 `null`，关联时包含客户 `id/name/enabled`。原有 Key 创建和编辑接口保持既有字段，归属使用单独接口修改。
+客户列表包含名称、备注、启用状态、独立限额、关联 Key 数量和创建/更新时间。Key 列表新增 `customer`：未关联时为 `null`，关联时包含客户 `id/name/enabled`。Key 创建支持可选 `customerId` 和 `accessGroupId`，与 Key 本身一次提交；省略时保留旧客户端的创建行为。已有 Key 通过归属接口修改关联，普通编辑不改变关联。
 
 ## 请求与恢复
 
@@ -26,4 +26,14 @@ Core 在准入时冻结全部限额范围；Redis 单个 Lua 操作先检查每�
 
 Redis 多范围键使用同一 hash tag，单次准入/释放可以原子执行；它仍是可重建的协调状态。控制面修改客户或归属时，在同一 PostgreSQL 事务更新配置版本、记录审计，然后发布新运行快照。
 
-该实现是第二批的客户部分。渠道、接入分组及其他层级限额继续按实施记录推进。
+## 接入分组
+
+「下游接入 → 接入分组」定义精确对外模型白名单、显式允许的号池和共享并发/RPM。一个 Key 可同时关联一个客户和一个接入分组，各层独立限制。空模型或空号池表示尚未授权，停用组后拒绝新请求；仍关联 Key 的组不能删除。
+
+管理接口为 `/api/admin/access-groups` 及其 `create/update/delete/assign-key` 子路径，结构与客户一致。创建和更新还要求显式提供 `allowedModels` 与 `poolGroupIds` 数组；赋组要求 `keyId` 与显式的 `accessGroupId`（组 ID 或 `null`）。Key 投影的 `accessGroup` 包含 `id/name/enabled`。
+
+组授权在模型别名映射之前检查，模型列表使用相同白名单。分组 Key 调用原生端点也必须提供 Provider 能识别的已授权模型。模型权限和号池范围均不能被直接填写上游模型名绕过。
+
+分配接入分组后使用组内号池权限，保留 Key 原有账号分组绑定；显式解除接入分组会恢复这些旧权限，页面显示恢复范围。请求历史保存准入时的组引用，修改归属不会改变正在执行请求的释放与重启恢复依据。
+
+上述实现覆盖第二批的客户、接入分组与 Key 管理。外部渠道、来源调度及其他层级限额继续按实施记录推进。

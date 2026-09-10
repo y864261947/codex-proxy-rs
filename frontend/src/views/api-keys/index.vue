@@ -11,6 +11,7 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { usePageSelection } from '@/composables/usePageSelection'
+import ApiKeyAccessGroupModal from './components/ApiKeyAccessGroupModal.vue'
 import ApiKeyActions from './components/ApiKeyActions.vue'
 import ApiKeyCreateModal from './components/ApiKeyCreateModal.vue'
 import ApiKeyCustomerModal from './components/ApiKeyCustomerModal.vue'
@@ -28,6 +29,12 @@ import { apiKeyColumns } from './constants'
 const selectedIds = ref<Set<string>>(new Set())
 const customerKey = ref<ApiKey | null>(null)
 const customerOpen = ref(false)
+const accessKey = ref<ApiKey | null>(null)
+const accessOpen = ref(false)
+function assignAccessGroup(key: ApiKey) {
+  accessKey.value = key
+  accessOpen.value = true
+}
 function assignCustomer(key: ApiKey) {
   customerKey.value = key
   customerOpen.value = true
@@ -168,7 +175,9 @@ watch(
               />
             </template>
             <template #scope="{ row }">
-              <ApiKeyScopeCell :api-key="row" />
+              <button type="button" class="w-full rounded-cp hover:bg-cp-fill-quaternary focus-visible:outline-2 focus-visible:outline-cp-primary" :aria-label="`设置 ${row.name} 的接入分组`" @click.stop="assignAccessGroup(row)">
+                <ApiKeyScopeCell :api-key="row" />
+              </button>
             </template>
             <template #enabled="{ row }">
               <ApiKeyStatusBadge :api-key="row" />
@@ -214,6 +223,7 @@ watch(
       @import-ccs="importCreatedKeyToCcs"
     />
     <ApiKeyCustomerModal v-model="customerOpen" :api-key="customerKey" @saved="loadApiKeys" />
+    <ApiKeyAccessGroupModal v-model="accessOpen" :api-key="accessKey" @saved="loadApiKeys" />
 
     <ApiKeyUseModal
       v-model="showUseKeyModal"

@@ -18,6 +18,8 @@ import { errorMessage } from '@/utils/async'
 type ApiKeyRow = Awaited<ReturnType<typeof getApiKeys>>['items'][number]
 
 export interface ApiKeyFormValue {
+  customerId: string
+  accessGroupId: string
   name: string
   label: string
   groupIds: string[]
@@ -60,6 +62,8 @@ export function useApiKeyMutations(options: {
   function openEdit(key: ApiKeyRow) {
     editingKey.value = key
     form.value = {
+      customerId: key.customer?.id || '',
+      accessGroupId: key.accessGroup?.id || '',
       name: key.name,
       label: key.label ?? '',
       groupIds: key.groups.map(group => group.id),
@@ -72,7 +76,7 @@ export function useApiKeyMutations(options: {
   function requestSave() {
     if (!validateForm() || savingKey.value)
       return
-    if (form.value.groupIds.length === 0) {
+    if (form.value.groupIds.length === 0 && !form.value.accessGroupId) {
       showAllAccountsConfirm.value = true
       return
     }
@@ -102,7 +106,7 @@ export function useApiKeyMutations(options: {
           await updateApiKey({ id: current.id, ...payload })
         }
         else {
-          const result = await createApiKey(payload)
+          const result = await createApiKey({ ...payload, customerId: form.value.customerId || null, accessGroupId: form.value.accessGroupId || null })
           createdKey.value = result.plaintextKey
           createdKeyName.value = payload.name
         }
@@ -269,6 +273,8 @@ export function useApiKeyMutations(options: {
 
 function emptyForm(): ApiKeyFormValue {
   return {
+    customerId: '',
+    accessGroupId: '',
     name: '',
     label: '',
     groupIds: [],

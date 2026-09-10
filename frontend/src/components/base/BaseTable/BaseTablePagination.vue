@@ -2,7 +2,7 @@
 import type { BaseTablePagination, PagerItem } from './pagination'
 import { ChevronLeft, ChevronRight } from '@lucide/vue'
 
-import { computed } from 'vue'
+import { computed, useId } from 'vue'
 import BaseIconButton from '../BaseIconButton.vue'
 import BaseSelect from '../BaseSelect.vue'
 import {
@@ -23,6 +23,7 @@ const emit = defineEmits<{
 }>()
 
 const totalPages = computed(() => getTotalPages(props.pagination))
+const pageSizeId = `page-size-${useId()}`
 const currentPage = computed(() => getCurrentPage(props.pagination, totalPages.value))
 const pageSizeOptions = computed(() => getPageSizeOptions(props.pagination))
 const pagerItems = computed(() => getPagerItems(totalPages.value, currentPage.value))
@@ -91,6 +92,7 @@ function paginationPageClass(page: number) {
         共 {{ pagination.total }} 条
       </span>
       <BaseSelect
+        :id="pageSizeId"
         v-model="pageSizeModel"
         aria-label="每页条数"
         :options="pageSizeOptions"
