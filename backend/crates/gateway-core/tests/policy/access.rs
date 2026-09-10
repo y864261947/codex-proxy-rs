@@ -17,6 +17,7 @@ fn exact_public_model_permissions_and_four_independent_scopes_are_frozen() {
             requests_per_minute: 200,
         },
         allowed_models: BTreeSet::from(["published-alias".to_owned()]),
+        channel_ids: std::collections::BTreeSet::new(),
         pool_group_ids: BTreeSet::new(),
     };
     let legacy = ClientPolicy::new(
@@ -84,6 +85,7 @@ fn access_group_permissions_reject_ambiguous_or_unbounded_configuration() {
         enabled: true,
         limits: RateLimits::unlimited(),
         allowed_models: BTreeSet::new(),
+        channel_ids: std::collections::BTreeSet::new(),
         pool_group_ids: BTreeSet::new(),
     };
     assert!(group.validate().is_ok());
@@ -94,5 +96,10 @@ fn access_group_permissions_reject_ambiguous_or_unbounded_configuration() {
     group.allowed_models = BTreeSet::from(["vendor/model".to_owned()]);
     assert!(group.validate().is_ok());
     group.limits.max_concurrency = 9_007_199_254_740_992;
+    assert!(group.validate().is_err());
+    group.limits = RateLimits::unlimited();
+    group.channel_ids = (0..257)
+        .map(|n| gateway_core::identity::ChannelId::new(format!("chan_{n}")).expect("channel"))
+        .collect();
     assert!(group.validate().is_err());
 }

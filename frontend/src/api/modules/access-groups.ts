@@ -4,6 +4,7 @@ export interface AccessGroupRef { id: string, name: string, enabled: boolean }
 export interface AccessGroupWrite {
   allowedModels: string[]
   poolGroupIds: string[]
+  channelIds: string[]
   name: string
   note: string | null
   enabled: boolean

@@ -518,6 +518,7 @@ fn access_groups_freeze_explicit_pools_without_expanding_empty_or_legacy_permiss
                 enabled: label != "disabled",
                 limits: RateLimits::unlimited(),
                 allowed_models: BTreeSet::from(["public-model".to_owned()]),
+                channel_ids: std::collections::BTreeSet::new(),
                 pool_group_ids: if label == "empty" {
                     BTreeSet::new()
                 } else {

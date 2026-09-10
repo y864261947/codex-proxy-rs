@@ -327,6 +327,7 @@ async fn load_client_keys(
             Option<i64>,
             Option<Vec<String>>,
             Vec<String>,
+            Vec<String>,
         ),
     >(
         "select k.id, k.key,
@@ -336,7 +337,9 @@ async fn load_client_keys(
                 c.id, c.enabled, c.max_concurrency, c.requests_per_minute,
                 a.id, a.enabled, a.max_concurrency, a.requests_per_minute, a.allowed_models,
                 array(select p.account_group_id from access_group_pools p
-                      where p.access_group_id = a.id order by p.account_group_id)
+                      where p.access_group_id = a.id order by p.account_group_id),
+                array(select s.channel_id from access_group_channels s
+                      where s.access_group_id = a.id order by s.channel_id)
          from client_api_keys k
          left join client_api_key_groups kg on kg.client_api_key_id = k.id
          left join customers c on c.id = k.customer_id
@@ -374,6 +377,14 @@ async fn load_client_keys(
                 .9
                 .map(|id| {
                     let group = gateway_core::policy::AccessGroupPolicy {
+                        channel_ids: row
+                            .15
+                            .into_iter()
+                            .map(|id| {
+                                gateway_core::identity::ChannelId::new(id)
+                                    .map_err(|_| invalid("invalid access channel ID"))
+                            })
+                            .collect::<StoreResult<_>>()?,
                         id: gateway_core::policy::AccessGroupId::new(id)
                             .map_err(|_| invalid("invalid access group ID"))?,
                         enabled: row

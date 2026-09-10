@@ -36,6 +36,7 @@ fn fields(pool: &str) -> AccessGroupFields {
             requests_per_minute: 120,
         },
         allowed_models: BTreeSet::from(["public-model".to_owned()]),
+        channel_ids: std::collections::BTreeSet::new(),
         pool_group_ids: BTreeSet::from([AccountGroupId::new(pool).expect("pool")]),
     }
 }
@@ -45,6 +46,116 @@ fn query() -> AccessGroupListQuery {
         page_size: PageSize::new(20).expect("page"),
         search: None,
     }
+}
+
+#[tokio::test]
+async fn channel_permissions_are_explicit_atomic_and_preserved_in_frozen_key_snapshots() {
+    use gateway_core::identity::ChannelId;
+    let Some(db) = TestDatabase::create("channel_access").await else {
+        return;
+    };
+    sqlx::raw_sql("insert into upstream_channels (id,provider_kind,name,provider_config_json) values ('chan_selected','openai_api','Selected','{\"key\":\"test-private\"}'::jsonb),('chan_other','openai_api','Other','{\"key\":\"test-other\"}'::jsonb); insert into client_api_keys (id,name,key,created_at,updated_at) values ('key_access','Key','sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ',now(),now());").execute(&db.pool).await.expect("seed");
+    let repository = PgAccessGroupRepository::new(db.pool.clone());
+    let mut permissions = fields("grp_00000000000000000000000000000001");
+    permissions.pool_group_ids.clear();
+    permissions
+        .channel_ids
+        .insert(ChannelId::new("chan_selected").expect("channel"));
+    repository
+        .change_access_group(
+            AccessGroupChange::Create {
+                id: group(),
+                fields: permissions.clone(),
+            },
+            &context(),
+        )
+        .await
+        .expect("create channel-only group");
+    repository
+        .change_access_group(
+            AccessGroupChange::AssignKey {
+                key_id: ClientApiKeyId::new("key_access").expect("key"),
+                access_group_id: Some(group()),
+            },
+            &context(),
+        )
+        .await
+        .expect("assign");
+    let initial = repository.list_access_groups(query()).await.expect("list");
+    assert_eq!(initial.items[0].fields, permissions);
+    let frozen = PgRuntimeSnapshotRepository::new(db.pool.clone())
+        .load_runtime_snapshot()
+        .await
+        .expect("snapshot");
+    let access = frozen.client_api_keys[0]
+        .access_group
+        .as_ref()
+        .expect("access");
+    assert!(access.pool_group_ids.is_empty());
+    assert_eq!(access.channel_ids, permissions.channel_ids);
+    let mut invalid = permissions.clone();
+    invalid
+        .channel_ids
+        .insert(ChannelId::new("chan_missing").expect("channel"));
+    assert_eq!(
+        repository
+            .change_access_group(
+                AccessGroupChange::Update {
+                    id: group(),
+                    fields: invalid
+                },
+                &context()
+            )
+            .await
+            .expect_err("missing source rolls back")
+            .kind(),
+        AdminStoreErrorKind::Conflict
+    );
+    assert_eq!(
+        repository
+            .list_access_groups(query())
+            .await
+            .expect("unchanged"),
+        initial
+    );
+    assert!(
+        sqlx::query("delete from upstream_channels where id='chan_selected'")
+            .execute(&db.pool)
+            .await
+            .is_err()
+    );
+    permissions.channel_ids.clear();
+    repository
+        .change_access_group(
+            AccessGroupChange::Update {
+                id: group(),
+                fields: permissions,
+            },
+            &context(),
+        )
+        .await
+        .expect("clear sources");
+    let next = PgRuntimeSnapshotRepository::new(db.pool.clone())
+        .load_runtime_snapshot()
+        .await
+        .expect("next snapshot");
+    assert!(
+        next.client_api_keys[0]
+            .access_group
+            .as_ref()
+            .expect("group")
+            .channel_ids
+            .is_empty()
+    );
+    assert_eq!(
+        access.channel_ids.len(),
+        1,
+        "old request permissions remain frozen"
+    );
+    sqlx::query("delete from upstream_channels where id='chan_selected'")
+        .execute(&db.pool)
+        .await
+        .expect("unbound channel may be removed");
 }
 
 #[tokio::test]

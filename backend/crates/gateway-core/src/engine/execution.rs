@@ -406,7 +406,14 @@ impl DefaultExecutionService {
                     .pool_group_ids
                     .iter()
                     .cloned()
-                    .map(crate::routing::source::SourceId::AccountPool),
+                    .map(crate::routing::source::SourceId::AccountPool)
+                    .chain(
+                        group
+                            .channel_ids
+                            .iter()
+                            .cloned()
+                            .map(crate::routing::source::SourceId::Channel),
+                    ),
             );
             let target = match &request.target {
                 ExecutionTarget::Model(model) => crate::routing::SourceRoutingTarget::Model(model),
@@ -987,28 +994,70 @@ impl ExecutionService for DefaultExecutionService {
     }
 
     fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId> {
-        client
+        let mut models: BTreeSet<_> = client
             .snapshot
             .public_models_for_scope(client.policy.account_scope())
+            .into_iter()
+            .collect();
+        if let Some(group) = client.policy.access_group() {
+            let allowed = crate::routing::source::AllowedSources::new(
+                group
+                    .channel_ids
+                    .iter()
+                    .cloned()
+                    .map(crate::routing::source::SourceId::Channel),
+            );
+            models.extend(client.snapshot.public_models_for_channels(&allowed));
+        }
+        models
             .into_iter()
             .filter(|model| client.policy.allows_model(model.as_str()))
             .collect()
     }
 
     fn public_model_profiles(&self, client: &AuthenticatedClient) -> Vec<PublicModelProfile> {
-        client
+        let mut profiles: std::collections::BTreeMap<_, _> = client
             .snapshot
             .public_model_profiles_for_scope(client.policy.account_scope())
             .into_iter()
+            .map(|profile| (profile.model().clone(), profile))
+            .collect();
+        if let Some(group) = client.policy.access_group() {
+            let allowed = crate::routing::source::AllowedSources::new(
+                group
+                    .channel_ids
+                    .iter()
+                    .cloned()
+                    .map(crate::routing::source::SourceId::Channel),
+            );
+            for profile in client.snapshot.public_model_profiles_for_channels(&allowed) {
+                profiles.entry(profile.model().clone()).or_insert(profile);
+            }
+        }
+        profiles
+            .into_values()
             .filter(|profile| client.policy.allows_model(profile.model().as_str()))
             .collect()
     }
 
     fn contains_public_model(&self, client: &AuthenticatedClient, model: &PublicModelId) -> bool {
         client.policy.allows_model(model.as_str())
-            && client
+            && (client
                 .snapshot
                 .contains_public_model_for_scope(model, client.policy.account_scope())
+                || client.policy.access_group().is_some_and(|group| {
+                    let allowed = crate::routing::source::AllowedSources::new(
+                        group
+                            .channel_ids
+                            .iter()
+                            .cloned()
+                            .map(crate::routing::source::SourceId::Channel),
+                    );
+                    client
+                        .snapshot
+                        .public_models_for_channels(&allowed)
+                        .contains(model)
+                }))
     }
 
     fn start(

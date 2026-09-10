@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 use chrono::{DateTime, Utc};
 use gateway_core::{
     account::scope::AccountGroupId,
+    identity::ChannelId,
     policy::{AccessGroupId, AccessGroupPolicy, ClientApiKeyId, RateLimits},
 };
 
@@ -18,6 +19,7 @@ pub struct AccessGroupFields {
     pub limits: RateLimits,
     pub allowed_models: BTreeSet<String>,
     pub pool_group_ids: BTreeSet<AccountGroupId>,
+    pub channel_ids: BTreeSet<ChannelId>,
 }
 
 impl AccessGroupFields {
@@ -38,8 +40,9 @@ impl AccessGroupFields {
             self.limits,
             &self.allowed_models,
             &self.pool_group_ids,
+            &self.channel_ids,
         )
-        .map_err(|_| AdminError::invalid("模型白名单或号池选择不合法"))
+        .map_err(|_| AdminError::invalid("模型白名单或来源选择不合法"))
     }
 }
 

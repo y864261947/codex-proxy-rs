@@ -226,6 +226,7 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
         first_tables,
         [
             "_sqlx_migrations",
+            "access_group_channels",
             "access_group_pools",
             "access_groups",
             "account_group_accounts",

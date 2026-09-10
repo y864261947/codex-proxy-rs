@@ -16,6 +16,7 @@ use gateway_admin::model::{
     },
 };
 use gateway_core::account::scope::AccountGroupId;
+use gateway_core::identity::ChannelId;
 use gateway_core::policy::{AccessGroupId, ClientApiKeyId, RateLimits};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -36,6 +37,7 @@ struct ListQuery {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccessGroupRequest {
+    channel_ids: Vec<String>,
     allowed_models: BTreeSet<String>,
     pool_group_ids: Vec<String>,
     id: Option<String>,
@@ -49,6 +51,11 @@ struct AccessGroupRequest {
 impl AccessGroupRequest {
     fn fields(self) -> Result<AccessGroupFields, AdminError> {
         Ok(AccessGroupFields {
+            channel_ids: self
+                .channel_ids
+                .into_iter()
+                .map(|id| ChannelId::new(id).map_err(|_| AdminError::bad_request("渠道 ID 不合法")))
+                .collect::<Result<_, _>>()?,
             allowed_models: self.allowed_models,
             pool_group_ids: self
                 .pool_group_ids
@@ -91,6 +98,7 @@ struct AssignRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccessGroupView {
+    channel_ids: Vec<String>,
     allowed_models: Vec<String>,
     pool_group_ids: Vec<String>,
     id: String,
@@ -107,6 +115,12 @@ struct AccessGroupView {
 impl From<AccessGroupRecord> for AccessGroupView {
     fn from(record: AccessGroupRecord) -> Self {
         Self {
+            channel_ids: record
+                .fields
+                .channel_ids
+                .into_iter()
+                .map(|id| id.to_string())
+                .collect(),
             allowed_models: record.fields.allowed_models.into_iter().collect(),
             pool_group_ids: record
                 .fields

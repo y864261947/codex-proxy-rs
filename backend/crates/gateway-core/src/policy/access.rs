@@ -3,6 +3,7 @@
 use std::{collections::BTreeSet, fmt};
 
 use crate::account::scope::AccountGroupId;
+use crate::identity::ChannelId;
 use crate::validation::{IdentifierError, validate_text};
 
 use super::RateLimits;
@@ -36,7 +37,7 @@ impl fmt::Display for AccessGroupId {
     }
 }
 
-/// 空模型集合与空号池集合均表示未授权，绝不退化为全量授权。
+/// 模型与来源均需显式授权；空集合不退化为全量授权。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessGroupPolicy {
     pub id: AccessGroupId,
@@ -44,20 +45,28 @@ pub struct AccessGroupPolicy {
     pub limits: RateLimits,
     pub allowed_models: BTreeSet<String>,
     pub pool_group_ids: BTreeSet<AccountGroupId>,
+    pub channel_ids: BTreeSet<ChannelId>,
 }
 
 impl AccessGroupPolicy {
     pub fn validate(&self) -> Result<(), IdentifierError> {
-        Self::validate_permissions(self.limits, &self.allowed_models, &self.pool_group_ids)
+        Self::validate_permissions(
+            self.limits,
+            &self.allowed_models,
+            &self.pool_group_ids,
+            &self.channel_ids,
+        )
     }
 
     pub fn validate_permissions(
         limits: RateLimits,
         allowed_models: &BTreeSet<String>,
         pool_group_ids: &BTreeSet<AccountGroupId>,
+        channel_ids: &BTreeSet<ChannelId>,
     ) -> Result<(), IdentifierError> {
         if allowed_models.len() > 2048
             || pool_group_ids.len() > 256
+            || channel_ids.len() > 256
             || limits.max_concurrency > 9_007_199_254_740_991
             || limits.requests_per_minute > 9_007_199_254_740_991
         {

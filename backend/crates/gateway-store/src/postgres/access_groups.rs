@@ -12,6 +12,7 @@ use gateway_admin::{
     ports::store::{AccessGroupStore, AdminStoreError, AdminStoreErrorKind, AdminStoreResult},
 };
 use gateway_core::account::scope::AccountGroupId;
+use gateway_core::identity::ChannelId;
 use gateway_core::policy::{AccessGroupId, RateLimits};
 use sqlx::{PgPool, Row as _};
 
@@ -49,7 +50,7 @@ impl AccessGroupStore for PgAccessGroupRepository {
                 .map_err(sql_error)?;
         let total: i64 = sqlx::query_scalar("select count(*) from access_groups where $1::text is null or strpos(lower(name), lower($1)) > 0")
             .bind(&query.search).fetch_one(&mut *transaction).await.map_err(sql_error)?;
-        let rows = sqlx::query("select c.*, (select count(*) from client_api_keys k where k.access_group_id = c.id) as key_count, array(select p.account_group_id from access_group_pools p where p.access_group_id = c.id order by p.account_group_id) as pool_group_ids from access_groups c where $1::text is null or strpos(lower(c.name), lower($1)) > 0 order by c.created_at desc, c.id desc limit $2 offset $3")
+        let rows = sqlx::query("select c.*, (select count(*) from client_api_keys k where k.access_group_id = c.id) as key_count, array(select p.account_group_id from access_group_pools p where p.access_group_id = c.id order by p.account_group_id) as pool_group_ids, array(select s.channel_id from access_group_channels s where s.access_group_id=c.id order by s.channel_id) as channel_ids from access_groups c where $1::text is null or strpos(lower(c.name), lower($1)) > 0 order by c.created_at desc, c.id desc limit $2 offset $3")
             .bind(query.search).bind(i64::from(query.page_size.get())).bind(i64::from(query.page - 1) * i64::from(query.page_size.get()))
             .fetch_all(&mut *transaction).await.map_err(sql_error)?;
         let items = rows
@@ -59,6 +60,12 @@ impl AccessGroupStore for PgAccessGroupRepository {
                     id: AccessGroupId::new(row.try_get::<String, _>("id").map_err(sql_error)?)
                         .map_err(|_| invalid())?,
                     fields: AccessGroupFields {
+                        channel_ids: row
+                            .try_get::<Vec<String>, _>("channel_ids")
+                            .map_err(sql_error)?
+                            .into_iter()
+                            .map(|id| ChannelId::new(id).map_err(|_| invalid()))
+                            .collect::<AdminStoreResult<_>>()?,
                         allowed_models: row
                             .try_get::<Vec<String>, _>("allowed_models")
                             .map_err(sql_error)?
@@ -102,12 +109,17 @@ impl AccessGroupStore for PgAccessGroupRepository {
         context: &MutationContext,
     ) -> AdminStoreResult<Revision> {
         change.validate().map_err(|_| invalid())?;
-        let pool_update = match &change {
+        let source_update = match &change {
             AccessGroupChange::Create { id, fields } | AccessGroupChange::Update { id, fields } => {
                 Some((
                     id.clone(),
                     fields
                         .pool_group_ids
+                        .iter()
+                        .map(|id| id.as_str().to_owned())
+                        .collect::<Vec<_>>(),
+                    fields
+                        .channel_ids
                         .iter()
                         .map(|id| id.as_str().to_owned())
                         .collect::<Vec<_>>(),
@@ -127,6 +139,7 @@ impl AccessGroupStore for PgAccessGroupRepository {
                     "requests_per_minute",
                     "allowed_models",
                     "pool_group_ids",
+                    "channel_ids",
                 ],
             ),
             AccessGroupChange::Update { .. } => (
@@ -140,6 +153,7 @@ impl AccessGroupStore for PgAccessGroupRepository {
                     "requests_per_minute",
                     "allowed_models",
                     "pool_group_ids",
+                    "channel_ids",
                 ],
             ),
             AccessGroupChange::Delete { .. } => ("delete", "access_group", vec![]),
@@ -182,7 +196,7 @@ impl AccessGroupStore for PgAccessGroupRepository {
                 "接入分组或 Key 不存在",
             ));
         }
-        if let Some((id, pools)) = pool_update {
+        if let Some((id, pools, channels)) = source_update {
             sqlx::query("delete from access_group_pools where access_group_id = $1")
                 .bind(id.as_str())
                 .execute(&mut *transaction)
@@ -190,6 +204,12 @@ impl AccessGroupStore for PgAccessGroupRepository {
                 .map_err(sql_error)?;
             sqlx::query("insert into access_group_pools (access_group_id, account_group_id) select $1, unnest($2::text[])")
                 .bind(id.as_str()).bind(pools).execute(&mut *transaction).await.map_err(sql_error)?;
+            sqlx::query("delete from access_group_channels where access_group_id=$1")
+                .bind(id.as_str())
+                .execute(&mut *transaction)
+                .await
+                .map_err(sql_error)?;
+            sqlx::query("insert into access_group_channels (access_group_id, channel_id) select $1, unnest($2::text[])").bind(id.as_str()).bind(channels).execute(&mut *transaction).await.map_err(sql_error)?;
         }
         append_admin_audit_event_in_transaction(&mut transaction, audit, revision)
             .await

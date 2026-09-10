@@ -18,6 +18,7 @@ import { defineTableColumns } from '@/components/base/BaseTable/columns'
 import BaseTable from '@/components/base/BaseTable/index.vue'
 import BaseTextarea from '@/components/base/BaseTextarea.vue'
 import { toast } from '@/components/base/BaseToast'
+import ChannelCheckboxPicker from '@/components/ChannelCheckboxPicker.vue'
 import { useAccessGroupsQuery } from '@/composables/useAccessGroupsQuery'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { errorMessage } from '@/utils/async'
@@ -25,12 +26,12 @@ import { errorMessage } from '@/utils/async'
 const { accessGroups, search, loading, loadError, load, resize, pagination } = useAccessGroupsQuery()
 const { groups: pools, loading: poolsLoading, loadError: poolsError, loaded: poolsLoaded, loadGroups } = useAccountGroupCatalog({ immediate: false })
 const modelText = ref('')
+const channelsReady = ref(false)
 const models = computed(() => [...new Set(modelText.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean))])
-const permissionsValid = computed(() => poolsLoaded.value && !poolsLoading.value && !poolsError.value && models.value.length <= 2048 && models.value.every(model => model !== '*' && new TextEncoder().encode(model).length <= 256))
 const columns = defineTableColumns<AccessGroup>([
   { key: 'identity', label: '接入分组', kind: 'identity', size: 'xl' },
   { key: 'enabled', label: '状态', kind: 'status' },
-  { key: 'permissions', label: '模型 / 号池', kind: 'numeric' },
+  { key: 'permissions', label: '模型 / 来源', kind: 'numeric' },
   { key: 'keyCount', label: '密钥数', kind: 'numeric' },
   { key: 'maxConcurrency', label: '共享并发上限', kind: 'numeric' },
   { key: 'requestsPerMinute', label: '共享 RPM 上限', kind: 'numeric' },
@@ -41,13 +42,15 @@ const deleteOpen = ref(false)
 const editing = ref<AccessGroup | null>(null)
 const deleting = ref<AccessGroup | null>(null)
 const saving = ref(false)
-const form = ref<AccessGroupWrite>({ name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [] })
+const form = ref<AccessGroupWrite>({ name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [], channelIds: [] })
+const permissionsValid = computed(() => channelsReady.value && form.value.channelIds.length <= 256 && poolsLoaded.value && !poolsLoading.value && !poolsError.value && models.value.length <= 2048 && models.value.every(model => model !== '*' && new TextEncoder().encode(model).length <= 256))
 const valid = computed(() => form.value.name.trim().length > 0 && [form.value.maxConcurrency, form.value.requestsPerMinute].every(value => Number.isSafeInteger(value) && value >= 0))
 function edit(accessGroup: AccessGroup | null) {
+  channelsReady.value = false
   modelText.value = accessGroup?.allowedModels.join('\n') || ''
   void loadGroups()
   editing.value = accessGroup
-  form.value = accessGroup ? { name: accessGroup.name, note: accessGroup.note || '', enabled: accessGroup.enabled, maxConcurrency: accessGroup.maxConcurrency, requestsPerMinute: accessGroup.requestsPerMinute, allowedModels: [...accessGroup.allowedModels], poolGroupIds: [...accessGroup.poolGroupIds] } : { name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [] }
+  form.value = accessGroup ? { name: accessGroup.name, note: accessGroup.note || '', enabled: accessGroup.enabled, maxConcurrency: accessGroup.maxConcurrency, requestsPerMinute: accessGroup.requestsPerMinute, allowedModels: [...accessGroup.allowedModels], poolGroupIds: [...accessGroup.poolGroupIds], channelIds: [...accessGroup.channelIds] } : { name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [], channelIds: [] }
   open.value = true
 }
 async function save() {
@@ -87,7 +90,7 @@ async function remove() {
 
 <template>
   <div class="flex h-full min-h-0 w-full flex-col">
-    <BasePageHeader title="接入分组" description="定义对外模型白名单、允许使用的号池与组共享限额；分配给 Key 后生效" />
+    <BasePageHeader title="接入分组" description="定义对外模型白名单、允许使用的号池和渠道，以及组共享限额；分配给 Key 后生效" />
     <BaseCard class="mt-5 flex min-h-125 flex-col">
       <template #header>
         <div class="flex flex-wrap items-center justify-between gap-3">
@@ -114,7 +117,7 @@ async function remove() {
             <span :class="row.enabled ? 'text-cp-success' : 'text-cp-text-secondary'">{{ row.enabled ? '启用' : '停用' }}</span>
           </template>
           <template #permissions="{ row }">
-            <span :class="!row.allowedModels.length || !row.poolGroupIds.length ? 'text-cp-warning' : ''">{{ row.allowedModels.length }} / {{ row.poolGroupIds.length }}</span>
+            <span :class="!row.allowedModels.length || !(row.poolGroupIds.length + row.channelIds.length) ? 'text-cp-warning' : ''">{{ row.allowedModels.length }} / {{ row.poolGroupIds.length + row.channelIds.length }}</span>
           </template>
           <template #maxConcurrency="{ row }">
             {{ row.maxConcurrency || '不限制' }}
@@ -135,7 +138,7 @@ async function remove() {
         <BaseTablePagination :pagination="pagination" :loading="loading" @page-change="load" @page-size-change="resize" />
       </template>
     </BaseCard>
-    <BaseModal v-model="open" :title="editing ? '编辑接入分组' : '创建接入分组'" description="空模型或空号池表示未授权；组、客户和 Key 的限额同时生效" :dismissible="!saving" size="lg">
+    <BaseModal v-model="open" :title="editing ? '编辑接入分组' : '创建接入分组'" description="至少授权一个模型和一个来源才可调用；组、客户和 Key 的限额同时生效" :dismissible="!saving" size="lg">
       <BaseForm class="grid gap-5">
         <BaseFormItem label="接入分组名称" required>
           <BaseInput v-model="form.name" aria-label="接入分组名称" :maxlength="128" :disabled="saving" />
@@ -157,7 +160,13 @@ async function remove() {
           </p>
           <AccountGroupCheckboxGrid v-model="form.poolGroupIds" :groups="pools" :loading="poolsLoading" :disabled="saving || !!poolsError" />
         </BaseFormItem>
-        <p v-if="!models.length || !form.poolGroupIds.length" class="m-0 text-cp-sm text-cp-warning">
+        <fieldset class="m-0 min-w-0 border-0 p-0">
+          <legend class="mb-2 text-cp-sm font-emphasis">
+            允许的渠道
+          </legend>
+          <ChannelCheckboxPicker v-if="open" v-model="form.channelIds" :disabled="saving" @ready="channelsReady = $event" />
+        </fieldset>
+        <p v-if="!models.length || !(form.poolGroupIds.length + form.channelIds.length)" class="m-0 text-cp-sm text-cp-warning">
           尚未完整授权，保存后该组 Key 暂时无法调用模型。
         </p>
         <BaseFormItem label="共享并发上限">

@@ -1258,7 +1258,13 @@ async fn load_client_key_memberships(
                     join account_groups pg on pg.id = ap.account_group_id and pg.enabled
                     join account_group_accounts am on am.account_group_id = pg.id
                     join provider_accounts pa on pa.id = am.provider_account_id
-                    where ap.access_group_id = keys.access_group_id order by pa.provider_kind
+                    where ap.access_group_id = keys.access_group_id
+                    union
+                    select ch.provider_kind from access_group_channels ac
+                    join access_groups ag on ag.id=ac.access_group_id and ag.enabled
+                    join upstream_channels ch on ch.id=ac.channel_id and ch.enabled
+                    where ac.access_group_id=keys.access_group_id
+                    order by provider_kind
                 ) else null end as access_provider_kinds,
                 groups.id as group_id, groups.name as group_name, groups.color as group_color,
                 groups.enabled as group_enabled,

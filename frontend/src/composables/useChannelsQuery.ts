@@ -11,6 +11,7 @@ export function useChannelsQuery() {
   const pageSize = ref(20)
   const total = ref(0)
   const loading = ref(false)
+  const loaded = ref(false)
   const loadError = ref('')
   let controller: AbortController | undefined
   let sequence = 0
@@ -33,6 +34,7 @@ export function useChannelsQuery() {
         return
       }
       channels.value = result.items
+      loaded.value = true
       total.value = result.total
       page.value = target
     }
@@ -60,5 +62,5 @@ export function useChannelsQuery() {
     sequence++
     controller?.abort()
   })
-  return { channels, search, loading, loadError, load, resize, pagination: computed(() => ({ currentPage: page.value, pageSize: pageSize.value, total: total.value })) }
+  return { channels, search, loading, loaded, loadError, load, resize, pagination: computed(() => ({ currentPage: page.value, pageSize: pageSize.value, total: total.value })) }
 }

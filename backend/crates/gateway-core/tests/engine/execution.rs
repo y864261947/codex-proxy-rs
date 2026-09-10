@@ -1157,6 +1157,7 @@ fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoin
         enabled: true,
         limits: RateLimits::unlimited(),
         allowed_models: BTreeSet::from(["public-alias".to_owned()]),
+        channel_ids: std::collections::BTreeSet::new(),
         pool_group_ids: BTreeSet::from([gateway_core::routing::AccountGroupId::new(
             "grp_11111111111111111111111111111111",
         )
@@ -1236,6 +1237,159 @@ fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoin
 }
 
 #[test]
+fn channel_only_access_groups_list_and_route_only_explicit_sources_and_public_models() {
+    use gateway_core::{
+        channel::{ChannelBinding, ChannelRevision},
+        identity::ChannelId,
+        policy::{AccessGroupId, AccessGroupPolicy},
+        routing::{
+            ModelPresentation,
+            source::{SourceId, SourcePolicy, SourcePreference},
+        },
+    };
+    let provider = ProviderKind::new("openai_api").expect("provider");
+    let channel = |id: &str| ChannelId::new(id).expect("channel");
+    let source_facts = [
+        ("chan_a", "model-a", true),
+        ("chan_b", "model-b", true),
+        ("chan_disabled", "disabled-model", false),
+    ];
+    for authorized in [
+        Some(vec!["chan_a", "chan_disabled"]),
+        Some(Vec::new()),
+        None,
+    ] {
+        let group = authorized.as_ref().map(|ids| AccessGroupPolicy {
+            id: AccessGroupId::new("access_channels").expect("group"),
+            enabled: true,
+            limits: RateLimits::unlimited(),
+            allowed_models: BTreeSet::from([
+                "public-alias".to_owned(),
+                "model-b".to_owned(),
+                "disabled-model".to_owned(),
+            ]),
+            pool_group_ids: BTreeSet::new(),
+            channel_ids: ids.iter().map(|id| channel(id)).collect(),
+        });
+        let directory = Arc::new(RuntimeAccountDirectory::default());
+        let snapshot = RuntimeSnapshot::new(
+            ConfigRevision::new(1).expect("revision"),
+            AccountSelectionPolicy::new(
+                RotationStrategy::Smart,
+                std::num::NonZeroU32::new(1).expect("concurrency"),
+                Duration::ZERO,
+            ),
+            vec![provider.clone()],
+            source_facts
+                .iter()
+                .map(|(id, model, _)| {
+                    ProviderModel::new(
+                        provider.clone(),
+                        UpstreamModelId::new(*model).expect("model"),
+                        ModelCapabilities::new(
+                            BTreeSet::from([OperationKind::Generate]),
+                            Some(16_000),
+                        ),
+                    )
+                    .with_channel(ChannelBinding::new(
+                        channel(id),
+                        ChannelRevision::new(1).expect("revision"),
+                    ))
+                    .with_presentation(ModelPresentation::new(Some(model.to_string()), None))
+                })
+                .collect(),
+            vec![
+                ClientPolicy::new(
+                    ClientApiKeyId::new("key_channels").expect("key"),
+                    PlaintextClientApiKey::new("sk_channel_test").expect("secret"),
+                    Arc::new(FrozenAccountScope::new(
+                        directory,
+                        ClientRoutingScope::no_accounts(),
+                    )),
+                    true,
+                    RateLimits::unlimited(),
+                )
+                .with_access_group(group),
+            ],
+        )
+        .expect("snapshot")
+        .with_model_mappings(BTreeMap::from([(
+            "public-alias".to_owned(),
+            "model-a".to_owned(),
+        )]))
+        .with_source_policies(
+            source_facts
+                .iter()
+                .map(|(id, _, enabled)| {
+                    SourcePolicy::new(
+                        SourceId::Channel(channel(id)),
+                        *enabled,
+                        SourcePreference::default(),
+                        RateLimits::unlimited(),
+                        None,
+                    )
+                    .expect("policy")
+                })
+                .collect(),
+        )
+        .expect("policies");
+        let service = DefaultExecutionService::new(
+            RuntimeSnapshotHandle::new(snapshot),
+            Arc::new(TrackingExecutionStore::default()),
+            ProviderRegistry::default(),
+            Arc::new(UnusedAdmissions),
+            Arc::new(UnusedCircuits),
+            Arc::new(UnusedContinuation),
+            Arc::new(RecordingClientApiKeyUsage::default()),
+        );
+        let client = service
+            .authenticate("sk_channel_test")
+            .expect("authenticate");
+        let permitted = authorized.as_ref().is_some_and(|ids| !ids.is_empty());
+        let expected = if permitted {
+            vec!["public-alias"]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(
+            service
+                .public_models(&client)
+                .iter()
+                .map(|m| m.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(
+            service
+                .public_model_profiles(&client)
+                .iter()
+                .map(|m| m.model().as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for model in ["public-alias", "model-a", "model-b", "disabled-model"] {
+            let visible = permitted && model == "public-alias";
+            assert_eq!(
+                service.contains_public_model(&client, &PublicModelId::new(model).expect("model")),
+                visible
+            );
+            let result = block_on(service.start(StartExecution {
+                client: client.clone(),
+                public_model: PublicModelId::new(model).expect("model"),
+                operation: start_operation_for_model(model),
+                metadata: access_test_metadata(),
+            }));
+            assert_eq!(
+                result.is_ok(),
+                visible,
+                "source and model authorization for {model}"
+            );
+            drop(result);
+        }
+    }
+}
+
+#[test]
 fn each_websocket_generation_rechecks_current_limits_permissions_and_snapshot_availability() {
     use gateway_core::engine::admission::ClientAdmissionRejection;
     use gateway_core::policy::{AccessGroupId, AccessGroupPolicy, AdmissionScopeId};
@@ -1292,6 +1446,7 @@ fn each_websocket_generation_rechecks_current_limits_permissions_and_snapshot_av
         enabled: false,
         limits: RateLimits::unlimited(),
         allowed_models: BTreeSet::from(["gpt-start".to_owned()]),
+        channel_ids: std::collections::BTreeSet::new(),
         pool_group_ids: BTreeSet::new(),
     })));
     let error = block_on(service.start(request()))

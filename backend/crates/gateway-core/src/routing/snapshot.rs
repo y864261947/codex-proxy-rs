@@ -836,6 +836,38 @@ impl RuntimeSnapshot {
     }
 
     /// 渠道必须同时有显式权限、启用策略及该来源自己的能力事实。
+    #[must_use]
+    pub fn public_model_profiles_for_channels(
+        &self,
+        allowed: &super::source::AllowedSources,
+    ) -> Vec<super::PublicModelProfile> {
+        self.public_models_for_channels(allowed)
+            .into_iter()
+            .filter_map(|public_model| {
+                let target = self.mapped_model(public_model.as_str());
+                let presentation = allowed.iter().find_map(|source| {
+                    let super::source::SourceId::Channel(channel) = source else {
+                        return None;
+                    };
+                    if !self
+                        .source_policy(source)
+                        .is_some_and(super::source::SourcePolicy::enabled)
+                    {
+                        return None;
+                    }
+                    self.channel_models
+                        .get(channel)?
+                        .values()
+                        .find(|model| model.upstream_model.as_str() == target)?
+                        .presentation
+                        .clone()
+                })?;
+                Some(super::PublicModelProfile::new(public_model, presentation))
+            })
+            .collect()
+    }
+
+    /// 渠道必须同时有显式权限、启用策略及该来源自己的能力事实。
     /// 账号 scope 保留在计划中用于请求历史，绝不作为渠道授权的替代。
     pub fn plan_channels(
         &self,

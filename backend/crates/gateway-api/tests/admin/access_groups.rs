@@ -88,9 +88,15 @@ async fn access_group_assignment_requires_an_explicit_binding_and_valid_access_g
 async fn access_group_creation_requires_explicit_permissions_and_valid_pool_ids() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
-    let valid = json!({"name":"Team", "enabled":true, "maxConcurrency":4, "requestsPerMinute":60, "allowedModels":["model"], "poolGroupIds":[]});
+    let valid = json!({"name":"Team", "enabled":true, "maxConcurrency":4, "requestsPerMinute":60, "allowedModels":["model"], "poolGroupIds":[], "channelIds":[]});
     for (field, value, expected) in [
         ("poolGroupIds", json!(["invalid"]), StatusCode::BAD_REQUEST),
+        ("channelIds", json!(["invalid"]), StatusCode::BAD_REQUEST),
+        (
+            "channelIds",
+            serde_json::Value::Null,
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
         ("allowedModels", json!(["*"]), StatusCode::BAD_REQUEST),
         ("allowedModels", json!([]), StatusCode::SERVICE_UNAVAILABLE),
         (
