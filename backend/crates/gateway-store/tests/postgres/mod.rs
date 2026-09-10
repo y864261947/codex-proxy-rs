@@ -15,6 +15,7 @@ mod account_groups;
 mod admin_security_audit;
 mod admission_recovery;
 mod backup;
+mod channels;
 mod client_keys;
 mod customers;
 mod execution;

@@ -85,6 +85,19 @@ impl AdminStoreError {
 pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 
 #[async_trait]
+pub trait ChannelStore: Send + Sync {
+    async fn list_channels(
+        &self,
+        query: crate::model::channels::ChannelListQuery,
+    ) -> AdminStoreResult<crate::model::channels::ChannelPage>;
+    async fn change_channel(
+        &self,
+        change: crate::model::channels::ChannelChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
+#[async_trait]
 pub trait CustomerStore: Send + Sync {
     async fn list_customers(
         &self,
