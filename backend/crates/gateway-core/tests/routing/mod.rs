@@ -18,6 +18,7 @@ use gateway_core::routing::{
 };
 
 mod snapshot;
+mod source;
 
 fn scheduling() -> AccountSelectionPolicy {
     AccountSelectionPolicy::new(

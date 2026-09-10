@@ -4,6 +4,7 @@ mod engine;
 mod error;
 mod event;
 mod health;
+mod identity;
 mod lifecycle;
 mod metering;
 mod operation;

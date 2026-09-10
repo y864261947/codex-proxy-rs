@@ -1488,7 +1488,11 @@ async fn assert_cross_endpoint_affinity(thread_id: Option<&str>) {
         )
         .await
         .expect("root selection");
-    let root_account = root_stream.metadata().provider_account_id().clone();
+    let root_account = root_stream
+        .metadata()
+        .provider_account_id()
+        .expect("account execution target")
+        .clone();
     drop(root_stream);
     let generation = Operation::Generate(generate_with_session_context(
         "shared-root",
@@ -1502,7 +1506,11 @@ async fn assert_cross_endpoint_affinity(thread_id: Option<&str>) {
         )
         .await
         .expect("first selection");
-    let first_account = first.metadata().provider_account_id().clone();
+    let first_account = first
+        .metadata()
+        .provider_account_id()
+        .expect("account execution target")
+        .clone();
     assert_eq!(
         first_account, root_account,
         "new child inherits the root account"
@@ -1552,7 +1560,9 @@ async fn assert_cross_endpoint_affinity(thread_id: Option<&str>) {
         .await
         .expect("search selection");
     assert_eq!(
-        same.metadata().provider_account_id(),
+        same.metadata()
+            .provider_account_id()
+            .expect("account execution target"),
         &first_account,
         "session affinity outranks the other account's weight"
     );
@@ -1575,7 +1585,11 @@ async fn assert_cross_endpoint_affinity(thread_id: Option<&str>) {
         .await
         .expect("busy fallback");
     assert_eq!(
-        fallback.metadata().provider_account_id().as_str(),
+        fallback
+            .metadata()
+            .provider_account_id()
+            .expect("account execution target")
+            .as_str(),
         other_account
     );
     fallback
@@ -1600,7 +1614,11 @@ async fn assert_cross_endpoint_affinity(thread_id: Option<&str>) {
         .await
         .expect("resumed responses");
     assert_eq!(
-        resumed.metadata().provider_account_id().as_str(),
+        resumed
+            .metadata()
+            .provider_account_id()
+            .expect("account execution target")
+            .as_str(),
         other_account,
         "successful failover is shared back to Responses"
     );
@@ -1637,7 +1655,11 @@ async fn assert_cross_endpoint_affinity(thread_id: Option<&str>) {
             .await
             .expect("image selection");
         assert_eq!(
-            selected_image.metadata().provider_account_id().as_str(),
+            selected_image
+                .metadata()
+                .provider_account_id()
+                .expect("account execution target")
+                .as_str(),
             other_account
         );
         drop(selected_image);
@@ -1653,7 +1675,13 @@ async fn assert_cross_endpoint_affinity(thread_id: Option<&str>) {
             )
             .await
             .expect("root after child migration");
-        assert_eq!(root_stream.metadata().provider_account_id(), &root_account);
+        assert_eq!(
+            root_stream
+                .metadata()
+                .provider_account_id()
+                .expect("account execution target"),
+            &root_account
+        );
         drop(root_stream);
         assert_eq!(affinity.binding_count(), 2, "only root and child bindings");
     } else {
@@ -4416,7 +4444,11 @@ async fn thread_spawn_children_should_inherit_the_root_with_independent_scoped_b
             .await
             .expect("prepare provider stream");
         assert_eq!(
-            stream.metadata().provider_account_id().as_str(),
+            stream
+                .metadata()
+                .provider_account_id()
+                .expect("account execution target")
+                .as_str(),
             "acct_thread_spawn_affinity"
         );
         drop(stream);
@@ -4496,7 +4528,11 @@ async fn child_busy_failover_should_leave_the_running_parent_and_siblings_on_the
         )
         .await
         .expect("parent selection");
-    let root_account = parent.metadata().provider_account_id().clone();
+    let root_account = parent
+        .metadata()
+        .provider_account_id()
+        .expect("account execution target")
+        .clone();
     let parent_task = tokio::spawn(async move {
         let mut completed = false;
         while let Some(event) = parent.next().await {
@@ -4543,7 +4579,10 @@ async fn child_busy_failover_should_leave_the_running_parent_and_siblings_on_the
         .await
         .expect("initial child selection");
     assert_eq!(
-        child.metadata().provider_account_id(),
+        child
+            .metadata()
+            .provider_account_id()
+            .expect("account execution target"),
         &root_account,
         "root preference outranks B's weight"
     );
@@ -4564,7 +4603,11 @@ async fn child_busy_failover_should_leave_the_running_parent_and_siblings_on_the
             .await
             .expect("child busy fallback");
         assert_eq!(
-            child.metadata().provider_account_id().as_str(),
+            child
+                .metadata()
+                .provider_account_id()
+                .expect("account execution target")
+                .as_str(),
             "acct_subagent_b"
         );
         let mut completed = false;
@@ -4605,7 +4648,11 @@ async fn child_busy_failover_should_leave_the_running_parent_and_siblings_on_the
             .await
             .expect("selection after parent completion");
         assert_eq!(
-            stream.metadata().provider_account_id().as_str(),
+            stream
+                .metadata()
+                .provider_account_id()
+                .expect("account execution target")
+                .as_str(),
             expected,
             "thread {thread}"
         );
@@ -4664,7 +4711,11 @@ async fn failed_child_failover_should_preserve_both_existing_bindings() {
             .await
             .expect("initial binding");
         assert_eq!(
-            stream.metadata().provider_account_id().as_str(),
+            stream
+                .metadata()
+                .provider_account_id()
+                .expect("account execution target")
+                .as_str(),
             "acct_subagent_a"
         );
         drop(stream);
@@ -4690,7 +4741,11 @@ async fn failed_child_failover_should_preserve_both_existing_bindings() {
         .await
         .expect("child fallback selection");
     assert_eq!(
-        child.metadata().provider_account_id().as_str(),
+        child
+            .metadata()
+            .provider_account_id()
+            .expect("account execution target")
+            .as_str(),
         "acct_subagent_b"
     );
     let error = loop {
@@ -4715,7 +4770,11 @@ async fn failed_child_failover_should_preserve_both_existing_bindings() {
             .await
             .expect("binding after failure");
         assert_eq!(
-            stream.metadata().provider_account_id().as_str(),
+            stream
+                .metadata()
+                .provider_account_id()
+                .expect("account execution target")
+                .as_str(),
             "acct_subagent_a",
             "failure must not migrate either binding"
         );

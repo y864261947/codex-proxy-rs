@@ -1,6 +1,7 @@
 //! Provider、模型目录、精确模型映射与请求级候选计划。
 
 pub mod snapshot;
+pub mod source;
 
 pub use crate::account::scope::{
     AccountGroupId, AccountRoutingScopeKind, AccountRoutingSnapshot, ClientRoutingScope,
@@ -483,6 +484,7 @@ pub struct RoutingContext {
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {
+    source: Option<source::SourceId>,
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
     emulated_features: BTreeSet<Feature>,
@@ -490,6 +492,18 @@ pub struct ProviderCandidate {
 }
 
 impl ProviderCandidate {
+    /// None 仅用于迁入来源配置之前的既有账号集合路径。
+    #[must_use]
+    pub const fn source(&self) -> Option<&source::SourceId> {
+        self.source.as_ref()
+    }
+
+    #[must_use]
+    pub fn with_source(mut self, source: source::SourceId) -> Self {
+        self.source = Some(source);
+        self
+    }
+
     #[must_use]
     pub const fn provider(&self) -> &ProviderKind {
         &self.provider

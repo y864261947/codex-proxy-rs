@@ -515,7 +515,7 @@ where
         if state.provider() != provider.as_str() {
             return None;
         }
-        let account = current.metadata.provider_account_id().clone();
+        let account = current.metadata.provider_account_id()?.clone();
         let response_id = self.observation.upstream_response_id.as_deref()?;
         let previous_response_id = PreviousResponseId::new(response_id.to_owned());
         let upstream_response_id = PreviousResponseId::new(response_id.to_owned());
@@ -845,16 +845,17 @@ where
 
         let metadata = stream.metadata().clone();
         attempt_trace.record("account.selected", json!({
-            "provider": metadata.provider().as_str(), "accountId": metadata.provider_account_id().as_str(),
+            "provider": metadata.provider().as_str(), "accountId": metadata.provider_account_id().map(|id| id.as_str()),
+            "channelId": metadata.channel_id().map(|id| id.as_str()),
             "transport": metadata.transport().as_str(),
             "selectionMs": metadata.selection_observation().map(|o| o.account_selection_wait_ms()),
         }));
         let selection_observation = metadata.selection_observation();
         let capacity = selection_observation.and_then(|observation| observation.capacity());
         if !self.account_selection.is_diagnostic()
-            && !candidate
-                .account_scope()
-                .allows(metadata.provider_account_id())
+            && metadata
+                .provider_account_id()
+                .is_some_and(|account| !candidate.account_scope().allows(account))
         {
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -875,7 +876,7 @@ where
         }
         if pinned_account
             .as_ref()
-            .is_some_and(|required| metadata.provider_account_id() != required)
+            .is_some_and(|required| metadata.provider_account_id() != Some(required))
         {
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -899,7 +900,9 @@ where
             .as_ref()
             .and_then(ContinuationBinding::pinned)
             && self.continuation_attempt == ContinuationAttempt::Native
-            && !pin.matches(metadata.provider(), metadata.provider_account_id())
+            && metadata
+                .provider_account_id()
+                .is_none_or(|account| !pin.matches(metadata.provider(), account))
         {
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -918,10 +921,12 @@ where
             .await?;
             return Err(EngineError::ContinuationPinMismatch);
         }
-        if self.account_state_owner.is_none() {
+        if self.account_state_owner.is_none()
+            && let Some(account) = metadata.provider_account_id()
+        {
             self.account_state_owner = Some(ProviderAccountStateOwner::new(
                 metadata.provider().clone(),
-                metadata.provider_account_id().clone(),
+                account.clone(),
             ));
         }
         let attempt_record = AttemptRecord {
@@ -929,8 +934,8 @@ where
             attempt_count: next_attempt,
             trigger,
             provider_kind: metadata.provider().clone(),
-            provider_account_id: Some(metadata.provider_account_id().clone()),
-            provider_account_ref: Some(metadata.provider_account_id().clone()),
+            provider_account_id: metadata.provider_account_id().cloned(),
+            provider_account_ref: metadata.provider_account_id().cloned(),
             upstream_model_id: metadata.upstream_model().cloned(),
             upstream_transport: metadata.transport().as_str().to_owned(),
             http_version: None,
@@ -1083,7 +1088,9 @@ where
             attempt_send_state,
             provider_proved_replay_safe,
         );
-        let account_rotation_retry = self.account_selection.required_account().is_none()
+        let account_id = current.metadata.provider_account_id();
+        let account_rotation_retry = account_id.is_some()
+            && self.account_selection.required_account().is_none()
             && self.continuation_attempt == ContinuationAttempt::None
             && self.downstream_committed_at.is_none()
             && !self.delivery_pending
@@ -1111,8 +1118,10 @@ where
                 Some((AttemptTransport::Fallback, Duration::ZERO))
             }
             _ => None,
-        };
-        let ordinary_retry = self.account_selection.required_account().is_none()
+        }
+        .filter(|_| account_id.is_some());
+        let ordinary_retry = account_id.is_some()
+            && self.account_selection.required_account().is_none()
             && self.continuation_attempt == ContinuationAttempt::None
             && self.downstream_committed_at.is_none()
             && !self.delivery_pending
@@ -1125,9 +1134,11 @@ where
             && !self.delivery_pending
             && attempt_send_state != UpstreamSendState::Ambiguous
             && self.routing_attempts < self.plan.max_attempts().get()
-            && !self
-                .credential_recovery_attempted_accounts
-                .contains(current.metadata.provider_account_id());
+            && account_id.is_some_and(|account| {
+                !self
+                    .credential_recovery_attempted_accounts
+                    .contains(account)
+            });
         let retryable = continuation_retry
             || same_account_retry
             || ordinary_retry
@@ -1146,22 +1157,23 @@ where
             // 普通 clone 只保留稳定事实；原始 wire/HTTP response 由 request-local
             // 所有权保留到下一次 attempt 成功，或最终空选路时返回客户端。
             let persistence_error = self.request_persisted.then(|| error.clone());
-            if same_account_retry {
-                let account = current.metadata.provider_account_id().clone();
+            if same_account_retry && let Some(account) = account_id {
+                let account = account.clone();
                 self.credential_recovery_attempted_accounts
                     .insert(account.clone());
                 // 只钉住紧随其后的 replay attempt；replay 再遇可重试错误时，
                 // ordinary/continuation 重试门不受影响，仍可换号。
                 self.recovery_account = Some(account);
-            } else if let Some((transport, delay)) = transport_recovery {
+            } else if let Some((transport, delay)) = transport_recovery
+                && let Some(account) = account_id
+            {
                 self.transport_recovery = Some(PendingTransportRecovery {
-                    account: current.metadata.provider_account_id().clone(),
+                    account: account.clone(),
                     transport,
                     delay,
                 });
-            } else if !continuation_retry {
-                self.excluded_accounts
-                    .insert(current.metadata.provider_account_id().clone());
+            } else if !continuation_retry && let Some(account) = account_id {
+                self.excluded_accounts.insert(account.clone());
             }
             self.last_retryable_failure_events = atomic_client_events;
             self.last_retryable_failure = Some(error);
@@ -1176,7 +1188,7 @@ where
                             attempt_index: current.index,
                             trigger: current.trigger,
                             provider_kind: current.metadata.provider().clone(),
-                            account_id: Some(current.metadata.provider_account_id().clone()),
+                            account_id: current.metadata.provider_account_id().cloned(),
                             upstream_model_id: current.metadata.upstream_model().cloned(),
                             upstream_status_code: current
                                 .response_observation
@@ -1230,6 +1242,9 @@ where
         send_state: UpstreamSendState,
         provider_proved_replay_safe: bool,
     ) -> bool {
+        let Some(account_id) = current.metadata.provider_account_id() else {
+            return false;
+        };
         if self.account_selection.required_account().is_some()
             || self.continuation_attempt == ContinuationAttempt::None
             || self.downstream_committed_at.is_some()
@@ -1248,7 +1263,7 @@ where
         match self.continuation_attempt {
             ContinuationAttempt::Native => match error.continuation_recovery_disposition() {
                 Some(ContinuationRecoveryDisposition::RetryExactConnection) => {
-                    self.recovery_account = Some(current.metadata.provider_account_id().clone());
+                    self.recovery_account = Some(account_id.clone());
                 }
                 Some(ContinuationRecoveryDisposition::ProviderReplayAllowed) => {
                     self.continuation_attempt = ContinuationAttempt::ReplayOwner;
@@ -1268,12 +1283,10 @@ where
             }
             ContinuationAttempt::ReplayOwner => {
                 self.continuation_attempt = ContinuationAttempt::ReplayAny;
-                self.excluded_accounts
-                    .insert(current.metadata.provider_account_id().clone());
+                self.excluded_accounts.insert(account_id.clone());
             }
             ContinuationAttempt::ReplayAny => {
-                self.excluded_accounts
-                    .insert(current.metadata.provider_account_id().clone());
+                self.excluded_accounts.insert(account_id.clone());
             }
             ContinuationAttempt::None => return false,
         }

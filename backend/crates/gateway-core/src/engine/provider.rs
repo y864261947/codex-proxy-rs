@@ -17,7 +17,7 @@ use crate::account::{
 use crate::engine::AttemptContext;
 use crate::error::{PreDeliveryRetry, ProviderError, ProviderErrorKind};
 use crate::event::{EventSequenceValidator, ProviderEvent};
-use crate::identity::ProviderKind;
+use crate::identity::{ChannelId, ProviderKind};
 use crate::operation::Operation;
 use crate::policy::ClientApiKeyId;
 use crate::routing::{
@@ -32,10 +32,16 @@ pub type EventStream =
 
 /// Provider 选定单个 credential 后返回的事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProviderExecutionTarget {
+    Account(ProviderAccountId),
+    Channel(ChannelId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCallMetadata {
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
-    provider_account_id: ProviderAccountId,
+    target: ProviderExecutionTarget,
     upstream_request_id: Option<OpaqueUpstreamValue>,
     transport: UpstreamTransport,
     selection_observation: Option<ProviderSelectionObservation>,
@@ -83,7 +89,7 @@ impl ProviderCallMetadata {
         Self {
             provider,
             upstream_model: Some(upstream_model),
-            provider_account_id,
+            target: ProviderExecutionTarget::Account(provider_account_id),
             upstream_request_id: None,
             transport,
             selection_observation: None,
@@ -100,11 +106,34 @@ impl ProviderCallMetadata {
         Self {
             provider,
             upstream_model: None,
-            provider_account_id,
+            target: ProviderExecutionTarget::Account(provider_account_id),
             upstream_request_id: None,
             transport,
             selection_observation: None,
         }
+    }
+
+    /// 创建显式绑定具体渠道的调用事实，不生成虚构账号身份。
+    #[must_use]
+    pub const fn for_channel(
+        provider: ProviderKind,
+        upstream_model: Option<UpstreamModelId>,
+        channel_id: ChannelId,
+        transport: UpstreamTransport,
+    ) -> Self {
+        Self {
+            provider,
+            upstream_model,
+            target: ProviderExecutionTarget::Channel(channel_id),
+            upstream_request_id: None,
+            transport,
+            selection_observation: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn target(&self) -> &ProviderExecutionTarget {
+        &self.target
     }
 
     /// 设置 adapter 已分类为非 bearer 的 request ID。
@@ -138,8 +167,19 @@ impl ProviderCallMetadata {
 
     /// 返回 live Provider account ID。
     #[must_use]
-    pub const fn provider_account_id(&self) -> &ProviderAccountId {
-        &self.provider_account_id
+    pub const fn provider_account_id(&self) -> Option<&ProviderAccountId> {
+        match &self.target {
+            ProviderExecutionTarget::Account(id) => Some(id),
+            ProviderExecutionTarget::Channel(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn channel_id(&self) -> Option<&ChannelId> {
+        match &self.target {
+            ProviderExecutionTarget::Channel(id) => Some(id),
+            ProviderExecutionTarget::Account(_) => None,
+        }
     }
 
     /// 返回安全上游 request ID。
@@ -164,6 +204,25 @@ impl ProviderCallMetadata {
     pub fn confirms(&self, candidate: &ProviderCandidate) -> bool {
         candidate.provider() == &self.provider
             && candidate.upstream_model() == self.upstream_model.as_ref()
+            && match (&self.target, candidate.source()) {
+                (ProviderExecutionTarget::Account(_), None) => true,
+                (
+                    ProviderExecutionTarget::Account(actual),
+                    Some(crate::routing::source::SourceId::AccountPool(pool)),
+                ) => candidate
+                    .account_scope()
+                    .directory()
+                    .account(actual)
+                    .is_some_and(|account| {
+                        account.provider_kind() == &self.provider
+                            && account.group_ids().contains(pool)
+                    }),
+                (
+                    ProviderExecutionTarget::Channel(actual),
+                    Some(crate::routing::source::SourceId::Channel(expected)),
+                ) => actual == expected,
+                _ => false,
+            }
     }
 }
 
@@ -315,10 +374,13 @@ impl ProviderStream {
         stats: Arc<AccountFeedbackStats>,
         failure_filter: fn(&ProviderError) -> bool,
     ) {
+        let Some(account_id) = self.metadata.provider_account_id().cloned() else {
+            return;
+        };
         self.account_feedback = Some(ProviderStreamAccountFeedback {
             stats,
             provider_kind: self.metadata.provider().clone(),
-            account_id: self.metadata.provider_account_id().clone(),
+            account_id,
             failure_filter,
             started_at: None,
             first_output_ms: None,

@@ -813,6 +813,7 @@ impl RuntimeSnapshot {
                 None => BTreeSet::new(),
             };
             candidates.push(ProviderCandidate {
+                source: None,
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
                 emulated_features,
@@ -862,6 +863,7 @@ impl RuntimeSnapshot {
             });
         }
         let candidate = ProviderCandidate {
+            source: None,
             provider: provider.clone(),
             upstream_model: None,
             emulated_features: BTreeSet::new(),
