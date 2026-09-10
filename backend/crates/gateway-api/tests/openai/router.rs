@@ -15,7 +15,8 @@ async fn realtime_counts_only_business_ingress_and_requires_admin_auth() {
     use std::sync::Arc;
 
     let admin = crate::admin::AdminTestFixture::new().await;
-    admin.auth.set_api_key("realtime-admin-key");
+    let admin_key = format!("admin-{}", "a".repeat(64));
+    admin.auth.set_api_key(&admin_key);
     let traffic = TrafficMonitor::default();
     let router = gateway_api::initialize(
         gateway_api::ApiConfig {
@@ -85,7 +86,7 @@ async fn realtime_counts_only_business_ingress_and_requires_admin_auth() {
     let response = router
         .oneshot(
             Request::get("/api/admin/dashboard/realtime")
-                .header("x-api-key", "realtime-admin-key")
+                .header("x-api-key", &admin_key)
                 .body(Body::empty())
                 .unwrap(),
         )
