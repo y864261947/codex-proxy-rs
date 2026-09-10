@@ -456,6 +456,21 @@ fn access_groups_freeze_explicit_pools_without_expanding_empty_or_legacy_permiss
             .routing_snapshot()
             .kind()
             .as_str(),
+        "none"
+    );
+    assert!(
+        policies["empty"]
+            .account_scope()
+            .routing_snapshot()
+            .groups_snapshot()
+            .is_empty()
+    );
+    assert_eq!(
+        policies["selected"]
+            .account_scope()
+            .routing_snapshot()
+            .kind()
+            .as_str(),
         "groups"
     );
 }
