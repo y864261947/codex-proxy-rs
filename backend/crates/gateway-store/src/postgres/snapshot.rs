@@ -34,6 +34,7 @@ pub struct SnapshotRuntimeSettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSnapshotData {
     pub channels: Vec<gateway_core::routing::snapshot::SnapshotChannelFacts>,
+    pub quotas: Vec<gateway_core::routing::source::QuotaScopePolicy>,
     pub config_revision: Revision,
     pub observed_current_revision: Revision,
     pub settings: SnapshotRuntimeSettings,
@@ -100,6 +101,7 @@ impl RuntimeSnapshotRepository for PgRuntimeSnapshotRepository {
         let provider_accounts = load_provider_accounts(&mut transaction).await?;
         let group_memberships = load_group_memberships(&mut transaction).await?;
         let channels = load_channels(&mut transaction).await?;
+        let quotas = load_quotas(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -109,6 +111,7 @@ impl RuntimeSnapshotRepository for PgRuntimeSnapshotRepository {
             RuntimeSnapshotRepository::current_config_revision(self).await?;
         Ok(RuntimeSnapshotData {
             channels,
+            quotas,
             config_revision,
             observed_current_revision,
             settings,
@@ -205,7 +208,8 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 provider_accounts,
                 group_memberships,
             )
-            .with_channels(data.channels))
+            .with_channels(data.channels)
+            .with_quotas(data.quotas))
         })
     }
 
@@ -223,6 +227,29 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
 
 fn core_revision(revision: Revision) -> Result<ConfigRevision, SnapshotStoreError> {
     ConfigRevision::new(revision.get()).map_err(|_| SnapshotStoreError::unavailable())
+}
+
+async fn load_quotas(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> StoreResult<Vec<gateway_core::routing::source::QuotaScopePolicy>> {
+    use gateway_core::{
+        identity::QuotaScopeId, policy::RateLimits, routing::source::QuotaScopePolicy,
+    };
+    let rows = sqlx::query_as::<_, (String, bool, i64, i64)>("select id, enabled, max_concurrency, requests_per_minute from upstream_quota_scopes order by id")
+        .fetch_all(&mut **transaction).await.map_err(|_| postgres_unavailable("load shared quota snapshot"))?;
+    rows.into_iter()
+        .map(|(id, enabled, concurrency, rpm)| {
+            QuotaScopePolicy::new(
+                QuotaScopeId::new(id).map_err(|_| invalid("invalid shared quota ID"))?,
+                enabled,
+                RateLimits {
+                    max_concurrency: to_u64(concurrency)?,
+                    requests_per_minute: to_u64(rpm)?,
+                },
+            )
+            .map_err(|_| invalid("invalid shared quota limits"))
+        })
+        .collect()
 }
 
 async fn load_channels(

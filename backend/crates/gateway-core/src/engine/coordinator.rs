@@ -1841,7 +1841,10 @@ async fn poll_provider(
         let lease = if let Some(source) = request.candidate().source() {
             let controls = request.candidate().source_controls();
             // 共享配额必须先解析为冻结配置，未解析的引用不能退化为不限额。
-            if controls.quota_scope_id().is_some() {
+            let quota = request.candidate().shared_quota();
+            if controls.quota_scope_id() != quota.map(crate::routing::source::QuotaScopePolicy::id)
+                || quota.is_some_and(|quota| !quota.enabled())
+            {
                 return Err(ProviderError::new(
                     ProviderErrorKind::ProviderInfrastructureUnavailable,
                     UpstreamSendState::NotSent,
@@ -1852,7 +1855,7 @@ async fn poll_provider(
                     .acquire(super::source_admission::SourceAdmissionRequest {
                         source: source.clone(),
                         limits: controls.limits(),
-                        shared_quota: None,
+                        shared_quota: quota.map(|quota| (quota.id().clone(), quota.limits())),
                         deadline,
                     })
                     .await

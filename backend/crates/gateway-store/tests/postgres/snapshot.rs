@@ -190,3 +190,61 @@ async fn snapshot_reads_access_models_pools_and_limits_in_one_consistent_revisio
     assert!(group.allows_model("public-model"));
     database.close().await;
 }
+
+#[tokio::test]
+async fn shared_quota_snapshot_preserves_old_limits_and_restricts_dangling_references() {
+    let Some(database) = TestDatabase::create("quota_snapshot").await else {
+        return;
+    };
+    sqlx::query("insert into upstream_quota_scopes (id,name,max_concurrency,requests_per_minute) values ('quota_project','Shared project',2,30)").execute(&database.pool).await.expect("quota");
+    sqlx::query("insert into upstream_channels (id,provider_kind,name,quota_scope_id,provider_config_json) values ('chan_quota','openai_api','Channel','quota_project','{}'::jsonb || '{\"token\":\"test\"}'::jsonb)").execute(&database.pool).await.expect("channel");
+    let repository = PgRuntimeSnapshotRepository::new(database.pool.clone());
+    let original = repository
+        .load_runtime_snapshot()
+        .await
+        .expect("original snapshot");
+    assert_eq!(original.quotas.len(), 1);
+    assert_eq!(original.quotas[0].limits().max_concurrency, 2);
+    assert!(original.quotas[0].enabled());
+    assert_eq!(
+        original.channels[0].policy().quota_scope_id(),
+        Some(original.quotas[0].id())
+    );
+    let error = sqlx::query("delete from upstream_quota_scopes where id='quota_project'")
+        .execute(&database.pool)
+        .await
+        .expect_err("referenced quota cannot be deleted");
+    assert!(matches!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23503" | "23001")
+    ));
+    assert!(
+        sqlx::query(
+            "update upstream_channels set quota_scope_id='quota_missing' where id='chan_quota'"
+        )
+        .execute(&database.pool)
+        .await
+        .is_err()
+    );
+    sqlx::query("update upstream_quota_scopes set enabled=false,max_concurrency=1,requests_per_minute=10 where id='quota_project'").execute(&database.pool).await.expect("change quota");
+    let changed = repository
+        .load_runtime_snapshot()
+        .await
+        .expect("changed snapshot");
+    assert!(!changed.quotas[0].enabled());
+    assert_eq!(changed.quotas[0].limits().max_concurrency, 1);
+    assert_eq!(original.quotas[0].limits().max_concurrency, 2);
+    assert!(original.quotas[0].enabled());
+    sqlx::query("update upstream_channels set quota_scope_id=null where id='chan_quota'")
+        .execute(&database.pool)
+        .await
+        .expect("unlink");
+    sqlx::query("delete from upstream_quota_scopes where id='quota_project'")
+        .execute(&database.pool)
+        .await
+        .expect("unreferenced quota can be deleted");
+    database.close().await;
+}

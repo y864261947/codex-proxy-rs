@@ -202,6 +202,7 @@ impl SnapshotChannelFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFacts {
     channels: Vec<SnapshotChannelFacts>,
+    quotas: Vec<super::source::QuotaScopePolicy>,
     config_revision: ConfigRevision,
     observed_current_revision: ConfigRevision,
     settings: SnapshotSettingsFacts,
@@ -224,6 +225,7 @@ impl SnapshotFacts {
     ) -> Self {
         Self {
             channels: Vec::new(),
+            quotas: Vec::new(),
             config_revision,
             observed_current_revision,
             settings,
@@ -237,6 +239,12 @@ impl SnapshotFacts {
     #[must_use]
     pub fn with_channels(mut self, channels: Vec<SnapshotChannelFacts>) -> Self {
         self.channels = channels;
+        self
+    }
+
+    #[must_use]
+    pub fn with_quotas(mut self, quotas: Vec<super::source::QuotaScopePolicy>) -> Self {
+        self.quotas = quotas;
         self
     }
 
@@ -539,6 +547,7 @@ async fn compile_runtime_snapshot(
         client_policies,
     )
     .and_then(|snapshot| snapshot.with_source_policies(source_policies))
+    .and_then(|snapshot| snapshot.with_quota_policies(facts.quotas))
     .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
     .map(|snapshot| {
         snapshot
@@ -555,6 +564,7 @@ pub struct RuntimeSnapshot {
     channel_models:
         Arc<BTreeMap<crate::identity::ChannelId, BTreeMap<UpstreamModelId, ProviderModel>>>,
     source_policies: Arc<BTreeMap<super::source::SourceId, super::source::SourcePolicy>>,
+    quota_policies: Arc<BTreeMap<crate::identity::QuotaScopeId, super::source::QuotaScopePolicy>>,
     revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     providers: Arc<BTreeSet<ProviderKind>>,
@@ -670,6 +680,7 @@ impl RuntimeSnapshot {
         Ok(Self {
             channel_models: Arc::new(channel_models),
             source_policies: Arc::new(BTreeMap::new()),
+            quota_policies: Arc::new(BTreeMap::new()),
             revision,
             account_selection_policy,
             providers: Arc::new(provider_set),
@@ -682,6 +693,41 @@ impl RuntimeSnapshot {
             client_policies: Arc::new(client_policy_map),
             min_codex_client_versions: CodexClientMinVersions::default(),
         })
+    }
+
+    /// 与来源配置一同冻结共享配额，重复身份拒绝编译。
+    pub fn with_quota_policies(
+        mut self,
+        policies: Vec<super::source::QuotaScopePolicy>,
+    ) -> Result<Self, RoutingError> {
+        let mut quotas = BTreeMap::new();
+        for policy in policies {
+            let id = policy.id().clone();
+            if quotas.insert(id.clone(), policy).is_some() {
+                return Err(RoutingError::DuplicateEntity {
+                    entity: "shared quota",
+                    id: id.to_string(),
+                });
+            }
+        }
+        self.quota_policies = Arc::new(quotas);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn quota_policy(
+        &self,
+        id: &crate::identity::QuotaScopeId,
+    ) -> Option<&super::source::QuotaScopePolicy> {
+        self.quota_policies.get(id)
+    }
+
+    fn source_is_available(&self, policy: &super::source::SourcePolicy) -> bool {
+        policy.enabled()
+            && policy.quota_scope_id().is_none_or(|id| {
+                self.quota_policy(id)
+                    .is_some_and(super::source::QuotaScopePolicy::enabled)
+            })
     }
 
     /// 发布与模型目录同一请求快照的来源启停、容量与调度策略。
@@ -726,7 +772,7 @@ impl RuntimeSnapshot {
                 .iter()
                 .filter_map(|source| {
                     self.source_policy(source)
-                        .filter(|policy| policy.enabled())
+                        .filter(|policy| self.source_is_available(policy))
                         .map(|policy| (source.clone(), policy.effective_preference(None)))
                 })
                 .collect(),
@@ -777,6 +823,10 @@ impl RuntimeSnapshot {
                     candidates.extend(plan.candidates().iter().cloned().map(|mut candidate| {
                         candidate.source = Some(policy.snapshot());
                         candidate.source_controls = policy.controls().clone();
+                        candidate.shared_quota = policy
+                            .quota_scope_id()
+                            .and_then(|id| self.quota_policy(id))
+                            .cloned();
                         candidate
                     }))
                 }
@@ -824,7 +874,7 @@ impl RuntimeSnapshot {
             };
             if !self
                 .source_policy(source)
-                .is_some_and(super::source::SourcePolicy::enabled)
+                .is_some_and(|policy| self.source_is_available(policy))
             {
                 continue;
             }
@@ -864,7 +914,7 @@ impl RuntimeSnapshot {
                     };
                     if !self
                         .source_policy(source)
-                        .is_some_and(super::source::SourcePolicy::enabled)
+                        .is_some_and(|policy| self.source_is_available(policy))
                     {
                         return None;
                     }
@@ -899,7 +949,7 @@ impl RuntimeSnapshot {
             };
             if !self
                 .source_policy(source)
-                .is_some_and(super::source::SourcePolicy::enabled)
+                .is_some_and(|policy| self.source_is_available(policy))
             {
                 continue;
             }
@@ -924,6 +974,11 @@ impl RuntimeSnapshot {
             };
             candidates.push(ProviderCandidate {
                 channel: model.channel.clone(),
+                shared_quota: self
+                    .source_policy(source)
+                    .and_then(|policy| policy.quota_scope_id())
+                    .and_then(|id| self.quota_policy(id))
+                    .cloned(),
                 source_controls: self
                     .source_policy(source)
                     .expect("validated source policy")
@@ -1211,6 +1266,7 @@ impl RuntimeSnapshot {
                 channel: None,
                 source: None,
                 source_controls: super::source::SourceControls::default(),
+                shared_quota: None,
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
                 emulated_features,
@@ -1263,6 +1319,7 @@ impl RuntimeSnapshot {
             channel: None,
             source: None,
             source_controls: super::source::SourceControls::default(),
+            shared_quota: None,
             provider: provider.clone(),
             upstream_model: None,
             emulated_features: BTreeSet::new(),

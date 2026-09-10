@@ -33,6 +33,12 @@ async fn pool_source_controls_are_atomic_and_description_edits_preserve_them() {
     let Some(database) = TestDatabase::create("pool_source_controls").await else {
         return;
     };
+    sqlx::query(
+        "insert into upstream_quota_scopes (id, name) values ('quota_shared', 'Shared project')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("shared quota fixture");
     let repo = PgAccountGroupRepository::new(database.pool.clone());
     let controls = SourceControls::new(
         SourcePreference::new(2, 3).expect("preference"),

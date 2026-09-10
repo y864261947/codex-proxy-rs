@@ -66,6 +66,7 @@ async fn channel_rotation_is_revision_fenced_and_public_reads_and_audits_do_not_
     let Some(db) = TestDatabase::create("channel_rotation").await else {
         return;
     };
+    sqlx::query("insert into upstream_quota_scopes (id, name) values ('quota_shared_project', 'Shared project')").execute(&db.pool).await.expect("shared quota fixture");
     let repo = PgChannelRepository::new(db.pool.clone());
     let created = repo
         .change_channel(
@@ -273,6 +274,7 @@ async fn channel_conflicts_and_audit_failure_roll_back_config_and_revision() {
     let Some(db) = TestDatabase::create("channel_rollback").await else {
         return;
     };
+    sqlx::query("insert into upstream_quota_scopes (id, name) values ('quota_shared_project', 'Shared project')").execute(&db.pool).await.expect("shared quota fixture");
     let repo = PgChannelRepository::new(db.pool.clone());
     let initial = repo
         .change_channel(

@@ -662,3 +662,120 @@ fn selected_pool_requires_the_actual_account_to_belong_to_that_pool_and_provider
         !metadata(ProviderAccountId::new("acct_absent").expect("account")).confirms(&candidate)
     );
 }
+
+#[test]
+fn shared_quota_is_required_enabled_and_frozen_for_each_channel_candidate() {
+    use gateway_core::routing::{
+        ConfigRevision, ProviderKind, PublicModelId, RoutingContext, RuntimeSnapshot,
+        source::QuotaScopePolicy,
+    };
+    let quota_id = QuotaScopeId::new("quota_project").expect("quota");
+    let quota = QuotaScopePolicy::new(
+        quota_id.clone(),
+        true,
+        RateLimits {
+            max_concurrency: 2,
+            requests_per_minute: 30,
+        },
+    )
+    .expect("quota policy");
+    let base = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        super::scheduling(),
+        vec![ProviderKind::new("openai").expect("provider")],
+        ["chan_a", "chan_b"]
+            .into_iter()
+            .map(|id| {
+                super::model("openai", "shared", super::capabilities())
+                    .with_channel(binding(ChannelId::new(id).expect("channel")))
+            })
+            .collect(),
+        Vec::new(),
+    )
+    .expect("snapshot")
+    .with_source_policies(
+        ["chan_a", "chan_b"]
+            .into_iter()
+            .map(|id| {
+                SourcePolicy::new(
+                    SourceId::Channel(ChannelId::new(id).expect("channel")),
+                    true,
+                    SourcePreference::default(),
+                    RateLimits {
+                        max_concurrency: 7,
+                        requests_per_minute: 60,
+                    },
+                    Some(quota_id.clone()),
+                )
+                .expect("source")
+            })
+            .collect(),
+    )
+    .expect("policies");
+    let model = PublicModelId::new("shared").expect("model");
+    let allowed = channel_access(&["chan_a", "chan_b"]);
+    let plan = |snapshot: &RuntimeSnapshot| {
+        snapshot.plan_channels(
+            &model,
+            &super::operation(),
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+            &allowed,
+        )
+    };
+    assert!(plan(&base).is_err(), "missing quota cannot mean unlimited");
+    let enabled = base
+        .clone()
+        .with_quota_policies(vec![quota.clone()])
+        .expect("enabled");
+    let frozen = plan(&enabled).expect("shared quota routes");
+    assert_eq!(frozen.candidates().len(), 2);
+    for candidate in frozen.candidates() {
+        assert_eq!(candidate.shared_quota(), Some(&quota));
+        assert_eq!(candidate.source_controls().limits().max_concurrency, 7);
+    }
+    let changed = enabled
+        .clone()
+        .with_quota_policies(vec![
+            QuotaScopePolicy::new(
+                quota_id.clone(),
+                true,
+                RateLimits {
+                    max_concurrency: 5,
+                    requests_per_minute: 90,
+                },
+            )
+            .expect("new quota"),
+        ])
+        .expect("changed");
+    assert_eq!(
+        plan(&changed).expect("new plan").candidates()[0]
+            .shared_quota()
+            .expect("quota")
+            .limits()
+            .max_concurrency,
+        5
+    );
+    assert_eq!(
+        frozen.candidates()[0]
+            .shared_quota()
+            .expect("old quota")
+            .limits()
+            .max_concurrency,
+        2
+    );
+    let disabled = enabled
+        .clone()
+        .with_quota_policies(vec![
+            QuotaScopePolicy::new(quota_id, false, RateLimits::unlimited()).expect("disabled"),
+        ])
+        .expect("disabled snapshot");
+    assert!(plan(&disabled).is_err());
+    assert!(disabled.public_models_for_channels(&allowed).is_empty());
+    assert!(
+        enabled
+            .with_quota_policies(vec![quota.clone(), quota])
+            .is_err(),
+        "duplicates rejected"
+    );
+}

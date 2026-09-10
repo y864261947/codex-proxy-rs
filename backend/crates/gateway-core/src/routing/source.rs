@@ -113,6 +113,43 @@ impl Default for SourcePreference {
     }
 }
 
+/// 多个来源共享的项目级配额；每次路由与来源限额同时冻结。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuotaScopePolicy {
+    id: QuotaScopeId,
+    enabled: bool,
+    limits: RateLimits,
+}
+
+impl QuotaScopePolicy {
+    pub fn new(
+        id: QuotaScopeId,
+        enabled: bool,
+        limits: RateLimits,
+    ) -> Result<Self, IdentifierError> {
+        if !limits.is_valid() {
+            return Err(IdentifierError::InvalidFormat);
+        }
+        Ok(Self {
+            id,
+            enabled,
+            limits,
+        })
+    }
+    #[must_use]
+    pub const fn id(&self) -> &QuotaScopeId {
+        &self.id
+    }
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+    #[must_use]
+    pub const fn limits(&self) -> RateLimits {
+        self.limits
+    }
+}
+
 /// 来源容量与默认选择偏好，不包含身份或启停状态。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceControls {
