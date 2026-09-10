@@ -557,6 +557,7 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 | 方法 | 路由 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/admin/dashboard/summary` | Dashboard 汇总；支持 `kind`、`startTime`、`endTime` |
+| `GET` | `/api/admin/dashboard/realtime` | 当前进程实时并发与近 60 秒入口 RPM；[指标口径](realtime-traffic.md) |
 | `GET` | `/api/admin/dashboard/trend` | Dashboard 趋势；`kind=usage|latency|errors` |
 | `GET` | `/api/admin/usage/records` | 请求记录分页列表 |
 | `GET` | `/api/admin/usage/records/detail` | 按 `id` 查询请求详情 |

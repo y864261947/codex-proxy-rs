@@ -39,6 +39,53 @@ use tower::ServiceExt;
 use super::decode_response_create;
 use crate::openai::{api_router, authenticated_client, models::ModelsExecution};
 
+#[tokio::test]
+async fn realtime_websocket_rpm_counts_messages_not_connections_or_pings() {
+    let traffic = gateway_core::engine::traffic::TrafficMonitor::default();
+    let app = crate::openai::api_router_with_traffic(ModelsExecution::new(), traffic.clone()).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut request = format!("ws://{address}/v1/responses")
+        .into_client_request()
+        .unwrap();
+    request
+        .headers_mut()
+        .insert(AUTHORIZATION, "Bearer sk_models_test".parse().unwrap());
+    let (mut socket, response) = connect_async(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(traffic.snapshot().ingress_requests_last_minute, 0);
+    assert_eq!(traffic.snapshot().in_flight_requests, 0);
+
+    socket
+        .send(ClientMessage::Ping(Bytes::from_static(b"ping")))
+        .await
+        .unwrap();
+    let pong = tokio::time::timeout(Duration::from_secs(2), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(matches!(pong, ClientMessage::Pong(_)));
+    assert_eq!(traffic.snapshot().ingress_requests_last_minute, 0);
+
+    for count in 1..=2 {
+        socket.send(ClientMessage::Text("{}".into())).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(response, ClientMessage::Text(_)));
+        assert_eq!(traffic.snapshot().ingress_requests_last_minute, count);
+        assert_eq!(traffic.snapshot().in_flight_requests, 0);
+    }
+    socket.close(None).await.unwrap();
+    server.abort();
+}
+
 fn decode_response_create_with_turn_header(
     payload: Value,
     opening_turn_metadata: &'static str,

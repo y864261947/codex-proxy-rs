@@ -53,7 +53,26 @@ pub(super) async fn api_router_with_worker_health(
     execution: Arc<dyn ExecutionService>,
     worker_health: Arc<dyn WorkerHealthSource>,
 ) -> axum::Router {
-    api_router_with_origins_and_worker_health(execution, Vec::new(), worker_health).await
+    api_router_with_origins_and_worker_health(
+        execution,
+        Vec::new(),
+        worker_health,
+        Default::default(),
+    )
+    .await
+}
+
+pub(super) async fn api_router_with_traffic(
+    execution: Arc<dyn ExecutionService>,
+    traffic: gateway_core::engine::traffic::TrafficMonitor,
+) -> axum::Router {
+    api_router_with_origins_and_worker_health(
+        execution,
+        Vec::new(),
+        Arc::new(EmptyWorkerHealth),
+        traffic,
+    )
+    .await
 }
 
 pub(super) async fn api_router_with_origins(
@@ -64,6 +83,7 @@ pub(super) async fn api_router_with_origins(
         execution,
         cors_allowed_origins,
         Arc::new(EmptyWorkerHealth),
+        Default::default(),
     )
     .await
 }
@@ -72,6 +92,7 @@ async fn api_router_with_origins_and_worker_health(
     execution: Arc<dyn ExecutionService>,
     cors_allowed_origins: Vec<String>,
     worker_health: Arc<dyn WorkerHealthSource>,
+    traffic: gateway_core::engine::traffic::TrafficMonitor,
 ) -> axum::Router {
     let admin = crate::admin::AdminTestFixture::new().await;
     gateway_api::initialize(
@@ -82,7 +103,7 @@ async fn api_router_with_origins_and_worker_health(
             request_id_header: "x-request-id".to_owned(),
         },
         execution,
-        Default::default(),
+        traffic,
         admin.services,
         Vec::new(),
         worker_health,

@@ -29,6 +29,10 @@
 
 前端已通过类型检查和生产构建，Rust 源码格式检查通过。Windows 缺少 MSVC 链接器，安装构建工具被本地执行策略阻止；后端编译、clippy、单元及 PostgreSQL/Redis 集成测试交由分支 PR 的 Linux CI 验证，不能把格式检查视为编译通过。
 
+已建立 [草稿 PR #1](https://github.com/y864261947/codex-proxy-rs/pull/1)，并启用 fork 原本默认停用的 Actions。Linux CI 已通过 clippy（包含所有测试目标编译）、前端检查和工作流检查，完整 Rust 测试与容器构建仍在运行。
+
+本机使用独立模拟 API 做浏览器视觉与交互检查：验证首页、监控中心、旧账号/分组地址跳转、号池分区切换，以及采样失败保留旧值和首次失败显示未知值。模拟数据仅在忽略目录 `.runtime` 内，用于 UI 检查，不代表真实业务流量或后端联调通过。
+
 ## 批次 1 的实际行为
 
 - `GET /api/admin/dashboard/realtime` 复用管理端鉴权与 `no-store`，直接读取共享内存计数；每 5 秒轮询不增加数据库查询。

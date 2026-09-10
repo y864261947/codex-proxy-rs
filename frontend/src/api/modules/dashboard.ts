@@ -199,6 +199,7 @@ export function getRealtimeTraffic(signal?: AbortSignal) {
   return request<RealtimeTraffic>({
     url: '/api/admin/dashboard/realtime',
     method: 'GET',
+    timeout: 5000,
     signal,
   })
 }

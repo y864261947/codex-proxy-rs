@@ -55,7 +55,7 @@ fn logical_execution_is_shared_and_released_in_both_phases() {
 
 #[test]
 fn concurrent_recorders_do_not_lose_counts() {
-    let traffic = TrafficMonitor::default();
+    let traffic = TrafficMonitor::with_clock(Arc::new(Clock::default()));
     std::thread::scope(|scope| {
         for _ in 0..8 {
             let traffic = &traffic;

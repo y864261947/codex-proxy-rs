@@ -9,7 +9,7 @@ import { RouterLink, RouterView } from 'vue-router'
         v-for="tab in [{ label: '账号', path: '/pools/accounts' }, { label: '号池分组', path: '/pools/groups' }]"
         :key="tab.path"
         :to="tab.path"
-        class="rounded-cp-control px-4 py-2 text-sm font-emphasis text-cp-text-secondary hover:bg-(--cp-input-bg)"
+        class="rounded-cp px-4 py-2 text-sm font-emphasis text-cp-text-secondary hover:bg-(--cp-input-bg) focus-visible:outline-2 focus-visible:outline-cp-primary"
         active-class="bg-(--cp-input-bg) text-cp-primary-text!"
       >
         {{ tab.label }}
