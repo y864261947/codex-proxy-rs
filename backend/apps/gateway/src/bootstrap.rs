@@ -88,8 +88,11 @@ pub async fn run() -> Result<(), BootstrapError> {
                 provider_openai::api::admin::ApiChannelAdmin::default(),
             )],
         },
-        core.snapshot_control(),
-        core.account_probe(),
+        gateway_admin::AdminRuntimePorts {
+            snapshot: core.snapshot_control(),
+            probe: core.account_probe(),
+            model_catalog: core.model_catalog(),
+        },
         host.client_distribution_resolver(),
         host.system_operations(),
     )

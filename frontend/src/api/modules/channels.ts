@@ -32,6 +32,21 @@ export interface ChannelConnection {
   config: Omit<ResponsesChannelConfig, 'apiKey'> & { hasApiKey: boolean }
 }
 interface ChannelMutation { id: string, configRevision: number }
+export interface ChannelModelPreview {
+  id: string
+  connectionRevision: string
+  generation: string
+  fetchedAt: string
+  added: string[]
+  missing: string[]
+  unchanged: string[]
+}
+export function getChannelModelDiscovery(id: string, signal?: AbortSignal) {
+  return request<ChannelModelPreview | null>({ url: '/api/admin/channels/model-discovery', params: { id }, signal })
+}
+export function discoverChannelModels(id: string, expectedRevision: string, signal?: AbortSignal) {
+  return request<ChannelModelPreview>({ url: '/api/admin/channels/discover-models', method: 'POST', data: { id, expectedRevision }, signal, timeout: 20000 })
+}
 export function getChannels(params: { page: number, pageSize: number, search?: string, provider?: string }, signal?: AbortSignal) {
   return request<ChannelPage>({ url: '/api/admin/channels', params, signal })
 }

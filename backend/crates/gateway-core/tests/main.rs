@@ -1,4 +1,5 @@
 mod account;
+mod catalog;
 mod channel;
 mod diagnostics;
 mod engine;

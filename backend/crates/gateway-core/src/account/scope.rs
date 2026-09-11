@@ -2,45 +2,13 @@
 
 use super::ProviderAccountId;
 use crate::identity::ProviderKind;
-use crate::validation::{IdentifierError, RoutingError};
+use crate::validation::RoutingError;
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
     sync::Arc,
 };
 
-/// `account_groups.id` 的核心值对象。
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AccountGroupId(String);
-
-impl AccountGroupId {
-    /// 校验并创建账号分组 ID。
-    pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
-        let value = value.into();
-        let Some(suffix) = value.strip_prefix("grp_") else {
-            return Err(IdentifierError::MissingPrefix { expected: "grp_" });
-        };
-        if suffix.len() != 32
-            || !suffix
-                .bytes()
-                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        {
-            return Err(IdentifierError::InvalidFormat);
-        }
-        Ok(Self(value))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for AccountGroupId {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
+pub use crate::identity::AccountGroupId;
 
 /// 快照中一个账号的 Provider 与分组归属。
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -18,6 +18,8 @@ export * from './modules/customers'
 // Dashboard 聚合
 export * from './modules/dashboard'
 
+export * from './modules/model-catalog'
+
 export * from './modules/quota-scopes'
 
 // 设置管理

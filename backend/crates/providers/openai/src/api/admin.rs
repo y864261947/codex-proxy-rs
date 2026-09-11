@@ -26,6 +26,19 @@ impl Default for ApiChannelAdmin {
 }
 
 impl ChannelProviderAdmin for ApiChannelAdmin {
+    fn discover_models<'a>(
+        &'a self,
+        config: &'a ProviderChannelConfig,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<gateway_admin::model::channels::DiscoveredChannelModels, ProviderAdminError>,
+    > {
+        Box::pin(async move {
+            let config = ApiChannelConfig::parse(config).map_err(|_| invalid())?;
+            super::discovery::discover(config).await
+        })
+    }
+
     fn provider_kind(&self) -> &ProviderKind {
         &self.provider
     }

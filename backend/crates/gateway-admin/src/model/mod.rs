@@ -7,6 +7,7 @@ pub mod account_groups;
 pub mod accounts;
 pub mod auth;
 pub mod backup;
+pub mod catalog;
 pub mod channels;
 pub mod client_distribution;
 pub mod client_keys;

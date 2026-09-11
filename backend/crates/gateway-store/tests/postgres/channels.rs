@@ -1,7 +1,7 @@
 use gateway_admin::{
     model::{
         MutationActor, MutationContext, PageSize,
-        channels::{ChannelChange, ChannelFields, ChannelListQuery},
+        channels::{ChannelChange, ChannelFields, ChannelListQuery, ChannelModelPreview},
     },
     ports::store::{AdminStoreErrorKind, ChannelStore},
 };
@@ -16,6 +16,222 @@ use gateway_store::postgres::PgChannelRepository;
 use serde_json::{Map, Value};
 
 use super::TestDatabase;
+
+fn discovery(generation: u64, connection_revision: u64) -> ChannelModelPreview {
+    ChannelModelPreview {
+        id: id(),
+        revision: revision(connection_revision),
+        generation,
+        fetched_at: chrono::DateTime::from_timestamp(1_789_099_200, 0).expect("time"),
+        added: vec!["new-model".to_owned()],
+        missing: vec!["missing-model".to_owned()],
+        unchanged: vec!["existing".to_owned()],
+    }
+}
+
+#[tokio::test]
+async fn model_discovery_is_durable_version_fenced_and_ordered_without_config_mutations() {
+    let Some(db) = TestDatabase::create("channel_discovery").await else {
+        return;
+    };
+    let repo = PgChannelRepository::new(db.pool.clone());
+    let mut channel_fields = fields();
+    channel_fields.quota_scope_id = None;
+    let created = repo
+        .change_channel(
+            ChannelChange::Create {
+                id: id(),
+                provider: provider(),
+                fields: channel_fields.clone(),
+                config: config("private-token"),
+            },
+            &context(),
+        )
+        .await
+        .expect("create");
+    assert!(
+        repo.load_model_discovery(&id())
+            .await
+            .expect("empty history")
+            .is_none()
+    );
+    let first = repo
+        .reserve_model_discovery(&id(), revision(1))
+        .await
+        .expect("first query");
+    let second = repo
+        .reserve_model_discovery(&id(), revision(1))
+        .await
+        .expect("second query");
+    assert!(second > first);
+    let newest = discovery(second, 1);
+    repo.save_model_discovery(&newest)
+        .await
+        .expect("newer finished first");
+    assert_eq!(
+        repo.save_model_discovery(&discovery(first, 1))
+            .await
+            .expect_err("late result rejected")
+            .kind(),
+        AdminStoreErrorKind::StaleRevision
+    );
+    let reopened = PgChannelRepository::new(db.pool.clone());
+    assert_eq!(
+        reopened
+            .load_model_discovery(&id())
+            .await
+            .expect("persisted"),
+        Some(newest.clone())
+    );
+    assert_eq!(
+        repo.list_channels(query())
+            .await
+            .expect("config unchanged")
+            .config_revision,
+        created
+    );
+    let audit_count: i64 = sqlx::query_scalar("select count(*) from admin_audit_events")
+        .fetch_one(&db.pool)
+        .await
+        .expect("audit count");
+    assert_eq!(audit_count, 1);
+    let third = repo
+        .reserve_model_discovery(&id(), revision(1))
+        .await
+        .expect("third query");
+    sqlx::query("alter table channel_model_discoveries add constraint reject_discovery_write check (generation < 0) not valid")
+        .execute(&db.pool).await.expect("simulate failed write");
+    assert!(
+        repo.save_model_discovery(&discovery(third, 1))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repo.load_model_discovery(&id())
+            .await
+            .expect("failure retained success"),
+        Some(newest.clone())
+    );
+    sqlx::query("alter table channel_model_discoveries drop constraint reject_discovery_write")
+        .execute(&db.pool)
+        .await
+        .expect("recover");
+    repo.change_channel(
+        ChannelChange::Update {
+            id: id(),
+            expected_revision: revision(1),
+            fields: channel_fields,
+            replacement_config: Some(config("rotated-token")),
+        },
+        &context(),
+    )
+    .await
+    .expect("rotate");
+    assert_eq!(
+        repo.save_model_discovery(&discovery(third, 1))
+            .await
+            .expect_err("rotation during query")
+            .kind(),
+        AdminStoreErrorKind::StaleRevision
+    );
+    assert_eq!(
+        repo.reserve_model_discovery(&id(), revision(1))
+            .await
+            .expect_err("stale start")
+            .kind(),
+        AdminStoreErrorKind::StaleRevision
+    );
+    assert_eq!(
+        repo.load_model_discovery(&id())
+            .await
+            .expect("old version still readable"),
+        Some(newest)
+    );
+    let next = repo
+        .reserve_model_discovery(&id(), revision(2))
+        .await
+        .expect("new version query");
+    let mut empty = discovery(next, 2);
+    empty.added.clear();
+    empty.unchanged.clear();
+    repo.save_model_discovery(&empty)
+        .await
+        .expect("empty upstream success persisted");
+    assert_eq!(
+        repo.load_model_discovery(&id())
+            .await
+            .expect("empty snapshot distinct from no history"),
+        Some(empty)
+    );
+    repo.change_channel(
+        ChannelChange::Delete {
+            id: id(),
+            expected_revision: revision(2),
+        },
+        &context(),
+    )
+    .await
+    .expect("delete channel");
+    let count: i64 = sqlx::query_scalar("select count(*) from channel_model_discoveries")
+        .fetch_one(&db.pool)
+        .await
+        .expect("cascaded");
+    assert_eq!(count, 0);
+    assert_eq!(
+        repo.load_model_discovery(&id())
+            .await
+            .expect_err("deleted channel")
+            .kind(),
+        AdminStoreErrorKind::NotFound
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn concurrent_discovery_saves_keep_the_highest_query_generation() {
+    let Some(db) = TestDatabase::create("discovery_race").await else {
+        return;
+    };
+    let repo = PgChannelRepository::new(db.pool.clone());
+    let mut channel_fields = fields();
+    channel_fields.quota_scope_id = None;
+    repo.change_channel(
+        ChannelChange::Create {
+            id: id(),
+            provider: provider(),
+            fields: channel_fields,
+            config: config("fixture-only"),
+        },
+        &context(),
+    )
+    .await
+    .expect("create");
+    let first = discovery(
+        repo.reserve_model_discovery(&id(), revision(1))
+            .await
+            .expect("first"),
+        1,
+    );
+    let second = discovery(
+        repo.reserve_model_discovery(&id(), revision(1))
+            .await
+            .expect("second"),
+        1,
+    );
+    let (older, newer) = tokio::join!(
+        repo.save_model_discovery(&first),
+        repo.save_model_discovery(&second)
+    );
+    newer.expect("newer always accepted");
+    if let Err(error) = older {
+        assert_eq!(error.kind(), AdminStoreErrorKind::StaleRevision);
+    }
+    assert_eq!(
+        repo.load_model_discovery(&id()).await.expect("latest"),
+        Some(second)
+    );
+    db.close().await;
+}
 
 fn id() -> ChannelId {
     ChannelId::new("chan_test").expect("channel")

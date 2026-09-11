@@ -662,3 +662,27 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 `ingressRequestsLastMinute`、`inFlightRequests`、`preparingRequests`、`executingRequests`。
 重试不新增下游逻辑请求，固定账号诊断与 WebSocket 心跳不计入业务请求；进程重启后该实时窗口重新积累。
 历史统计继续使用既有用量接口，实时 RPM 与各级准入 RPM 不是同一个计数器。
+
+### 渠道模型发现与成功记录
+
+`POST /api/admin/channels/discover-models` 使用管理员会话鉴权，响应禁止缓存。请求仅包含 `id` 和字符串 `expectedRevision`；不能临时传入 URL、API Key 或其他连接字段。
+
+- 当前支持 `openai_api` 渠道。Provider 使用该渠道已保存的地址、Key、Organization 和 Project 请求相对路径 `models`，不使用 OAuth 账号或下游认证头，不执行 Responses 生成。
+- 查询前检查渠道连接版本并预留发现序号，成功后在短事务内锁定渠道、复核版本并保存记录。版本不匹配、查询期间更新或删除渠道、较新序号的成功结果已保存时返回 409。初始读取时渠道不存在返回 404，Provider/Store 暂不可用为 503，上游状态或目录格式异常为 502。发现只保存观测记录，不提交配置、不增加配置版本、不写配置变更审计、不发布运行快照。
+- 成功的 `data` 为 `{ id, connectionRevision, generation, fetchedAt, added, missing, unchanged }`。版本和发现序号都是十进制字符串，不得转换成 JS Number；序号由数据库在查询前分配，允许跳号，不按完成时间排序。时间为本次成功查询完成时间。三个数组按上游模型 ID 排序，分别表示相对于该版本已配置列表的新增、本次未发现和重合项；不会随之后的配置变更重算。`missing` 不表示应删除，也不是关停证据。
+- 第一版只接受完整单页的 `object: "list"`、`data: [{ id }]` 合同。限制 15 秒、2 MiB 响应和 1000 项；拒绝重定向、重复或非法 ID、非 200 状态、未知顶层字段、`Link` 响应头以及正文分页续页信号，不返回部分结果。尚不支持分页渠道；未知格式失败不影响本地已配置模型。模型条目上的额外能力/价格字段不作为能力或定价证据。
+- 页面入口为“上游渠道 → 编辑 → 上游模型发现”。查询显式触发；选择新增模型后只追加到编辑草稿，最后通过原 `/channels/update` 版本检查、审计事务与发布链保存。保留未发现的旧模型，不自动授权接入分组或证明模型支持 Responses。
+- `GET /api/admin/channels/model-discovery?id=...` 使用同样的管理员鉴权和禁止缓存合同，只读本地最新成功记录，不读取渠道凭据或请求上游。已有渠道但从未成功发现时 `data` 为 null；有记录时返回上述对象，包括旧连接版本的记录。不存在的渠道返回 404，存储暂不可用返回 503。
+- 每个渠道只保留一个最新成功记录，成功且保存完成才返回 POST 成功；上游失败或保存事务回滚不覆盖旧记录。较早启动的查询不能覆盖已保存的较新成功结果。超时或响应丢失导致保存结果不确定时，可通过 GET 重新读取确认，不必立即重查上游。删除渠道同步删除该记录。
+- 打开编辑窗口自动读取本地记录；手动查询才访问上游。失败保留上次显示但禁止添加，成功重新读取或查询后恢复；旧连接版本记录始终只读，须查询当前版本才能添加。未保存连接更改时禁用发现。关闭窗口丢弃草稿，不删除成功记录；空发现结果与从未成功发现分别展示。尚无多版本发现历史、失败尝试历史或定时同步。
+
+### 管理运行模型目录
+
+`GET /api/admin/model-catalog` 使用管理员会话鉴权并返回 `Cache-Control: no-store`，不使用 Client Key。只读取当前运行快照，不触发上游发现或测试。
+
+- 查询：`page` 默认 1 且必须大于 0；`pageSize` 默认 20、范围 1–200；可选 `search`（最多 256 字节）、`provider`、`sourceKind`、`configurationReady`（布尔）。未知字段、非法枚举或分页参数返回 400，快照不可用返回 503 而非空目录。
+- `data` 包含 `items`、筛选后 `total`、`configRevision`、`providerGenerations` 和全目录 `providers`。配置版本、连接版本和目录代数均为十进制字符串，客户端不得转换成 JS Number。
+- 每项包含 `identityKey`、`provider`、`upstreamModel`、`publicNames`、展示名称/描述、`source`、`configurationReady`、操作/能力和上下文/输出上限。`identityKey` 为不透明稳定行键，同名模型跨来源分别保留；公开名称解析映射链，被映射覆盖的原模型名不自动视为其公开名称。
+- `source.kind` 为 `channel`、`account_pool`、`unpooled` 或 `provider_catalog`；最后一种表示适配器有模型目录但没有账号来源，不代表可调用。来源包含可空的 `id`、`name`、`connectionRevision`、默认优先级/权重、并发/RPM 和共享配额 ID，不含连接配置或凭据。来源容量 0 表示不限，未知值为 null。
+- `features` 固定列出 `tools`、`vision`、`reasoning`、`json_schema`、`native_continuation`，值为 `native`、`emulated`、`unsupported` 或 `unknown`；能力缺失保持未知，即使 `upstreamValidatesFeatures` 为 true 也不能推断为支持。能力来自适配器目录，不是每账号实测证据。
+- 配置就绪仅反映来源启停/共享配额配置及账号来源存在性，不验证健康、凭据、余额、客户授权或生成成功。停用渠道若不在运行快照中不会列出；此接口不是所有持久化配置的完整目录，也不返回价格、上游同步时间或虚构测试结果。

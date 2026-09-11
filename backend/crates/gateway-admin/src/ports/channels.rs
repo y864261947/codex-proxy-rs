@@ -2,12 +2,21 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use futures::future::BoxFuture;
 use gateway_core::{channel::ProviderChannelConfig, identity::ProviderKind};
 
 use super::provider::{ProviderAdminError, ProviderAdminErrorKind};
 use crate::model::provider_credentials::ProviderDocument;
 
 pub trait ChannelProviderAdmin: Send + Sync {
+    fn discover_models<'a>(
+        &'a self,
+        _config: &'a ProviderChannelConfig,
+    ) -> BoxFuture<'a, Result<crate::model::channels::DiscoveredChannelModels, ProviderAdminError>>
+    {
+        Box::pin(async { Err(ProviderAdminError::new(ProviderAdminErrorKind::Unsupported)) })
+    }
+
     fn provider_kind(&self) -> &ProviderKind;
 
     /// 当前配置仅用于更新合并；None 表示必须提交完整新连接配置。

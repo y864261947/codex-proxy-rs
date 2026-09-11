@@ -2,6 +2,7 @@
 import {
   Activity,
   ArrowUpCircle,
+  Boxes,
   ChartNoAxesColumn,
   Info,
   KeyRound,
@@ -61,6 +62,7 @@ const navItems = [
   { label: '上游渠道', icon: Plug, path: '/channels' },
   { label: '自建号池', icon: Users, path: '/pools' },
   { label: '下游接入', icon: KeyRound, path: '/access' },
+  { label: '模型管理', icon: Boxes, path: '/models' },
   { label: '监控中心', icon: Activity, path: '/monitoring' },
   { label: '请求与用量', icon: ChartNoAxesColumn, path: '/usage' },
   { label: '主题设置', icon: Palette, path: '/theme' },

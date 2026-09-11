@@ -6,7 +6,8 @@ use gateway_admin::{
     model::{
         AdminErrorKind, MutationActor, MutationContext, Revision,
         channels::{
-            ChannelChange, ChannelFields, ChannelListQuery, ChannelPage, NewChannel, UpdateChannel,
+            ChannelChange, ChannelFields, ChannelListQuery, ChannelModelPreview, ChannelPage,
+            NewChannel, UpdateChannel,
         },
         provider_credentials::ProviderDocument,
     },
@@ -30,6 +31,22 @@ use super::{AdminHarness, UnavailableStore, unavailable};
 
 #[async_trait]
 impl ChannelStore for UnavailableStore {
+    async fn reserve_model_discovery(
+        &self,
+        _: &ChannelId,
+        _: ChannelRevision,
+    ) -> AdminStoreResult<u64> {
+        Err(unavailable("channel"))
+    }
+    async fn save_model_discovery(&self, _: &ChannelModelPreview) -> AdminStoreResult<()> {
+        Err(unavailable("channel"))
+    }
+    async fn load_model_discovery(
+        &self,
+        _: &ChannelId,
+    ) -> AdminStoreResult<Option<ChannelModelPreview>> {
+        Err(unavailable("channel"))
+    }
     async fn list_channels(&self, _: ChannelListQuery) -> AdminStoreResult<ChannelPage> {
         Err(unavailable("channel"))
     }
@@ -57,10 +74,65 @@ struct ChannelState {
     stored: Option<StoredChannel>,
     commits: u64,
     reject: bool,
+    generation: u64,
+    discovery: Option<ChannelModelPreview>,
 }
 
 #[async_trait]
 impl ChannelStore for MemoryChannels {
+    async fn reserve_model_discovery(
+        &self,
+        id: &ChannelId,
+        revision: ChannelRevision,
+    ) -> AdminStoreResult<u64> {
+        let mut state = self.state.lock().expect("state");
+        if !state
+            .stored
+            .as_ref()
+            .is_some_and(|stored| stored.id == *id && stored.revision == revision)
+        {
+            return Err(discovery_conflict());
+        }
+        state.generation += 1;
+        Ok(state.generation)
+    }
+    async fn save_model_discovery(&self, preview: &ChannelModelPreview) -> AdminStoreResult<()> {
+        let mut state = self.state.lock().expect("state");
+        if state.reject {
+            return Err(unavailable("channel"));
+        }
+        if !state
+            .stored
+            .as_ref()
+            .is_some_and(|stored| stored.id == preview.id && stored.revision == preview.revision)
+            || state
+                .discovery
+                .as_ref()
+                .is_some_and(|old| old.generation >= preview.generation)
+        {
+            return Err(discovery_conflict());
+        }
+        preview.validate().expect("valid snapshot");
+        state.discovery = Some(preview.clone());
+        Ok(())
+    }
+    async fn load_model_discovery(
+        &self,
+        id: &ChannelId,
+    ) -> AdminStoreResult<Option<ChannelModelPreview>> {
+        let state = self.state.lock().expect("state");
+        if state.reject {
+            return Err(unavailable("channel"));
+        }
+        if !state.stored.as_ref().is_some_and(|stored| stored.id == *id) {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::NotFound,
+                "channel",
+                "missing",
+            ));
+        }
+        Ok(state.discovery.clone())
+    }
     async fn list_channels(&self, _: ChannelListQuery) -> AdminStoreResult<ChannelPage> {
         Err(unavailable("unused list"))
     }
@@ -142,6 +214,7 @@ impl ChannelStore for MemoryChannels {
                     ));
                 }
                 state.stored = None;
+                state.discovery = None;
             }
         }
         state.commits += 1;
@@ -151,6 +224,180 @@ impl ChannelStore for MemoryChannels {
 
 struct TestProvider {
     kind: ProviderKind,
+}
+
+fn discovery_conflict() -> AdminStoreError {
+    AdminStoreError::new(
+        AdminStoreErrorKind::StaleRevision,
+        "channel",
+        "stale discovery",
+    )
+}
+
+struct DiscoveryProvider {
+    inner: TestProvider,
+    store: Arc<MemoryChannels>,
+    mode: std::sync::atomic::AtomicU8,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+impl ChannelProviderAdmin for DiscoveryProvider {
+    fn provider_kind(&self) -> &ProviderKind {
+        self.inner.provider_kind()
+    }
+    fn prepare_config(
+        &self,
+        input: &ProviderDocument,
+        current: Option<&ProviderChannelConfig>,
+    ) -> Result<ProviderChannelConfig, ProviderAdminError> {
+        self.inner.prepare_config(input, current)
+    }
+    fn public_config(
+        &self,
+        config: &ProviderChannelConfig,
+    ) -> Result<ProviderDocument, ProviderAdminError> {
+        self.inner.public_config(config)
+    }
+    fn discover_models<'a>(
+        &'a self,
+        _: &'a ProviderChannelConfig,
+    ) -> BoxFuture<
+        'a,
+        Result<gateway_admin::model::channels::DiscoveredChannelModels, ProviderAdminError>,
+    > {
+        Box::pin(async move {
+            use std::sync::atomic::Ordering;
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            match self.mode.load(Ordering::SeqCst) {
+                1 => return Err(ProviderAdminError::new(ProviderAdminErrorKind::BadGateway)),
+                2 => {
+                    self.store
+                        .state
+                        .lock()
+                        .expect("state")
+                        .stored
+                        .as_mut()
+                        .expect("stored")
+                        .revision = rev(2)
+                }
+                _ => {}
+            }
+            Ok(gateway_admin::model::channels::DiscoveredChannelModels {
+                configured: ["existing", "missing"]
+                    .map(|id| gateway_core::routing::UpstreamModelId::new(id).expect("id"))
+                    .into(),
+                discovered: ["existing", "new-model"]
+                    .map(|id| gateway_core::routing::UpstreamModelId::new(id).expect("id"))
+                    .into(),
+            })
+        })
+    }
+}
+
+#[tokio::test]
+async fn discovery_persists_only_success_without_changing_config_and_rejects_stale_versions() {
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+    let store = Arc::new(MemoryChannels::default());
+    let provider = Arc::new(DiscoveryProvider {
+        inner: TestProvider { kind: kind() },
+        store: store.clone(),
+        mode: AtomicU8::new(0),
+        calls: AtomicUsize::new(0),
+    });
+    let services = AdminHarness::new()
+        .channels(store.clone(), provider.clone())
+        .build()
+        .await;
+    let service = services.channels();
+    let created = service
+        .create(
+            &context(),
+            NewChannel {
+                provider: kind(),
+                fields: fields(),
+                config: document(json!({"secret":"private-token"})),
+            },
+        )
+        .await
+        .expect("create");
+    assert!(
+        service
+            .last_model_discovery(&created.id)
+            .await
+            .expect("no discovery")
+            .is_none()
+    );
+    let preview = service
+        .discover_models(&created.id, rev(1))
+        .await
+        .expect("preview");
+    assert_eq!(preview.revision, rev(1));
+    assert_eq!(preview.added, ["new-model"]);
+    assert_eq!(preview.missing, ["missing"]);
+    assert_eq!(preview.unchanged, ["existing"]);
+    assert_eq!(
+        service
+            .last_model_discovery(&created.id)
+            .await
+            .expect("restore"),
+        Some(preview.clone())
+    );
+    assert_eq!(store.state.lock().expect("state").commits, 1);
+    assert!(!format!("{preview:?}").contains("private-token"));
+    assert_eq!(
+        service
+            .discover_models(&created.id, rev(2))
+            .await
+            .expect_err("stale before send")
+            .kind(),
+        AdminErrorKind::Conflict
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 1);
+    provider.mode.store(1, Ordering::SeqCst);
+    assert_eq!(
+        service
+            .discover_models(&created.id, rev(1))
+            .await
+            .expect_err("failed query")
+            .kind(),
+        AdminErrorKind::BadGateway
+    );
+    assert_eq!(store.state.lock().expect("state").commits, 1);
+    provider.mode.store(2, Ordering::SeqCst);
+    assert_eq!(
+        service
+            .discover_models(&created.id, rev(1))
+            .await
+            .expect_err("stale during query")
+            .kind(),
+        AdminErrorKind::Conflict
+    );
+    assert_eq!(store.state.lock().expect("state").commits, 1);
+    assert_eq!(
+        service
+            .last_model_discovery(&created.id)
+            .await
+            .expect("retained stale snapshot"),
+        Some(preview.clone())
+    );
+    provider.mode.store(0, Ordering::SeqCst);
+    store.state.lock().expect("state").reject = true;
+    assert_eq!(
+        service
+            .discover_models(&created.id, rev(2))
+            .await
+            .expect_err("failed persistence")
+            .kind(),
+        AdminErrorKind::Unavailable
+    );
+    store.state.lock().expect("state").reject = false;
+    assert_eq!(
+        service
+            .last_model_discovery(&created.id)
+            .await
+            .expect("old success not overwritten"),
+        Some(preview)
+    );
 }
 impl ChannelProviderAdmin for TestProvider {
     fn provider_kind(&self) -> &ProviderKind {

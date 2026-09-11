@@ -150,6 +150,7 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    model_catalog: Arc<dyn use_case::catalog::ModelCatalogService>,
     channels: Arc<dyn use_case::channels::ChannelService>,
     customers: Arc<dyn use_case::customers::CustomerService>,
     quota_scopes: Arc<dyn use_case::quota_scopes::QuotaScopeService>,
@@ -168,6 +169,11 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    #[must_use]
+    pub fn model_catalog(&self) -> &dyn use_case::catalog::ModelCatalogService {
+        self.model_catalog.as_ref()
+    }
+
     #[must_use]
     pub fn channels(&self) -> &dyn use_case::channels::ChannelService {
         self.channels.as_ref()
@@ -260,6 +266,12 @@ impl AdminBundle {
     }
 }
 
+pub struct AdminRuntimePorts {
+    pub snapshot: Arc<dyn SnapshotControl>,
+    pub probe: Arc<dyn AccountProbe>,
+    pub model_catalog: gateway_core::catalog::SharedModelCatalogReader,
+}
+
 /// 账号与 API 渠道贡献分别注册，不以虚构账号承载渠道凭据。
 pub struct ProviderAdminContributions {
     pub accounts: Vec<Arc<dyn ProviderAdmin>>,
@@ -275,11 +287,15 @@ pub async fn initialize(
     mut config: AdminConfig,
     store: AdminStorePorts,
     providers: ProviderAdminContributions,
-    snapshot: Arc<dyn SnapshotControl>,
-    probe: Arc<dyn AccountProbe>,
+    runtime: AdminRuntimePorts,
     client_distribution: Arc<dyn ClientDistributionResolver>,
     system: Arc<dyn SystemOperations>,
 ) -> Result<AdminBundle, AdminError> {
+    let AdminRuntimePorts {
+        snapshot,
+        probe,
+        model_catalog,
+    } = runtime;
     config
         .resolve_and_validate(Path::new("."))
         .map_err(|error| AdminError::invalid(error.to_string()))?;
@@ -322,6 +338,9 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        model_catalog: Arc::new(use_case::catalog::DefaultModelCatalogService::new(
+            model_catalog,
+        )),
         quota_scopes: Arc::new(use_case::quota_scopes::DefaultQuotaScopeService::new(
             store.quota_scopes(),
             snapshot.clone(),

@@ -4,6 +4,7 @@
 //! 具体客户端协议和具体 Provider 都通过外层 adapter 接入。
 
 pub mod account;
+pub mod catalog;
 pub mod channel;
 pub mod diagnostics;
 pub mod engine;
@@ -89,6 +90,7 @@ impl CoreStorePorts {
 }
 
 pub struct CoreBundle {
+    model_catalog: catalog::SharedModelCatalogReader,
     traffic: TrafficMonitor,
     execution: Arc<dyn ExecutionService>,
     snapshot_control: Arc<dyn SnapshotControl>,
@@ -98,6 +100,11 @@ pub struct CoreBundle {
 }
 
 impl CoreBundle {
+    #[must_use]
+    pub fn model_catalog(&self) -> catalog::SharedModelCatalogReader {
+        Arc::clone(&self.model_catalog)
+    }
+
     #[must_use]
     pub fn traffic_monitor(&self) -> TrafficMonitor {
         self.traffic.clone()
@@ -169,8 +176,10 @@ pub async fn initialize(
     let execution: Arc<dyn ExecutionService> = service.clone();
     let account_probe: Arc<dyn AccountProbe> = service;
     let snapshot_control: Arc<dyn SnapshotControl> = publisher;
+    let model_catalog: catalog::SharedModelCatalogReader = Arc::new(snapshots.clone());
     let health_probes: Vec<Arc<dyn HealthProbe>> = vec![Arc::new(snapshots)];
     Ok(CoreBundle {
+        model_catalog,
         traffic,
         execution,
         snapshot_control,

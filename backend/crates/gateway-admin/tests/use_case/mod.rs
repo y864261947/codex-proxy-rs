@@ -2,6 +2,7 @@ mod account_groups;
 mod accounts;
 mod auth;
 mod backup;
+mod catalog;
 mod channels;
 mod client_keys;
 mod observability;
@@ -143,6 +144,7 @@ pub(super) struct AdminHarness {
     backup: BackupStorePorts,
     channels: Arc<dyn gateway_admin::ports::store::ChannelStore>,
     channel_providers: Vec<Arc<dyn gateway_admin::ports::channels::ChannelProviderAdmin>>,
+    model_catalog: gateway_core::catalog::SharedModelCatalogReader,
     snapshot: Arc<dyn SnapshotControl>,
     providers: Vec<Arc<dyn ProviderAdmin>>,
     probe: Arc<dyn AccountProbe>,
@@ -170,6 +172,7 @@ impl AdminHarness {
                 Arc::new(UnavailableProvider::new("openai")),
                 Arc::new(UnavailableProvider::new("xai")),
             ],
+            model_catalog: Arc::new(gateway_core::runtime::RuntimeSnapshotHandle::default()),
             probe: Arc::new(UnavailableProbe),
             system: Arc::new(UnavailableSystem),
         }
@@ -177,6 +180,14 @@ impl AdminHarness {
 
     pub(super) fn default_password(mut self, password: &str) -> Self {
         self.default_password = password.to_owned();
+        self
+    }
+
+    pub(super) fn model_catalog(
+        mut self,
+        reader: gateway_core::catalog::SharedModelCatalogReader,
+    ) -> Self {
+        self.model_catalog = reader;
         self
     }
 
@@ -288,8 +299,11 @@ impl AdminHarness {
                 accounts: self.providers,
                 channels: self.channel_providers,
             },
-            self.snapshot,
-            self.probe,
+            gateway_admin::AdminRuntimePorts {
+                snapshot: self.snapshot,
+                probe: self.probe,
+                model_catalog: self.model_catalog,
+            },
             Arc::new(NoopClientDistribution),
             self.system,
         )

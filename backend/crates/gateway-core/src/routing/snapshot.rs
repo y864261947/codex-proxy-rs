@@ -580,6 +580,113 @@ pub struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    #[must_use]
+    pub fn model_catalog(&self) -> crate::catalog::ModelCatalogSnapshot {
+        use super::source::SourceId;
+        use crate::catalog::{CatalogModel, CatalogModelKey, ModelCatalogSnapshot};
+        let public_names = |model: &UpstreamModelId| {
+            std::iter::once(model.as_str().to_owned())
+                .chain(self.model_mappings.keys().cloned())
+                .filter(|name| self.mapped_model(name) == model.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let mut items = Vec::new();
+        for models in self.channel_models.values() {
+            for model in models.values() {
+                let binding = model.channel_binding().expect("channel catalog binding");
+                let source = SourceId::Channel(binding.id().clone());
+                let policy = self.source_policy(&source);
+                items.push(CatalogModel {
+                    key: CatalogModelKey {
+                        provider: model.provider.clone(),
+                        upstream_model: model.upstream_model.clone(),
+                        source: Some(source.clone()),
+                    },
+                    public_names: public_names(&model.upstream_model),
+                    source: Some(policy.map_or_else(
+                        || super::source::SourceSnapshot::unnamed(source),
+                        super::source::SourcePolicy::snapshot,
+                    )),
+                    source_controls: policy.map(|policy| policy.controls().clone()),
+                    configuration_ready: policy
+                        .is_some_and(|policy| self.source_is_available(policy)),
+                    has_account_source: false,
+                    connection_revision: Some(binding.revision()),
+                    capabilities: model.capabilities.clone(),
+                    presentation: model.presentation.clone(),
+                });
+            }
+        }
+        let unpooled_scope = self.all_account_scope().only_unpooled();
+        let unpooled_providers = unpooled_scope.provider_kinds();
+        for (provider, models) in self.provider_models.iter() {
+            let pools = self
+                .source_policies
+                .values()
+                .filter(|policy| match policy.id() {
+                    SourceId::AccountPool(pool) => self
+                        .account_directory
+                        .providers_for_groups([pool])
+                        .contains(provider),
+                    SourceId::Channel(_) => false,
+                })
+                .collect::<Vec<_>>();
+            for (model, capabilities) in models {
+                let presentation = self
+                    .provider_model_presentations
+                    .get(provider)
+                    .and_then(|models| models.get(model))
+                    .cloned();
+                for policy in &pools {
+                    items.push(CatalogModel {
+                        key: CatalogModelKey {
+                            provider: provider.clone(),
+                            upstream_model: model.clone(),
+                            source: Some(policy.id().clone()),
+                        },
+                        public_names: public_names(model),
+                        source: Some(policy.snapshot()),
+                        source_controls: Some(policy.controls().clone()),
+                        configuration_ready: self.source_is_available(policy),
+                        has_account_source: true,
+                        connection_revision: None,
+                        capabilities: capabilities.clone(),
+                        presentation: presentation.clone(),
+                    });
+                }
+                if unpooled_providers.contains(provider) || pools.is_empty() {
+                    items.push(CatalogModel {
+                        key: CatalogModelKey {
+                            provider: provider.clone(),
+                            upstream_model: model.clone(),
+                            source: None,
+                        },
+                        public_names: public_names(model),
+                        source: None,
+                        source_controls: None,
+                        configuration_ready: unpooled_providers.contains(provider),
+                        has_account_source: unpooled_providers.contains(provider),
+                        connection_revision: None,
+                        capabilities: capabilities.clone(),
+                        presentation,
+                    });
+                }
+            }
+        }
+        items.sort_by(|first, second| first.key.cmp(&second.key));
+        ModelCatalogSnapshot {
+            config_revision: self.revision,
+            provider_generations: self
+                .provider_catalog_generations
+                .iter()
+                .map(|(provider, generation)| (provider.clone(), generation.get()))
+                .collect(),
+            items,
+        }
+    }
+
     /// 校验 Provider、实时模型目录和 Client API Key，并构建快照。
     pub fn new(
         revision: ConfigRevision,

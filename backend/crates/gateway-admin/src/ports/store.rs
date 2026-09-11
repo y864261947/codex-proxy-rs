@@ -86,6 +86,20 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 
 #[async_trait]
 pub trait ChannelStore: Send + Sync {
+    async fn reserve_model_discovery(
+        &self,
+        id: &gateway_core::identity::ChannelId,
+        revision: gateway_core::channel::ChannelRevision,
+    ) -> AdminStoreResult<u64>;
+    async fn save_model_discovery(
+        &self,
+        preview: &crate::model::channels::ChannelModelPreview,
+    ) -> AdminStoreResult<()>;
+    async fn load_model_discovery(
+        &self,
+        id: &gateway_core::identity::ChannelId,
+    ) -> AdminStoreResult<Option<crate::model::channels::ChannelModelPreview>>;
+
     /// 包括停用渠道，仅转交对应 Provider 做编辑合并和脱敏投影。
     async fn load_channel_for_edit(
         &self,

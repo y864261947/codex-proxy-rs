@@ -5,9 +5,9 @@ use std::{
     fmt,
 };
 
+use super::SourcePreferenceOverride;
 use crate::account::scope::AccountGroupId;
-use crate::identity::ChannelId;
-use crate::routing::source::{SourceId, SourcePreferenceOverride};
+use crate::identity::{ChannelId, SourceId};
 use crate::validation::{IdentifierError, validate_text};
 
 use super::RateLimits;

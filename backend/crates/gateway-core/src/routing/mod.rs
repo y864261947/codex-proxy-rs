@@ -367,6 +367,26 @@ impl PublicModelProfile {
 
 impl ModelCapabilities {
     #[must_use]
+    pub fn operations(&self) -> &BTreeSet<OperationKind> {
+        &self.operations
+    }
+
+    #[must_use]
+    pub fn features(&self) -> &BTreeMap<Feature, SupportLevel> {
+        &self.features
+    }
+
+    #[must_use]
+    pub const fn max_output_tokens(&self) -> Option<u64> {
+        self.max_output_tokens
+    }
+
+    #[must_use]
+    pub const fn upstream_validates_features(&self) -> bool {
+        self.upstream_validates_features
+    }
+
+    #[must_use]
     pub fn new(operations: BTreeSet<OperationKind>, max_output_tokens: Option<u64>) -> Self {
         Self {
             operations,

@@ -84,3 +84,70 @@ fn validate_scoped_identity(value: &str, prefix: &'static str) -> Result<(), Ide
     }
     Ok(())
 }
+
+/// `account_groups.id` 的核心值对象。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AccountGroupId(String);
+
+impl AccountGroupId {
+    /// 校验并创建账号分组 ID。
+    pub fn new(value: impl Into<String>) -> Result<Self, IdentifierError> {
+        let value = value.into();
+        let Some(suffix) = value.strip_prefix("grp_") else {
+            return Err(IdentifierError::MissingPrefix { expected: "grp_" });
+        };
+        if suffix.len() != 32
+            || !suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(IdentifierError::InvalidFormat);
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for AccountGroupId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// 一次上游尝试所属的实际来源。账号的真实身份独立保存。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SourceId {
+    AccountPool(AccountGroupId),
+    Channel(ChannelId),
+}
+
+impl fmt::Display for SourceId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::AccountPool(id) => write!(formatter, "pool:{id}"),
+            Self::Channel(id) => write!(formatter, "channel:{id}"),
+        }
+    }
+}
+
+impl SourceId {
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::AccountPool(_) => "pool",
+            Self::Channel(_) => "channel",
+        }
+    }
+
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        match self {
+            Self::AccountPool(id) => id.as_str(),
+            Self::Channel(id) => id.as_str(),
+        }
+    }
+}

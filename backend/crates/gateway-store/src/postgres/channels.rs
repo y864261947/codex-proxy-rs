@@ -5,7 +5,10 @@ use futures::future::BoxFuture;
 use gateway_admin::{
     model::{
         MutationContext, Revision,
-        channels::{ChannelChange, ChannelFields, ChannelListQuery, ChannelPage, ChannelRecord},
+        channels::{
+            ChannelChange, ChannelFields, ChannelListQuery, ChannelModelPreview, ChannelPage,
+            ChannelRecord,
+        },
     },
     ports::store::{AdminStoreError, AdminStoreErrorKind, AdminStoreResult, ChannelStore},
 };
@@ -38,6 +41,70 @@ impl PgChannelRepository {
 
 #[async_trait]
 impl ChannelStore for PgChannelRepository {
+    async fn reserve_model_discovery(
+        &self,
+        id: &ChannelId,
+        revision: ChannelRevision,
+    ) -> AdminStoreResult<u64> {
+        let generation: Option<i64> = sqlx::query_scalar(
+            "select nextval('channel_model_discovery_generation') from upstream_channels where id=$1 and connection_revision=$2"
+        ).bind(id.as_str()).bind(signed(revision.get())?).fetch_optional(&self.pool).await.map_err(sql_error)?;
+        generation.ok_or_else(stale_discovery).and_then(unsigned)
+    }
+
+    async fn save_model_discovery(&self, preview: &ChannelModelPreview) -> AdminStoreResult<()> {
+        preview.validate().map_err(|_| invalid())?;
+        let mut tx = self.pool.begin().await.map_err(sql_error)?;
+        let revision: Option<i64> = sqlx::query_scalar(
+            "select connection_revision from upstream_channels where id=$1 for update",
+        )
+        .bind(preview.id.as_str())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(sql_error)?;
+        if revision != Some(signed(preview.revision.get())?) {
+            return Err(stale_discovery());
+        }
+        let saved = sqlx::query("insert into channel_model_discoveries (channel_id, connection_revision, generation, fetched_at, added, missing, unchanged) values ($1,$2,$3,$4,$5,$6,$7) on conflict (channel_id) do update set connection_revision=excluded.connection_revision, generation=excluded.generation, fetched_at=excluded.fetched_at, added=excluded.added, missing=excluded.missing, unchanged=excluded.unchanged where channel_model_discoveries.generation < excluded.generation")
+            .bind(preview.id.as_str()).bind(signed(preview.revision.get())?).bind(signed(preview.generation)?)
+            .bind(preview.fetched_at).bind(&preview.added).bind(&preview.missing).bind(&preview.unchanged)
+            .execute(&mut *tx).await.map_err(sql_error)?;
+        if saved.rows_affected() != 1 {
+            return Err(stale_discovery());
+        }
+        tx.commit().await.map_err(sql_error)
+    }
+
+    async fn load_model_discovery(
+        &self,
+        id: &ChannelId,
+    ) -> AdminStoreResult<Option<ChannelModelPreview>> {
+        let row = sqlx::query("select discovery.* from upstream_channels channel left join channel_model_discoveries discovery on discovery.channel_id=channel.id where channel.id=$1")
+            .bind(id.as_str()).fetch_optional(&self.pool).await.map_err(sql_error)?
+            .ok_or_else(|| AdminStoreError::new(AdminStoreErrorKind::NotFound, "channel", "渠道不存在"))?;
+        if row
+            .try_get::<Option<String>, _>("channel_id")
+            .map_err(sql_error)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let preview = ChannelModelPreview {
+            id: id.clone(),
+            revision: ChannelRevision::new(unsigned(
+                row.try_get("connection_revision").map_err(sql_error)?,
+            )?)
+            .map_err(|_| invalid())?,
+            generation: unsigned(row.try_get("generation").map_err(sql_error)?)?,
+            fetched_at: row.try_get("fetched_at").map_err(sql_error)?,
+            added: row.try_get("added").map_err(sql_error)?,
+            missing: row.try_get("missing").map_err(sql_error)?,
+            unchanged: row.try_get("unchanged").map_err(sql_error)?,
+        };
+        preview.validate().map_err(|_| invalid())?;
+        Ok(Some(preview))
+    }
+
     async fn load_channel_for_edit(
         &self,
         id: &ChannelId,
@@ -275,6 +342,14 @@ fn stored_record(row: &PgRow) -> Result<StoredChannel, ProviderStoreError> {
 
 fn invalid() -> AdminStoreError {
     AdminStoreError::new(AdminStoreErrorKind::Invalid, "channel", "渠道字段不合法")
+}
+
+fn stale_discovery() -> AdminStoreError {
+    AdminStoreError::new(
+        AdminStoreErrorKind::StaleRevision,
+        "channel",
+        "渠道已变更或较新的发现结果已保存，请重新读取",
+    )
 }
 fn unsigned(value: i64) -> AdminStoreResult<u64> {
     u64::try_from(value).map_err(|_| invalid())

@@ -21,6 +21,7 @@ import QuotaScopePicker from '@/components/QuotaScopePicker.vue'
 import UpstreamNavigation from '@/components/UpstreamNavigation.vue'
 import { useChannelsQuery } from '@/composables/useChannelsQuery'
 import { errorMessage } from '@/utils/async'
+import ChannelModelDiscovery from './components/ChannelModelDiscovery.vue'
 
 const { channels, search, loading, loadError, load, resize, pagination } = useChannelsQuery()
 const columns = defineTableColumns<Channel>([
@@ -51,6 +52,9 @@ const modelText = ref('')
 const organization = ref('')
 const project = ref('')
 const hasApiKey = ref(false)
+const savedConnection = ref('')
+const connectionIdentity = computed(() => JSON.stringify([baseUrl.value, organization.value, project.value]))
+const discoveryDisabled = computed(() => saving.value || connectionLoading.value || !!connectionError.value || !!apiKey.value || connectionIdentity.value !== savedConnection.value)
 let editController: AbortController | undefined
 let editSequence = 0
 const lifetime = new AbortController()
@@ -109,6 +113,7 @@ async function loadConnection(channel: Channel) {
     organization.value = result.config.organization || ''
     project.value = result.config.project || ''
     hasApiKey.value = result.config.hasApiKey
+    savedConnection.value = connectionIdentity.value
   }
   catch (error: unknown) {
     if (sequence === editSequence && open.value)
@@ -131,6 +136,7 @@ function edit(channel: Channel | null) {
   organization.value = ''
   project.value = ''
   hasApiKey.value = false
+  savedConnection.value = ''
   connectionError.value = ''
   open.value = true
   if (channel)
@@ -276,6 +282,7 @@ onScopeDispose(() => {
         </BaseFormItem>
         <BaseFormItem label="模型 ID" required class="sm:col-span-2" description="每行一个上游模型 ID，填写此渠道实际提供的模型">
           <BaseTextarea v-model="modelText" aria-label="模型 ID" :rows="4" :disabled="saving || connectionLoading || !!connectionError" />
+          <ChannelModelDiscovery v-if="open && editing?.provider === 'openai_api'" :key="`${editing.id}:${editing.connectionRevision}`" :channel="editing" :disabled="discoveryDisabled" :models="models" @append="modelText = [...new Set([...models, ...$event])].join('\n')" />
         </BaseFormItem>
         <BaseFormItem label="Organization（可选）">
           <BaseInput v-model="organization" aria-label="Organization" :maxlength="256" :disabled="saving || connectionLoading || !!connectionError" />

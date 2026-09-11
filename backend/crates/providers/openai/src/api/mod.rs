@@ -2,5 +2,6 @@
 
 pub mod admin;
 pub mod config;
+mod discovery;
 pub mod provider;
 mod stream;

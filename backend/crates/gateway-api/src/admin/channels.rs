@@ -85,7 +85,7 @@ struct IdQuery {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct DeleteRequest {
+struct VersionedChannelRequest {
     id: String,
     expected_revision: String,
 }
@@ -152,6 +152,32 @@ struct MutationView {
     config_revision: u64,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryView {
+    id: String,
+    connection_revision: String,
+    generation: String,
+    fetched_at: DateTime<Utc>,
+    added: Vec<String>,
+    missing: Vec<String>,
+    unchanged: Vec<String>,
+}
+
+impl From<gateway_admin::model::channels::ChannelModelPreview> for DiscoveryView {
+    fn from(preview: gateway_admin::model::channels::ChannelModelPreview) -> Self {
+        Self {
+            id: preview.id.to_string(),
+            connection_revision: preview.revision.get().to_string(),
+            generation: preview.generation.to_string(),
+            fetched_at: preview.fetched_at,
+            added: preview.added,
+            missing: preview.missing,
+            unchanged: preview.unchanged,
+        }
+    }
+}
+
 pub fn router<S>() -> Router<S>
 where
     S: AdminSessionState + Clone + Send + Sync + 'static,
@@ -160,6 +186,14 @@ where
         .route("/api/admin/channels", get(list::<S>))
         .route("/api/admin/channels/providers", get(providers::<S>))
         .route("/api/admin/channels/connection", get(connection::<S>))
+        .route(
+            "/api/admin/channels/model-discovery",
+            get(last_model_discovery::<S>),
+        )
+        .route(
+            "/api/admin/channels/discover-models",
+            post(discover_models::<S>),
+        )
         .route("/api/admin/channels/create", post(create::<S>))
         .route("/api/admin/channels/update", post(update::<S>))
         .route("/api/admin/channels/delete", post(delete::<S>))
@@ -181,6 +215,49 @@ where
                 .collect::<Vec<_>>(),
         ),
     )
+}
+
+async fn discover_models<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminJson(request): AdminJson<VersionedChannelRequest>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let preview = state
+        .admin_services()
+        .channels()
+        .discover_models(
+            &channel_id(request.id)?,
+            revision(request.expected_revision)?,
+        )
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(DiscoveryView::from(preview)),
+    ))
+}
+
+async fn last_model_discovery<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<IdQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let preview = state
+        .admin_services()
+        .channels()
+        .last_model_discovery(&channel_id(query.id)?)
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(preview.map(DiscoveryView::from)),
+    ))
 }
 
 async fn list<S>(
@@ -326,7 +403,7 @@ where
 async fn delete<S>(
     auth: AdminAuth,
     State(state): State<S>,
-    AdminJson(request): AdminJson<DeleteRequest>,
+    AdminJson(request): AdminJson<VersionedChannelRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
     S: AdminSessionState + Send + Sync,

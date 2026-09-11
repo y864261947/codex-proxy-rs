@@ -7,9 +7,53 @@ use gateway_core::{
     policy::RateLimits,
     routing::source::{SourceId, SourcePolicy, SourcePreference},
 };
+use std::collections::BTreeSet;
 
 use super::provider_credentials::ProviderDocument;
 use super::{AdminError, PageSize, Revision};
+
+#[derive(Debug, Clone)]
+pub struct DiscoveredChannelModels {
+    pub configured: BTreeSet<gateway_core::routing::UpstreamModelId>,
+    pub discovered: BTreeSet<gateway_core::routing::UpstreamModelId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelModelPreview {
+    pub id: ChannelId,
+    pub revision: ChannelRevision,
+    pub generation: u64,
+    pub fetched_at: DateTime<Utc>,
+    pub added: Vec<String>,
+    pub missing: Vec<String>,
+    pub unchanged: Vec<String>,
+}
+
+impl ChannelModelPreview {
+    pub fn validate(&self) -> Result<(), AdminError> {
+        if self.generation == 0
+            || self.generation > i64::MAX as u64
+            || self.added.len() + self.unchanged.len() > 1000
+            || !(1..=1000).contains(&(self.missing.len() + self.unchanged.len()))
+        {
+            return Err(AdminError::invalid("发现快照数量或顺序不合法"));
+        }
+        let mut seen = BTreeSet::new();
+        for values in [&self.added, &self.missing, &self.unchanged] {
+            if values.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(AdminError::invalid("发现快照必须有序且不重复"));
+            }
+            for value in values {
+                if value.trim() != value || !seen.insert(value) {
+                    return Err(AdminError::invalid("发现快照模型集合不合法"));
+                }
+                gateway_core::routing::UpstreamModelId::new(value.clone())
+                    .map_err(|_| AdminError::invalid("发现快照模型 ID 不合法"))?;
+            }
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct NewChannel {

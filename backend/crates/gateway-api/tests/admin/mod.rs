@@ -131,6 +131,7 @@ mod access_groups;
 mod account_groups;
 mod accounts;
 mod auth;
+mod catalog;
 mod channels;
 mod client_keys;
 mod customers;
@@ -143,6 +144,7 @@ mod wire;
 
 pub(super) struct AdminTestFixture {
     pub services: AdminServices,
+    pub model_catalog: gateway_core::runtime::RuntimeSnapshotHandle,
     pub auth: Arc<MemoryAuthStore>,
     pub settings: Arc<MemorySettingsStore>,
     pub usage_records: Arc<Mutex<Vec<UsageListRecord>>>,
@@ -159,6 +161,19 @@ impl AdminTestFixture {
     }
 
     pub async fn with_system(system: Arc<dyn SystemOperations>) -> Self {
+        Self::with_channel_store_and_system(None, system).await
+    }
+
+    pub async fn with_channel_store(
+        store: Arc<dyn gateway_admin::ports::store::ChannelStore>,
+    ) -> Self {
+        Self::with_channel_store_and_system(Some(store), Arc::new(UnusedSystem)).await
+    }
+
+    async fn with_channel_store_and_system(
+        channel_store: Option<Arc<dyn gateway_admin::ports::store::ChannelStore>>,
+        system: Arc<dyn SystemOperations>,
+    ) -> Self {
         let api_key = Arc::new(Mutex::new(None));
         let auth = Arc::new(MemoryAuthStore::new(api_key.clone()));
         let settings = Arc::new(MemorySettingsStore::new(api_key));
@@ -178,6 +193,7 @@ impl AdminTestFixture {
             dashboard_observation: Arc::clone(&dashboard_observation),
             dashboard_summary_range: Arc::clone(&dashboard_summary_range),
         });
+        let channel_store = channel_store.unwrap_or_else(|| unused.clone());
         let stores = AdminStorePorts::new(
             AdminAccountStorePorts::new(unused.clone(), unused.clone(), account_groups.clone()),
             auth.clone(),
@@ -189,12 +205,13 @@ impl AdminTestFixture {
             unused.clone(),
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
-            gateway_admin::ports::store::AdminUpstreamStorePorts::new(unused.clone(), unused),
+            gateway_admin::ports::store::AdminUpstreamStorePorts::new(channel_store, unused),
         );
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new("openai")),
             Arc::new(UnusedProvider::new("xai")),
         ];
+        let model_catalog = gateway_core::runtime::RuntimeSnapshotHandle::default();
         let bundle = gateway_admin::initialize(
             AdminConfig {
                 session_ttl_minutes: 60,
@@ -206,8 +223,11 @@ impl AdminTestFixture {
                 accounts: providers,
                 channels: vec![],
             },
-            Arc::new(NoopSnapshot),
-            Arc::new(NoopProbe),
+            gateway_admin::AdminRuntimePorts {
+                snapshot: Arc::new(NoopSnapshot),
+                probe: Arc::new(NoopProbe),
+                model_catalog: Arc::new(model_catalog.clone()),
+            },
             Arc::new(StaticClientDistribution),
             system,
         )
@@ -215,6 +235,7 @@ impl AdminTestFixture {
         .expect("initialize test admin services");
         Self {
             services: bundle.services(),
+            model_catalog,
             auth,
             settings,
             usage_records,

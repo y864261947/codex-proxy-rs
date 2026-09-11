@@ -5,6 +5,9 @@
 mod access;
 mod admission;
 mod client_version;
+mod source;
+
+pub use source::{SourcePreference, SourcePreferenceOverride};
 
 pub use access::{AccessGroupId, AccessGroupPolicy, AccessGroupRouting};
 pub use admission::{AdmissionScope, AdmissionScopeId, CustomerId, CustomerPolicy};
