@@ -10,6 +10,7 @@ use super::{account_scope, plaintext};
 #[test]
 fn exact_public_model_permissions_and_four_independent_scopes_are_frozen() {
     let group = AccessGroupPolicy {
+        routing: Default::default(),
         id: AccessGroupId::new("access_team").expect("access group"),
         enabled: true,
         limits: RateLimits {
@@ -81,6 +82,7 @@ fn access_group_permissions_reject_ambiguous_or_unbounded_configuration() {
         assert!(AccessGroupId::new(id).is_err());
     }
     let mut group = AccessGroupPolicy {
+        routing: Default::default(),
         id: AccessGroupId::new("access_test").expect("group"),
         enabled: true,
         limits: RateLimits::unlimited(),

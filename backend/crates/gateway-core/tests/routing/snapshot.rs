@@ -570,6 +570,7 @@ fn access_groups_freeze_explicit_pools_without_expanding_empty_or_legacy_permiss
         );
         if label != "legacy" {
             policy = policy.with_access_group(Some(AccessGroupPolicy {
+                routing: Default::default(),
                 id: AccessGroupId::new(format!("access_{label}")).expect("access group"),
                 enabled: label != "disabled",
                 limits: RateLimits::unlimited(),

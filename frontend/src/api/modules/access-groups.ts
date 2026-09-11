@@ -1,7 +1,15 @@
 import request from '../request'
 
 export interface AccessGroupRef { id: string, name: string, enabled: boolean }
+export interface AccessGroupSourcePreference {
+  kind: 'account_pool' | 'channel'
+  sourceId: string
+  priority: number | null
+  weight: number | null
+}
 export interface AccessGroupWrite {
+  allowCapacityFallback: boolean
+  sourcePreferences: AccessGroupSourcePreference[]
   allowedModels: string[]
   poolGroupIds: string[]
   channelIds: string[]

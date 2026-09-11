@@ -30,13 +30,15 @@ Redis 多范围键使用同一 hash tag，单次准入/释放可以原子执行�
 
 「下游接入 → 接入分组」定义精确对外模型白名单、显式允许的号池和共享并发/RPM。一个 Key 可同时关联一个客户和一个接入分组，各层独立限制。空模型或空号池表示尚未授权，停用组后拒绝新请求；仍关联 Key 的组不能删除。
 
-管理接口为 `/api/admin/access-groups` 及其 `create/update/delete/assign-key` 子路径，结构与客户一致。创建和更新还要求显式提供 `allowedModels` 与 `poolGroupIds` 数组；赋组要求 `keyId` 与显式的 `accessGroupId`（组 ID 或 `null`）。Key 投影的 `accessGroup` 包含 `id/name/enabled`。
+管理接口为 `/api/admin/access-groups` 及其 `create/update/delete/assign-key` 子路径，结构与客户一致。创建和更新还要求显式提供 `allowedModels`、`poolGroupIds`、`channelIds`、`sourcePreferences` 数组和 `allowCapacityFallback` 布尔值；赋组要求 `keyId` 与显式的 `accessGroupId`（组 ID 或 `null`）。Key 投影的 `accessGroup` 包含 `id/name/enabled`。
 
 组授权在模型别名映射之前检查，模型列表使用相同白名单。分组 Key 调用原生端点也必须提供 Provider 能识别的已授权模型。模型权限和号池范围均不能被直接填写上游模型名绕过。
 
 分配接入分组后使用组内号池权限，保留 Key 原有账号分组绑定；显式解除接入分组会恢复这些旧权限，页面显示恢复范围。请求历史保存准入时的组引用，修改归属不会改变正在执行请求的释放与重启恢复依据。
 
-上述实现覆盖第二批的客户、接入分组与 Key 管理。外部渠道、来源调度及其他层级限额继续按实施记录推进。
+分组可对已授权号池或渠道分别覆盖优先级和权重，留空继承来源默认值；覆盖不改变容量与共享配额。关闭满载回退后，来源/账号容量拒绝只允许同级来源，不会降级到低优先级；故障重试和原生会话锁定规则不变。旧分组迁移后默认允许满载回退。页面保存失败保留输入，取消授权的来源不再提交覆盖。
+
+上述功能的开发、验证和发布状态以 `implementation-progress.md` 为准；不能把已实现视为已上线。
 
 ## 全站请求限额
 

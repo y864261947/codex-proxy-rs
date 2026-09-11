@@ -6,7 +6,7 @@ mod access;
 mod admission;
 mod client_version;
 
-pub use access::{AccessGroupId, AccessGroupPolicy};
+pub use access::{AccessGroupId, AccessGroupPolicy, AccessGroupRouting};
 pub use admission::{AdmissionScope, AdmissionScopeId, CustomerId, CustomerPolicy};
 
 pub use client_version::{

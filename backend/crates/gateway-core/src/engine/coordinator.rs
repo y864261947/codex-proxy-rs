@@ -799,7 +799,7 @@ where
                             self.continuation_attempt,
                             ContinuationAttempt::None | ContinuationAttempt::ReplayAny
                         )
-                        && self.advance_provider_candidate()
+                        && self.advance_provider_candidate(error.kind())
                     {
                         return Ok(Some(PullOutcome::AttemptDiscarded));
                     }
@@ -1007,7 +1007,7 @@ where
         Ok(None)
     }
 
-    fn advance_provider_candidate(&mut self) -> bool {
+    fn advance_provider_candidate(&mut self, error: ProviderErrorKind) -> bool {
         let Some(next) = self.candidate_index.checked_add(1) else {
             return false;
         };
@@ -1024,6 +1024,16 @@ where
         }) else {
             return false;
         };
+        if matches!(
+            error,
+            ProviderErrorKind::SourceCapacityUnavailable
+                | ProviderErrorKind::AccountCapacityUnavailable
+        ) && !self
+            .plan
+            .permits_capacity_fallback(self.candidate_index, next)
+        {
+            return false;
+        }
         self.candidate_index = next;
         true
     }

@@ -1050,3 +1050,122 @@ fn shared_quota_is_required_enabled_and_frozen_for_each_channel_candidate() {
         "duplicates rejected"
     );
 }
+
+#[test]
+fn group_preferences_freeze_order_weights_capacity_policy_and_source_limits() {
+    use gateway_core::{
+        policy::{AccessGroupId, AccessGroupPolicy, AccessGroupRouting},
+        routing::source::SourcePreferenceOverride,
+        routing::{
+            ConfigRevision, ProviderKind, PublicModelId, RoutingContext, RuntimeSnapshot,
+            SourceRoutingTarget,
+        },
+    };
+    use std::collections::{BTreeMap, BTreeSet};
+    let source = |id: &str| SourceId::Channel(ChannelId::new(id).expect("channel"));
+    let limits = RateLimits {
+        max_concurrency: 7,
+        requests_per_minute: 60,
+    };
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        super::scheduling(),
+        vec![ProviderKind::new("openai").expect("provider")],
+        ["chan_a", "chan_b", "chan_c"]
+            .into_iter()
+            .map(|id| {
+                super::model("openai", "shared", super::capabilities())
+                    .with_channel(binding(ChannelId::new(id).expect("channel")))
+            })
+            .collect(),
+        Vec::new(),
+    )
+    .expect("snapshot")
+    .with_source_policies(
+        ["chan_a", "chan_b", "chan_c"]
+            .into_iter()
+            .map(|id| {
+                SourcePolicy::new(
+                    source(id),
+                    true,
+                    SourcePreference::new(10, 3).expect("defaults"),
+                    limits,
+                    None,
+                )
+                .expect("source")
+            })
+            .collect(),
+    )
+    .expect("policies");
+    let mut group = AccessGroupPolicy {
+        id: AccessGroupId::new("access_preferences").expect("group"),
+        enabled: true,
+        limits: RateLimits::unlimited(),
+        allowed_models: BTreeSet::from(["shared".to_owned()]),
+        pool_group_ids: BTreeSet::new(),
+        channel_ids: ["chan_a", "chan_b", "chan_c"]
+            .into_iter()
+            .map(|id| ChannelId::new(id).expect("channel"))
+            .collect(),
+        routing: AccessGroupRouting {
+            allow_capacity_fallback: false,
+            source_preferences: BTreeMap::from([
+                (
+                    source("chan_a"),
+                    SourcePreferenceOverride::new(Some(1), None).expect("priority"),
+                ),
+                (
+                    source("chan_b"),
+                    SourcePreferenceOverride::new(Some(1), Some(100)).expect("weight"),
+                ),
+            ]),
+        },
+    };
+    let model = PublicModelId::new("shared").expect("model");
+    let plan = |group: &AccessGroupPolicy, seed| {
+        snapshot
+            .plan_sources(
+                SourceRoutingTarget::Model(&model),
+                &super::operation(),
+                snapshot.all_account_scope(),
+                &RoutingContext::default(),
+                &AllowedSources::for_access_group(group),
+                seed,
+            )
+            .expect("plan")
+    };
+    let frozen = plan(&group, 42);
+    assert_eq!(frozen.candidates().len(), 3);
+    assert_eq!(frozen.candidates()[2].source(), Some(&source("chan_c")));
+    assert!(frozen.permits_capacity_fallback(0, 1));
+    assert!(!frozen.permits_capacity_fallback(1, 2));
+    for candidate in frozen.candidates() {
+        assert_eq!(candidate.source_controls().limits(), limits);
+    }
+    let a = frozen
+        .candidates()
+        .iter()
+        .find(|candidate| candidate.source() == Some(&source("chan_a")))
+        .expect("A");
+    assert_eq!(a.source_controls().preference().weight(), 3);
+    let weighted = (0..1000)
+        .filter(|seed| plan(&group, *seed).candidates()[0].source() == Some(&source("chan_b")))
+        .count();
+    assert!(
+        weighted > 900,
+        "same-tier weight should dominate: {weighted}"
+    );
+    group.routing.allow_capacity_fallback = true;
+    group.routing.source_preferences.clear();
+    assert!(plan(&group, 42).permits_capacity_fallback(1, 2));
+    assert!(!frozen.permits_capacity_fallback(1, 2));
+    assert_eq!(a.source_controls().preference().priority(), 1);
+    group.routing.source_preferences.insert(
+        source("chan_hidden"),
+        SourcePreferenceOverride::new(Some(1), None).expect("override"),
+    );
+    assert!(group.validate().is_err());
+    assert!(SourcePreferenceOverride::new(None, None).is_err());
+    assert!(SourcePreferenceOverride::new(Some(0), None).is_err());
+    assert!(SourcePreferenceOverride::new(None, Some(0)).is_err());
+}

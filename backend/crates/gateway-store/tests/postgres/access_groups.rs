@@ -28,6 +28,7 @@ fn context() -> MutationContext {
 }
 fn fields(pool: &str) -> AccessGroupFields {
     AccessGroupFields {
+        routing: Default::default(),
         name: "100% Team".to_owned(),
         note: Some("private note".to_owned()),
         enabled: true,
@@ -61,6 +62,14 @@ async fn channel_permissions_are_explicit_atomic_and_preserved_in_frozen_key_sna
     permissions
         .channel_ids
         .insert(ChannelId::new("chan_selected").expect("channel"));
+    permissions.routing.allow_capacity_fallback = false;
+    permissions.routing.source_preferences.insert(
+        gateway_core::routing::source::SourceId::Channel(
+            ChannelId::new("chan_selected").expect("channel"),
+        ),
+        gateway_core::routing::source::SourcePreferenceOverride::new(Some(4), Some(9))
+            .expect("preference"),
+    );
     repository
         .change_access_group(
             AccessGroupChange::Create {
@@ -93,6 +102,7 @@ async fn channel_permissions_are_explicit_atomic_and_preserved_in_frozen_key_sna
         .expect("access");
     assert!(access.pool_group_ids.is_empty());
     assert_eq!(access.channel_ids, permissions.channel_ids);
+    assert_eq!(access.routing, permissions.routing);
     let mut invalid = permissions.clone();
     invalid
         .channel_ids
@@ -124,6 +134,52 @@ async fn channel_permissions_are_explicit_atomic_and_preserved_in_frozen_key_sna
             .await
             .is_err()
     );
+    let mut changed = permissions.clone();
+    changed.routing.allow_capacity_fallback = true;
+    changed.routing.source_preferences.clear();
+    sqlx::query("alter table admin_audit_events add constraint reject_routing_audit check (false) not valid")
+        .execute(&db.pool).await.expect("reject audit");
+    assert!(
+        repository
+            .change_access_group(
+                AccessGroupChange::Update {
+                    id: group(),
+                    fields: changed
+                },
+                &context()
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repository
+            .list_access_groups(query())
+            .await
+            .expect("audit rollback"),
+        initial
+    );
+    sqlx::query("alter table admin_audit_events drop constraint reject_routing_audit")
+        .execute(&db.pool)
+        .await
+        .expect("restore audit");
+    let mut unauthorized = permissions.clone();
+    unauthorized.channel_ids.clear();
+    assert_eq!(
+        repository
+            .change_access_group(
+                AccessGroupChange::Update {
+                    id: group(),
+                    fields: unauthorized
+                },
+                &context()
+            )
+            .await
+            .expect_err("unauthorized override")
+            .kind(),
+        AdminStoreErrorKind::Invalid
+    );
+    permissions.routing.source_preferences.clear();
+    permissions.routing.allow_capacity_fallback = true;
     permissions.channel_ids.clear();
     repository
         .change_access_group(
@@ -147,6 +203,16 @@ async fn channel_permissions_are_explicit_atomic_and_preserved_in_frozen_key_sna
             .channel_ids
             .is_empty()
     );
+    assert!(
+        next.client_api_keys[0]
+            .access_group
+            .as_ref()
+            .expect("group")
+            .routing
+            .allow_capacity_fallback
+    );
+    assert!(!access.routing.allow_capacity_fallback);
+    assert_eq!(access.routing.source_preferences.len(), 1);
     assert_eq!(
         access.channel_ids.len(),
         1,
@@ -404,5 +470,69 @@ async fn key_creation_atomically_applies_customer_and_access_permissions_or_leav
         .await
         .expect("list scoped key");
     assert_eq!(page.items, [record]);
+    db.close().await;
+}
+
+#[tokio::test]
+async fn pool_preference_overrides_round_trip_without_changing_pool_capacity() {
+    use gateway_core::routing::source::{SourceId, SourcePreferenceOverride};
+    let Some(db) = TestDatabase::create("pool_group_routing").await else {
+        return;
+    };
+    let pool = "grp_00000000000000000000000000000001";
+    sqlx::query("insert into account_groups (id,name,color,enabled,created_at,updated_at) values ($1,'Pool','#123456FF',true,now(),now())")
+        .bind(pool).execute(&db.pool).await.expect("pool");
+    let repository = PgAccessGroupRepository::new(db.pool.clone());
+    let mut configured = fields(pool);
+    configured.routing.source_preferences.insert(
+        SourceId::AccountPool(AccountGroupId::new(pool).expect("pool")),
+        SourcePreferenceOverride::new(None, Some(13)).expect("weight only"),
+    );
+    repository
+        .change_access_group(
+            AccessGroupChange::Create {
+                id: group(),
+                fields: configured.clone(),
+            },
+            &context(),
+        )
+        .await
+        .expect("create");
+    assert_eq!(
+        repository
+            .list_access_groups(query())
+            .await
+            .expect("list")
+            .items[0]
+            .fields,
+        configured
+    );
+    let stored: (Option<i32>, Option<i32>) = sqlx::query_as("select priority_override, weight_override from access_group_pools where access_group_id=$1")
+        .bind(group().as_str()).fetch_one(&db.pool).await.expect("relationship");
+    assert_eq!(stored, (None, Some(13)));
+    configured.routing.source_preferences.clear();
+    configured.routing.allow_capacity_fallback = false;
+    repository
+        .change_access_group(
+            AccessGroupChange::Update {
+                id: group(),
+                fields: configured.clone(),
+            },
+            &context(),
+        )
+        .await
+        .expect("reset inheritance");
+    assert_eq!(
+        repository
+            .list_access_groups(query())
+            .await
+            .expect("list")
+            .items[0]
+            .fields,
+        configured
+    );
+    let stored: (Option<i32>, Option<i32>) = sqlx::query_as("select priority_override, weight_override from access_group_pools where access_group_id=$1")
+        .bind(group().as_str()).fetch_one(&db.pool).await.expect("relationship");
+    assert_eq!(stored, (None, None));
     db.close().await;
 }

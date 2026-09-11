@@ -18,8 +18,12 @@ use gateway_admin::model::{
 use gateway_core::account::scope::AccountGroupId;
 use gateway_core::identity::ChannelId;
 use gateway_core::policy::{AccessGroupId, ClientApiKeyId, RateLimits};
+use gateway_core::{
+    policy::AccessGroupRouting,
+    routing::source::{SourceId, SourcePreferenceOverride},
+};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{
     AdminAuth, AdminEnvelope, AdminError, AdminJson, AdminQuery, AdminResponse, AdminSessionState,
@@ -37,6 +41,8 @@ struct ListQuery {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AccessGroupRequest {
+    allow_capacity_fallback: bool,
+    source_preferences: Vec<SourcePreferenceView>,
     channel_ids: Vec<String>,
     allowed_models: BTreeSet<String>,
     pool_group_ids: Vec<String>,
@@ -50,7 +56,34 @@ struct AccessGroupRequest {
 
 impl AccessGroupRequest {
     fn fields(self) -> Result<AccessGroupFields, AdminError> {
+        let mut preferences = BTreeMap::new();
+        if self.source_preferences.len() > 512 {
+            return Err(AdminError::bad_request("来源覆盖数量超限"));
+        }
+        for preference in self.source_preferences {
+            let source = match preference.kind {
+                SourceKindView::AccountPool => SourceId::AccountPool(
+                    AccountGroupId::new(preference.source_id)
+                        .map_err(|_| AdminError::bad_request("号池 ID 不合法"))?,
+                ),
+                SourceKindView::Channel => SourceId::Channel(
+                    ChannelId::new(preference.source_id)
+                        .map_err(|_| AdminError::bad_request("渠道 ID 不合法"))?,
+                ),
+            };
+            let value = SourcePreferenceOverride::new(preference.priority, preference.weight)
+                .map_err(|_| {
+                    AdminError::bad_request("覆盖优先级和权重须为 1–65535，至少填写一项")
+                })?;
+            if preferences.insert(source, value).is_some() {
+                return Err(AdminError::bad_request("来源覆盖重复"));
+            }
+        }
         Ok(AccessGroupFields {
+            routing: AccessGroupRouting {
+                allow_capacity_fallback: self.allow_capacity_fallback,
+                source_preferences: preferences,
+            },
             channel_ids: self
                 .channel_ids
                 .into_iter()
@@ -98,6 +131,8 @@ struct AssignRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccessGroupView {
+    allow_capacity_fallback: bool,
+    source_preferences: Vec<SourcePreferenceView>,
     channel_ids: Vec<String>,
     allowed_models: Vec<String>,
     pool_group_ids: Vec<String>,
@@ -112,9 +147,44 @@ struct AccessGroupView {
     updated_at: DateTime<Utc>,
 }
 
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SourceKindView {
+    AccountPool,
+    Channel,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SourcePreferenceView {
+    kind: SourceKindView,
+    source_id: String,
+    priority: Option<u16>,
+    weight: Option<u16>,
+}
+
 impl From<AccessGroupRecord> for AccessGroupView {
     fn from(record: AccessGroupRecord) -> Self {
         Self {
+            allow_capacity_fallback: record.fields.routing.allow_capacity_fallback,
+            source_preferences: record
+                .fields
+                .routing
+                .source_preferences
+                .into_iter()
+                .map(|(source, preference)| {
+                    let (kind, source_id) = match source {
+                        SourceId::AccountPool(id) => (SourceKindView::AccountPool, id.to_string()),
+                        SourceId::Channel(id) => (SourceKindView::Channel, id.to_string()),
+                    };
+                    SourcePreferenceView {
+                        kind,
+                        source_id,
+                        priority: preference.priority(),
+                        weight: preference.weight(),
+                    }
+                })
+                .collect(),
             channel_ids: record
                 .fields
                 .channel_ids

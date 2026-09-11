@@ -382,6 +382,11 @@ async fn load_client_keys(
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("load snapshot client policies"))?;
+    let ids = rows
+        .iter()
+        .filter_map(|row| row.9.clone())
+        .collect::<Vec<_>>();
+    let routing = super::access_groups::load_access_group_routing(transaction, &ids).await?;
     rows.into_iter()
         .map(|row| {
             let mut key = ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4)?;
@@ -408,6 +413,10 @@ async fn load_client_keys(
                 .9
                 .map(|id| {
                     let group = gateway_core::policy::AccessGroupPolicy {
+                        routing: routing
+                            .get(&id)
+                            .cloned()
+                            .ok_or_else(|| invalid("missing access group routing"))?,
                         channel_ids: row
                             .15
                             .into_iter()

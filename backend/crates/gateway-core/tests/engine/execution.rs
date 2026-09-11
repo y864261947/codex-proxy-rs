@@ -1232,6 +1232,7 @@ fn start_snapshot_with_legacy_pools(
 fn access_group_authorizes_public_alias_before_mapping_and_filters_model_endpoints() {
     use gateway_core::policy::{AccessGroupId, AccessGroupPolicy};
     let snapshot = start_snapshot_with_access_group(Some(AccessGroupPolicy {
+        routing: Default::default(),
         id: AccessGroupId::new("access_alias").expect("group"),
         enabled: true,
         limits: RateLimits::unlimited(),
@@ -1342,6 +1343,7 @@ fn channel_only_access_groups_list_and_route_only_explicit_sources_and_public_mo
         None,
     ] {
         let group = authorized.as_ref().map(|ids| AccessGroupPolicy {
+            routing: Default::default(),
             id: AccessGroupId::new("access_channels").expect("group"),
             enabled: true,
             limits: RateLimits::unlimited(),
@@ -1527,6 +1529,7 @@ fn each_websocket_generation_rechecks_current_limits_permissions_and_snapshot_av
     drop(recorded);
 
     snapshots.publish(start_snapshot_with_access_group(Some(AccessGroupPolicy {
+        routing: Default::default(),
         id: AccessGroupId::new("access_revoked").expect("group"),
         enabled: false,
         limits: RateLimits::unlimited(),
@@ -1726,6 +1729,7 @@ fn health_snapshot(authorized: &[&str]) -> RuntimeSnapshot {
                 RateLimits::unlimited(),
             )
             .with_access_group(Some(AccessGroupPolicy {
+                routing: Default::default(),
                 id: AccessGroupId::new("access_health").expect("group"),
                 enabled: true,
                 allowed_models: BTreeSet::from(["gpt-start".to_owned()]),
@@ -2161,6 +2165,7 @@ fn pool_health_is_independent_from_other_pools_and_legacy_provider_health() {
         .collect();
     let snapshots =
         RuntimeSnapshotHandle::new(start_snapshot_with_access_group(Some(AccessGroupPolicy {
+            routing: Default::default(),
             id: AccessGroupId::new("access_health_pool").expect("group"),
             enabled: true,
             allowed_models: BTreeSet::from(["gpt-start".to_owned()]),

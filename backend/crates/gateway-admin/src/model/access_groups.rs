@@ -13,6 +13,7 @@ use super::{AdminError, PageSize, Revision};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessGroupFields {
+    pub routing: gateway_core::policy::AccessGroupRouting,
     pub name: String,
     pub note: Option<String>,
     pub enabled: bool,
@@ -24,6 +25,9 @@ pub struct AccessGroupFields {
 
 impl AccessGroupFields {
     pub fn validate(&self) -> Result<(), AdminError> {
+        self.routing
+            .validate(&self.pool_group_ids, &self.channel_ids)
+            .map_err(|_| AdminError::invalid("调度覆盖只能配置已授权来源"))?;
         if self.name.is_empty()
             || self.name.trim() != self.name
             || self.name.chars().count() > 128

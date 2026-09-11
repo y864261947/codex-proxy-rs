@@ -85,10 +85,66 @@ async fn access_group_assignment_requires_an_explicit_binding_and_valid_access_g
 }
 
 #[tokio::test]
+async fn access_group_routing_rejects_unauthorized_duplicate_or_invalid_overrides() {
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let valid = json!({"name":"Team", "enabled":true, "maxConcurrency":4, "requestsPerMinute":60,
+        "allowedModels":["model"], "poolGroupIds":[], "channelIds":["chan_selected"],
+        "allowCapacityFallback":false, "sourcePreferences":[]});
+    let preference =
+        json!({"kind":"channel", "sourceId":"chan_selected", "priority":2, "weight":null});
+    for (preferences, expected) in [
+        (json!([preference.clone()]), StatusCode::SERVICE_UNAVAILABLE),
+        (
+            json!([{"kind":"channel","sourceId":"chan_hidden","priority":1}]),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!([preference.clone(), preference]),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!([{"kind":"channel","sourceId":"chan_selected","priority":0}]),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!([{"kind":"channel","sourceId":"chan_selected"}]),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!([{"kind":"channel","sourceId":"chan_selected","weight":65536}]),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+        (
+            json!([{"kind":"other","sourceId":"chan_selected","priority":1}]),
+            StatusCode::UNPROCESSABLE_ENTITY,
+        ),
+    ] {
+        let mut body = valid.clone();
+        body["sourcePreferences"] = preferences;
+        let response = gateway_api::admin::router::<AdminTestState>()
+            .with_state(fixture.state())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/access-groups/create")
+                    .header("x-request-id", "req_access_routing")
+                    .header(header::COOKIE, "cpr_admin_session=valid-session")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), expected, "{body}");
+    }
+}
+
+#[tokio::test]
 async fn access_group_creation_requires_explicit_permissions_and_valid_pool_ids() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
-    let valid = json!({"name":"Team", "enabled":true, "maxConcurrency":4, "requestsPerMinute":60, "allowedModels":["model"], "poolGroupIds":[], "channelIds":[]});
+    let valid = json!({"allowCapacityFallback":true,"sourcePreferences":[],"name":"Team", "enabled":true, "maxConcurrency":4, "requestsPerMinute":60, "allowedModels":["model"], "poolGroupIds":[], "channelIds":[]});
     for (field, value, expected) in [
         ("poolGroupIds", json!(["invalid"]), StatusCode::BAD_REQUEST),
         ("channelIds", json!(["invalid"]), StatusCode::BAD_REQUEST),

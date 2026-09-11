@@ -583,6 +583,7 @@ impl ProviderCandidate {
 /// 一次请求冻结的 Provider 尝试顺序。
 #[derive(Debug, Clone)]
 pub struct RoutingPlan {
+    allow_capacity_fallback: bool,
     config_revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     operation: OperationKind,
@@ -592,6 +593,19 @@ pub struct RoutingPlan {
 }
 
 impl RoutingPlan {
+    #[must_use]
+    pub fn permits_capacity_fallback(&self, current: usize, next: usize) -> bool {
+        self.allow_capacity_fallback
+            || self
+                .candidates
+                .get(current)
+                .zip(self.candidates.get(next))
+                .is_some_and(|(current, next)| {
+                    next.source_controls().preference().priority()
+                        <= current.source_controls().preference().priority()
+                })
+    }
+
     #[must_use]
     pub const fn config_revision(&self) -> ConfigRevision {
         self.config_revision

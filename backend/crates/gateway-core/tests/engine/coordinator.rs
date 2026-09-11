@@ -655,6 +655,14 @@ fn pool_plan_with_limits(
     operation: &Operation,
     limits: gateway_core::policy::RateLimits,
 ) -> RoutingPlan {
+    pool_plan_with_routing(operation, limits, None)
+}
+
+fn pool_plan_with_routing(
+    operation: &Operation,
+    limits: gateway_core::policy::RateLimits,
+    routing: Option<gateway_core::policy::AccessGroupRouting>,
+) -> RoutingPlan {
     use gateway_core::routing::{
         SourceRoutingTarget,
         source::{AllowedSources, SourceId, SourcePolicy, SourcePreference},
@@ -721,13 +729,33 @@ fn pool_plan_with_limits(
             .collect(),
     )
     .expect("policies");
+    let allowed = match routing {
+        Some(routing) => {
+            AllowedSources::for_access_group(&gateway_core::policy::AccessGroupPolicy {
+                routing,
+                id: gateway_core::policy::AccessGroupId::new("access_test").expect("group"),
+                enabled: true,
+                limits: gateway_core::policy::RateLimits::unlimited(),
+                allowed_models: BTreeSet::from(["gpt-5".to_owned()]),
+                pool_group_ids: sources
+                    .iter()
+                    .map(|source| match source {
+                        SourceId::AccountPool(id) => id.clone(),
+                        SourceId::Channel(_) => unreachable!(),
+                    })
+                    .collect(),
+                channel_ids: BTreeSet::new(),
+            })
+        }
+        None => AllowedSources::new(sources),
+    };
     snapshot
         .plan_sources(
             SourceRoutingTarget::Model(&PublicModelId::new("gpt-5").expect("model")),
             operation,
             snapshot.all_account_scope(),
             &RoutingContext::default(),
-            &AllowedSources::new(sources),
+            &allowed,
             0,
         )
         .expect("pool routing")
@@ -3971,4 +3999,97 @@ fn mismatched_source_metadata_is_a_local_contract_error_and_releases_the_source_
         admissions.active.load(std::sync::atomic::Ordering::SeqCst),
         0
     );
+}
+
+#[test]
+fn group_capacity_fallback_is_enforced_without_disabling_same_tier_or_fault_failover() {
+    use gateway_core::{
+        policy::{AccessGroupRouting, RateLimits},
+        routing::source::SourcePreferenceOverride,
+    };
+    for (allow_capacity_fallback, same_priority, failure) in [
+        (false, false, ProviderErrorKind::SourceCapacityUnavailable),
+        (true, false, ProviderErrorKind::SourceCapacityUnavailable),
+        (false, true, ProviderErrorKind::SourceCapacityUnavailable),
+        (false, false, ProviderErrorKind::AccountCapacityUnavailable),
+        (true, false, ProviderErrorKind::AccountCapacityUnavailable),
+        (
+            false,
+            false,
+            ProviderErrorKind::ProviderInfrastructureUnavailable,
+        ),
+    ] {
+        let operation = generate_operation();
+        let mut routing = AccessGroupRouting {
+            allow_capacity_fallback,
+            ..Default::default()
+        };
+        if same_priority {
+            routing.source_preferences.insert(
+                pool_source(2),
+                SourcePreferenceOverride::new(Some(1), None).expect("same tier"),
+            );
+        }
+        let plan = pool_plan_with_routing(&operation, RateLimits::unlimited(), Some(routing));
+        let first = plan.candidates()[0].source().expect("first").clone();
+        let second = plan.candidates()[1].source().expect("second").clone();
+        let source_capacity = failure == ProviderErrorKind::SourceCapacityUnavailable;
+        let admissions = Arc::new(RecordingSourceAdmissions {
+            rejected: if source_capacity {
+                BTreeSet::from([first])
+            } else {
+                BTreeSet::new()
+            },
+            ..Default::default()
+        });
+        let succeeds = allow_capacity_fallback
+            || same_priority
+            || failure == ProviderErrorKind::ProviderInfrastructureUnavailable;
+        let mut scripts = Vec::new();
+        if !source_capacity {
+            scripts.push(Script::Error(ProviderError::new(
+                failure,
+                UpstreamSendState::NotSent,
+            )));
+        }
+        if succeeds {
+            scripts.push(Script::Stream {
+                account_id: if second == pool_source(2) {
+                    "acct_two"
+                } else {
+                    "acct_one"
+                },
+                items: complete_stream(None),
+            });
+        }
+        let (coordinator, _, provider) =
+            coordinator_with_source_admissions(scripts, admissions.clone());
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("session");
+        let result = block_on(session.collect_uncommitted());
+        assert_eq!(
+            result.is_ok(),
+            succeeds,
+            "fallback={allow_capacity_fallback}, same={same_priority}, failure={failure:?}"
+        );
+        assert_eq!(
+            admissions.requests.lock().expect("requests").len(),
+            if succeeds { 2 } else { 1 }
+        );
+        assert_eq!(
+            provider.contexts.lock().expect("contexts").len(),
+            usize::from(!source_capacity) + usize::from(succeeds)
+        );
+        assert_eq!(
+            admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
 }

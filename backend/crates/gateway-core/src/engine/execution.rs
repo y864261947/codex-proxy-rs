@@ -439,20 +439,7 @@ impl DefaultExecutionService {
                 (seed ^ u64::from(byte)).wrapping_mul(0x100000001b3)
             });
         let plan = if let Some(group) = request.client.policy.access_group() {
-            let allowed = crate::routing::source::AllowedSources::new(
-                group
-                    .pool_group_ids
-                    .iter()
-                    .cloned()
-                    .map(crate::routing::source::SourceId::AccountPool)
-                    .chain(
-                        group
-                            .channel_ids
-                            .iter()
-                            .cloned()
-                            .map(crate::routing::source::SourceId::Channel),
-                    ),
-            );
+            let allowed = crate::routing::source::AllowedSources::for_access_group(group);
             request.client.snapshot.plan_sources(
                 target,
                 &request.operation,

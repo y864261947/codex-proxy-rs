@@ -1,9 +1,13 @@
 //! 下游接入分组独立于账号分组；模型授权在别名映射之前按对外名称匹配。
 
-use std::{collections::BTreeSet, fmt};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fmt,
+};
 
 use crate::account::scope::AccountGroupId;
 use crate::identity::ChannelId;
+use crate::routing::source::{SourceId, SourcePreferenceOverride};
 use crate::validation::{IdentifierError, validate_text};
 
 use super::RateLimits;
@@ -40,6 +44,7 @@ impl fmt::Display for AccessGroupId {
 /// 模型与来源均需显式授权；空集合不退化为全量授权。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccessGroupPolicy {
+    pub routing: AccessGroupRouting,
     pub id: AccessGroupId,
     pub enabled: bool,
     pub limits: RateLimits,
@@ -50,6 +55,8 @@ pub struct AccessGroupPolicy {
 
 impl AccessGroupPolicy {
     pub fn validate(&self) -> Result<(), IdentifierError> {
+        self.routing
+            .validate(&self.pool_group_ids, &self.channel_ids)?;
         Self::validate_permissions(
             self.limits,
             &self.allowed_models,
@@ -84,5 +91,39 @@ impl AccessGroupPolicy {
     #[must_use]
     pub fn allows_model(&self, public_model: &str) -> bool {
         self.enabled && self.allowed_models.contains(public_model)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccessGroupRouting {
+    pub allow_capacity_fallback: bool,
+    pub source_preferences: BTreeMap<SourceId, SourcePreferenceOverride>,
+}
+
+impl Default for AccessGroupRouting {
+    fn default() -> Self {
+        Self {
+            allow_capacity_fallback: true,
+            source_preferences: BTreeMap::new(),
+        }
+    }
+}
+
+impl AccessGroupRouting {
+    pub fn validate(
+        &self,
+        pools: &BTreeSet<AccountGroupId>,
+        channels: &BTreeSet<ChannelId>,
+    ) -> Result<(), IdentifierError> {
+        for source in self.source_preferences.keys() {
+            let authorized = match source {
+                SourceId::AccountPool(id) => pools.contains(id),
+                SourceId::Channel(id) => channels.contains(id),
+            };
+            if !authorized {
+                return Err(IdentifierError::InvalidFormat);
+            }
+        }
+        Ok(())
     }
 }

@@ -113,6 +113,46 @@ impl Default for SourcePreference {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourcePreferenceOverride {
+    priority: Option<NonZeroU16>,
+    weight: Option<NonZeroU16>,
+}
+
+impl SourcePreferenceOverride {
+    pub fn new(priority: Option<u16>, weight: Option<u16>) -> Result<Self, IdentifierError> {
+        if priority.is_none() && weight.is_none() {
+            return Err(IdentifierError::InvalidFormat);
+        }
+        Ok(Self {
+            priority: priority
+                .map(|value| NonZeroU16::new(value).ok_or(IdentifierError::InvalidFormat))
+                .transpose()?,
+            weight: weight
+                .map(|value| NonZeroU16::new(value).ok_or(IdentifierError::InvalidFormat))
+                .transpose()?,
+        })
+    }
+
+    #[must_use]
+    pub fn priority(self) -> Option<u16> {
+        self.priority.map(NonZeroU16::get)
+    }
+
+    #[must_use]
+    pub fn weight(self) -> Option<u16> {
+        self.weight.map(NonZeroU16::get)
+    }
+
+    #[must_use]
+    pub fn resolve(self, defaults: SourcePreference) -> SourcePreference {
+        SourcePreference {
+            priority: self.priority.unwrap_or(defaults.priority),
+            weight: self.weight.unwrap_or(defaults.weight),
+        }
+    }
+}
+
 /// 多个来源共享的项目级配额；每次路由与来源限额同时冻结。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuotaScopePolicy {
@@ -262,21 +302,55 @@ impl SourcePolicy {
 
 /// 去重与关闭空集合语义在 Core 保持一致，不以未选择表示全部来源。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct AllowedSources(BTreeSet<SourceId>);
+pub struct AllowedSources {
+    sources: BTreeSet<SourceId>,
+    routing: crate::policy::AccessGroupRouting,
+}
 
 impl AllowedSources {
     #[must_use]
     pub fn new(sources: impl IntoIterator<Item = SourceId>) -> Self {
-        Self(sources.into_iter().collect())
+        Self {
+            sources: sources.into_iter().collect(),
+            routing: Default::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn for_access_group(group: &crate::policy::AccessGroupPolicy) -> Self {
+        Self {
+            sources: group
+                .pool_group_ids
+                .iter()
+                .cloned()
+                .map(SourceId::AccountPool)
+                .chain(group.channel_ids.iter().cloned().map(SourceId::Channel))
+                .collect(),
+            routing: group.routing.clone(),
+        }
+    }
+
+    #[must_use]
+    pub const fn allow_capacity_fallback(&self) -> bool {
+        self.routing.allow_capacity_fallback
+    }
+
+    #[must_use]
+    pub fn preference(&self, policy: &SourcePolicy) -> SourcePreference {
+        let defaults = policy.controls().preference();
+        self.routing
+            .source_preferences
+            .get(policy.id())
+            .map_or(defaults, |value| value.resolve(defaults))
     }
 
     #[must_use]
     pub fn allows(&self, source: &SourceId) -> bool {
-        self.0.contains(source)
+        self.sources.contains(source)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &SourceId> {
-        self.0.iter()
+        self.sources.iter()
     }
 }
 

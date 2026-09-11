@@ -406,32 +406,34 @@ async fn incomplete_sse_and_cancelled_inflight_calls_cannot_be_reclassified_as_u
     let error = events.into_iter().find_map(Result::err).expect("truncated");
     assert_eq!(error.kind(), ProviderErrorKind::Protocol);
     assert_eq!(error.send_state(), UpstreamSendState::Sent);
-    server.reset().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(10)))
-        .expect(1)
-        .mount(&server)
-        .await;
+    use tokio::io::AsyncReadExt as _;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let address = listener.local_addr().expect("address");
+    let channel = self::channel("chan_cancel", 1, &format!("http://{address}"));
+    let provider = ApiChannelProvider::new(Arc::new(Store(Mutex::new(vec![channel.clone()]))))
+        .expect("provider");
     let cancellation = CancellationToken::new();
     let stream = provider
         .execute(request(&channel, json!({})), context(cancellation.clone()))
         .await
         .expect("cold");
-    let (events, ()) = tokio::join!(stream.collect::<Vec<_>>(), async {
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while server
-                .received_requests()
-                .await
-                .expect("requests")
-                .is_empty()
-            {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("request sent");
+    let (release, released) = tokio::sync::oneshot::channel();
+    let server_task = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accepted");
+        let mut buffer = [0_u8; 4096];
+        let received = socket.read(&mut buffer).await.expect("request bytes");
+        assert!(received > 0);
         cancellation.cancel();
+        let _ = released.await;
+        drop(socket);
     });
+    let events = tokio::time::timeout(Duration::from_secs(5), stream.collect::<Vec<_>>())
+        .await
+        .expect("cancellation completes while the upstream socket remains open");
+    release.send(()).expect("release upstream");
+    server_task.await.expect("upstream task");
     let error = events.into_iter().find_map(Result::err).expect("cancelled");
     assert_eq!(error.kind(), ProviderErrorKind::Cancelled);
     assert_eq!(error.send_state(), UpstreamSendState::Ambiguous);

@@ -639,7 +639,14 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 表中缩写的 `/update`、`/delete` 均属于同一行的资源前缀，例如客户修改完整路径为
 `/api/admin/customers/update`。客户和共享配额创建/修改使用 `name`、`note`、`enabled`、
 `maxConcurrency`、`requestsPerMinute`；修改另带 `id`。分组在这些字段之外使用 `allowedModels`、
-`poolGroupIds`、`channelIds`。不因模型列表为空或渠道未勾选而隐式授权。
+`poolGroupIds`、`channelIds`、`allowCapacityFallback` 和 `sourcePreferences`，创建/更新均要求显式提供。不因模型列表为空或渠道未勾选而隐式授权。
+
+`sourcePreferences` 是覆盖数组，每项为 `{ kind: "account_pool" | "channel", sourceId, priority, weight }`。
+`priority`、`weight` 可分别为 `null`（或省略）以继承来源默认值；每项至少覆盖一个字段，覆盖值须为 1–65535 的整数。
+来源必须位于本次提交的授权集合，重复来源或未授权覆盖拒绝；传空数组清除全部覆盖，不改变来源限额或共享配额。
+`allowCapacityFallback: false` 在来源或账号容量拒绝时允许同级来源，但禁止进入更低优先级来源；
+不禁用既有故障重试，也不解除原生会话来源锁定。迁移后的既有分组默认为 `true`，无分组旧 Key 的行为不变。
+有效偏好及回退开关随请求计划冻结，关系、版本和审计在同一事务提交。
 
 渠道公开配置包括 `provider`、`priority`、`weight`、`quotaScopeId`；创建时还需要 Provider 验证的
 `config`。配置版本 `connectionRevision` 和更新时的 `expectedRevision` 为字符串，避免数字精度损失。

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AccessGroup, AccessGroupWrite } from '@/api'
+import type { AccessGroup, AccessGroupSourcePreference, AccessGroupWrite } from '@/api'
 import { computed, ref } from 'vue'
 import { createAccessGroup, deleteAccessGroup, updateAccessGroup } from '@/api'
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
@@ -42,15 +42,38 @@ const deleteOpen = ref(false)
 const editing = ref<AccessGroup | null>(null)
 const deleting = ref<AccessGroup | null>(null)
 const saving = ref(false)
-const form = ref<AccessGroupWrite>({ name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [], channelIds: [] })
-const permissionsValid = computed(() => channelsReady.value && form.value.channelIds.length <= 256 && poolsLoaded.value && !poolsLoading.value && !poolsError.value && models.value.length <= 2048 && models.value.every(model => model !== '*' && new TextEncoder().encode(model).length <= 256))
+const form = ref<AccessGroupWrite>({ allowCapacityFallback: true, sourcePreferences: [], name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [], channelIds: [] })
 const valid = computed(() => form.value.name.trim().length > 0 && [form.value.maxConcurrency, form.value.requestsPerMinute].every(value => Number.isSafeInteger(value) && value >= 0))
+const routingSources = computed(() => [
+  ...form.value.poolGroupIds.map(sourceId => ({ kind: 'account_pool' as const, sourceId, name: pools.value.find(pool => pool.id === sourceId)?.name || sourceId })),
+  ...form.value.channelIds.map(sourceId => ({ kind: 'channel' as const, sourceId, name: sourceId })),
+])
+const routingValid = computed(() => activePreferences().every(preference => [preference.priority, preference.weight].every(value => value === null || (Number.isInteger(value) && value >= 1 && value <= 65535))))
+const permissionsValid = computed(() => routingValid.value && channelsReady.value && form.value.channelIds.length <= 256 && poolsLoaded.value && !poolsLoading.value && !poolsError.value && models.value.length <= 2048 && models.value.every(model => model !== '*' && new TextEncoder().encode(model).length <= 256))
+function activePreferences() {
+  return form.value.sourcePreferences.filter(preference => routingSources.value.some(source => source.kind === preference.kind && source.sourceId === preference.sourceId))
+}
+function preferenceValue(source: { kind: AccessGroupSourcePreference['kind'], sourceId: string }, field: 'priority' | 'weight') {
+  const value = form.value.sourcePreferences.find(preference => preference.kind === source.kind && preference.sourceId === source.sourceId)?.[field]
+  return value === undefined || value === null ? '' : String(value)
+}
+function setPreference(source: { kind: AccessGroupSourcePreference['kind'], sourceId: string }, field: 'priority' | 'weight', value: string) {
+  let preference = form.value.sourcePreferences.find(preference => preference.kind === source.kind && preference.sourceId === source.sourceId)
+  if (!preference) {
+    preference = { kind: source.kind, sourceId: source.sourceId, priority: null, weight: null }
+    form.value.sourcePreferences.push(preference)
+  }
+  preference[field] = value.trim() === '' ? null : Number(value)
+  if (preference.priority === null && preference.weight === null)
+    form.value.sourcePreferences = form.value.sourcePreferences.filter(item => item.kind !== source.kind || item.sourceId !== source.sourceId)
+}
+
 function edit(accessGroup: AccessGroup | null) {
   channelsReady.value = false
   modelText.value = accessGroup?.allowedModels.join('\n') || ''
   void loadGroups()
   editing.value = accessGroup
-  form.value = accessGroup ? { name: accessGroup.name, note: accessGroup.note || '', enabled: accessGroup.enabled, maxConcurrency: accessGroup.maxConcurrency, requestsPerMinute: accessGroup.requestsPerMinute, allowedModels: [...accessGroup.allowedModels], poolGroupIds: [...accessGroup.poolGroupIds], channelIds: [...accessGroup.channelIds] } : { name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [], channelIds: [] }
+  form.value = accessGroup ? { allowCapacityFallback: accessGroup.allowCapacityFallback, sourcePreferences: accessGroup.sourcePreferences.map(preference => ({ ...preference })), name: accessGroup.name, note: accessGroup.note || '', enabled: accessGroup.enabled, maxConcurrency: accessGroup.maxConcurrency, requestsPerMinute: accessGroup.requestsPerMinute, allowedModels: [...accessGroup.allowedModels], poolGroupIds: [...accessGroup.poolGroupIds], channelIds: [...accessGroup.channelIds] } : { allowCapacityFallback: true, sourcePreferences: [], name: '', note: '', enabled: true, maxConcurrency: 0, requestsPerMinute: 0, allowedModels: [], poolGroupIds: [], channelIds: [] }
   open.value = true
 }
 async function save() {
@@ -58,7 +81,7 @@ async function save() {
     return
   saving.value = true
   try {
-    const data = { ...form.value, allowedModels: models.value, name: form.value.name.trim(), note: form.value.note?.trim() || null }
+    const data = { ...form.value, sourcePreferences: activePreferences(), allowedModels: models.value, name: form.value.name.trim(), note: form.value.note?.trim() || null }
     if (editing.value)
       await updateAccessGroup({ ...data, id: editing.value.id })
     else await createAccessGroup(data)
@@ -169,6 +192,31 @@ async function remove() {
         <p v-if="!models.length || !(form.poolGroupIds.length + form.channelIds.length)" class="m-0 text-cp-sm text-cp-warning">
           尚未完整授权，保存后该组 Key 暂时无法调用模型。
         </p>
+        <BaseFormItem label="满载回退" description="关闭后，来源或账号容量不足时只尝试同优先级来源，不降级到低优先级；故障重试和会话来源锁定规则不变">
+          <BaseSwitch v-model="form.allowCapacityFallback" label="允许满载后使用低优先级来源" :show-label="true" :disabled="saving" />
+        </BaseFormItem>
+        <fieldset v-if="routingSources.length" class="m-0 grid min-w-0 gap-3 border-0 p-0">
+          <legend class="mb-2 text-cp-sm font-emphasis">
+            分组来源偏好
+          </legend>
+          <p class="m-0 text-cp-xs text-cp-text-secondary">
+            留空继承来源默认值；优先级数值越小越优先，同级按权重分配。取值 1–65535，不改变来源容量或共享配额。
+          </p>
+          <div v-for="source in routingSources" :key="source.kind + source.sourceId" class="grid gap-2 rounded-cp border border-cp-border p-3">
+            <span class="break-all text-cp-sm">{{ source.kind === 'account_pool' ? '号池' : '渠道' }} · {{ source.name }}</span>
+            <div class="grid grid-cols-2 gap-3">
+              <BaseFormItem label="优先级覆盖">
+                <BaseInput :model-value="preferenceValue(source, 'priority')" type="number" min="1" max="65535" step="1" placeholder="继承来源" :aria-label="`${source.name}优先级覆盖`" :disabled="saving" @update:model-value="setPreference(source, 'priority', $event)" />
+              </BaseFormItem>
+              <BaseFormItem label="权重覆盖">
+                <BaseInput :model-value="preferenceValue(source, 'weight')" type="number" min="1" max="65535" step="1" placeholder="继承来源" :aria-label="`${source.name}权重覆盖`" :disabled="saving" @update:model-value="setPreference(source, 'weight', $event)" />
+              </BaseFormItem>
+            </div>
+          </div>
+          <p v-if="!routingValid" role="alert" class="m-0 text-cp-sm text-cp-error">
+            优先级和权重须为 1–65535 的整数，或留空继承。
+          </p>
+        </fieldset>
         <BaseFormItem label="共享并发上限">
           <BaseNumberInput v-model="form.maxConcurrency" label="共享并发上限" :min="0" :max="Number.MAX_SAFE_INTEGER" :disabled="saving" />
         </BaseFormItem>

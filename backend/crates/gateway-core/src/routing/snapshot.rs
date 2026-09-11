@@ -820,6 +820,7 @@ impl RuntimeSnapshot {
             });
         }
         Ok(RoutingPlan {
+            allow_capacity_fallback: true,
             config_revision: self.revision,
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
@@ -847,7 +848,7 @@ impl RuntimeSnapshot {
                 .filter_map(|source| {
                     self.source_policy(source)
                         .filter(|policy| self.source_is_available(policy))
-                        .map(|policy| (source.clone(), policy.effective_preference(None)))
+                        .map(|policy| (source.clone(), allowed.preference(policy)))
                 })
                 .collect(),
             seed,
@@ -896,7 +897,12 @@ impl RuntimeSnapshot {
                 Ok(plan) => {
                     candidates.extend(plan.candidates().iter().cloned().map(|mut candidate| {
                         candidate.source = Some(policy.snapshot());
-                        candidate.source_controls = policy.controls().clone();
+                        candidate.source_controls = super::source::SourceControls::new(
+                            allowed.preference(policy),
+                            policy.limits(),
+                            policy.quota_scope_id().cloned(),
+                        )
+                        .expect("validated source controls");
                         candidate.shared_quota = policy
                             .quota_scope_id()
                             .and_then(|id| self.quota_policy(id))
@@ -925,6 +931,7 @@ impl RuntimeSnapshot {
             });
         }
         Ok(RoutingPlan {
+            allow_capacity_fallback: allowed.allow_capacity_fallback(),
             config_revision: self.revision,
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
@@ -1076,6 +1083,7 @@ impl RuntimeSnapshot {
             });
         }
         Ok(RoutingPlan {
+            allow_capacity_fallback: true,
             config_revision: self.revision,
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
@@ -1355,6 +1363,7 @@ impl RuntimeSnapshot {
         }
 
         Ok(RoutingPlan {
+            allow_capacity_fallback: true,
             config_revision: self.revision,
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
@@ -1400,6 +1409,7 @@ impl RuntimeSnapshot {
             account_scope: Arc::clone(&account_scope),
         };
         Ok(RoutingPlan {
+            allow_capacity_fallback: true,
             config_revision: self.revision,
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
