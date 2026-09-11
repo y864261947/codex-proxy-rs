@@ -79,6 +79,7 @@ async fn saved_discovery_get_is_local_nullable_and_preserves_large_versions() {
             .oneshot(
                 Request::builder()
                     .uri("/api/admin/channels/model-discovery?id=chan_saved")
+                    .header("x-request-id", "discovery-read")
                     .header(header::COOKIE, "cpr_admin_session=valid-session")
                     .body(Body::empty())
                     .expect("request"),
@@ -135,6 +136,7 @@ async fn discovery_requires_saved_identity_and_string_revision() {
                 Request::builder()
                     .method("POST")
                     .uri("/api/admin/channels/discover-models")
+                    .header("x-request-id", "discovery-query")
                     .header(header::CONTENT_TYPE, "application/json")
                     .header(header::COOKIE, "cpr_admin_session=valid-session")
                     .body(Body::from(body.to_string()))

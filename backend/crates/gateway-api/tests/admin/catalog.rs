@@ -32,7 +32,9 @@ async fn catalog_requires_auth_validates_filters_and_does_not_mask_unavailable_s
         ("?sourceKind=invalid", true, StatusCode::BAD_REQUEST),
         ("?unknown=1", true, StatusCode::BAD_REQUEST),
     ] {
-        let mut request = Request::builder().uri(format!("/api/admin/model-catalog{query}"));
+        let mut request = Request::builder()
+            .uri(format!("/api/admin/model-catalog{query}"))
+            .header("x-request-id", "catalog-query");
         if authenticated {
             request = request.header(header::COOKIE, "cpr_admin_session=valid-session");
         }
@@ -100,6 +102,7 @@ async fn catalog_keeps_same_name_sources_unknown_capabilities_and_large_versions
         .oneshot(
             Request::builder()
                 .uri("/api/admin/model-catalog")
+                .header("x-request-id", "catalog-snapshot")
                 .header(header::COOKIE, "cpr_admin_session=valid-session")
                 .body(Body::empty())
                 .expect("request"),
