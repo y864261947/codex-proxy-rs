@@ -121,6 +121,7 @@ pub(crate) fn literal_prefix_pattern(value: &str) -> String {
 pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
     "select mr.id, mr.endpoint, mr.client_transport, mr.requested_model_id,
             mr.provider_kind, mr.provider_account_ref,
+            mr.source_kind, mr.source_ref, mr.source_name_snapshot,
             mr.provider_account_name_snapshot as provider_account_name,
             mr.provider_account_email_snapshot as provider_account_email,
             mr.provider_account_authentication_kind_snapshot
@@ -144,6 +145,7 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             mr.protocol, mr.operation,
             mr.endpoint, mr.client_transport, mr.requested_model_id,
             mr.provider_kind, mr.provider_account_ref,
+            mr.source_kind, mr.source_ref, mr.source_name_snapshot,
             mr.provider_account_name_snapshot as provider_account_name,
             mr.provider_account_email_snapshot as provider_account_email,
             mr.provider_account_authentication_kind_snapshot
@@ -260,7 +262,8 @@ pub(crate) async fn usage_record_detail(
                   as provider_account_authentication_kind,
                 upstream_model_id,
                 failure_kind, status_code, provider_error_code, retry_after_ms,
-                upstream_request_id, latency_ms, message, created_at
+                upstream_request_id, latency_ms, message, created_at,
+                source_kind, source_ref, source_name_snapshot
          from ops_events where model_request_id = $1
          order by attempt_index, created_at, id",
     )
@@ -299,6 +302,7 @@ pub(crate) fn intermediate_attempt_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<UsageAttemptObservation> {
     Ok(UsageAttemptObservation {
+        upstream_source: source_snapshot_from_row(row)?,
         source: "ops_event".to_owned(),
         id: get(row, "id")?,
         attempt_index: to_u32(get(row, "attempt_index")?)?,
@@ -336,6 +340,7 @@ pub(crate) fn intermediate_attempt_from_row(
 
 pub(crate) fn final_attempt_from_request(request: &UsageRecord) -> UsageAttemptObservation {
     UsageAttemptObservation {
+        upstream_source: request.upstream_source.clone(),
         source: "model_request".to_owned(),
         id: format!("{}:final", request.id),
         attempt_index: request.attempt_count,

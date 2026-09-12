@@ -2,6 +2,32 @@
 
 use super::*;
 
+pub(crate) fn source_snapshot_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> StoreResult<Option<gateway_core::routing::source::SourceSnapshot>> {
+    use gateway_core::{
+        account::scope::AccountGroupId,
+        identity::ChannelId,
+        routing::source::{SourceId, SourceSnapshot},
+    };
+    let kind: Option<String> = get(row, "source_kind")?;
+    let reference: Option<String> = get(row, "source_ref")?;
+    let name: Option<String> = get(row, "source_name_snapshot")?;
+    let source = match (kind.as_deref(), reference) {
+        (None, None) if name.is_none() => return Ok(None),
+        (Some("channel"), Some(id)) => {
+            SourceId::Channel(ChannelId::new(id).map_err(|_| invalid("invalid channel ref"))?)
+        }
+        (Some("pool"), Some(id)) => {
+            SourceId::AccountPool(AccountGroupId::new(id).map_err(|_| invalid("invalid pool ref"))?)
+        }
+        _ => return Err(invalid("invalid source history")),
+    };
+    SourceSnapshot::new(source, name)
+        .map(Some)
+        .map_err(|_| invalid("invalid source name snapshot"))
+}
+
 pub(crate) fn store_range(
     range: admin_observability::TimeRange,
 ) -> AdminStoreResult<ObservabilityRange> {
@@ -427,6 +453,7 @@ pub(crate) fn admin_usage_list_record(
         }
     };
     Ok(admin_observability::UsageListRecord {
+        upstream_source: record.upstream_source,
         id: record.id,
         endpoint: record.endpoint,
         client_transport: record.client_transport,
@@ -494,6 +521,7 @@ pub(crate) fn admin_usage_record(
         }
     };
     Ok(admin_observability::UsageRecord {
+        upstream_source: record.upstream_source,
         id: record.id,
         client_api_key_ref: record.client_api_key_ref,
         config_revision: record.config_revision,
@@ -599,6 +627,7 @@ pub(crate) fn admin_usage_attempt(
     attempt: UsageAttemptObservation,
 ) -> AdminStoreResult<admin_observability::UsageAttempt> {
     Ok(admin_observability::UsageAttempt {
+        upstream_source: attempt.upstream_source,
         source: attempt.source,
         id: attempt.id,
         attempt_index: attempt.attempt_index,
@@ -695,6 +724,7 @@ pub(crate) fn admin_ops_error_page(
 
 pub(crate) fn admin_ops_error(error: OpsErrorRecord) -> admin_observability::OpsError {
     admin_observability::OpsError {
+        upstream_source: error.upstream_source,
         source: error.source,
         event_id: error.event_id,
         request_id: error.request_id,
@@ -752,6 +782,7 @@ pub(crate) fn usage_list_record_from_row(
     row: &sqlx::postgres::PgRow,
 ) -> StoreResult<UsageListRecord> {
     Ok(UsageListRecord {
+        upstream_source: source_snapshot_from_row(row)?,
         id: get(row, "id")?,
         endpoint: get(row, "endpoint")?,
         client_transport: get(row, "client_transport")?,
@@ -800,6 +831,7 @@ pub(crate) fn usage_list_record_from_row(
 
 pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<UsageRecord> {
     Ok(UsageRecord {
+        upstream_source: source_snapshot_from_row(row)?,
         id: get(row, "id")?,
         client_api_key_ref: get(row, "client_api_key_ref")?,
         config_revision: unsigned(row, "config_revision")?,
@@ -883,6 +915,7 @@ pub(crate) fn usage_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<
 
 pub(crate) fn ops_error_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<OpsErrorRecord> {
     Ok(OpsErrorRecord {
+        upstream_source: source_snapshot_from_row(row)?,
         source: get(row, "source")?,
         event_id: get(row, "event_id")?,
         request_id: get(row, "request_id")?,

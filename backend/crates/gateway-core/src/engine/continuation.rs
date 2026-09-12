@@ -3,7 +3,7 @@
 //! Core 不解释 Provider transcript；同一客户端连接需要的可携带状态由
 //! [`ProviderSessionState`](crate::operation::ProviderSessionState) 不透明承载。
 
-use std::fmt;
+use std::{fmt, sync::Arc};
 
 use futures::future::BoxFuture;
 
@@ -11,6 +11,7 @@ use crate::account::ProviderAccountId;
 use crate::identity::ProviderKind;
 use crate::operation::ProviderSessionState;
 use crate::policy::ClientApiKeyId;
+use crate::routing::source::SourceId;
 
 /// 客户端或 Provider 传递的 opaque response handle。
 ///
@@ -60,8 +61,9 @@ pub struct NativeContinuationPin {
     client_api_key_id: ClientApiKeyId,
     provider: ProviderKind,
     account: ProviderAccountId,
+    source: Option<SourceId>,
     scope: NativeContinuationScope,
-    session_state: Option<ProviderSessionState>,
+    session_state: Option<Arc<ProviderSessionState>>,
 }
 
 impl NativeContinuationPin {
@@ -79,6 +81,7 @@ impl NativeContinuationPin {
             client_api_key_id,
             provider,
             account,
+            source: None,
             scope: NativeContinuationScope::ConnectionLocal,
             session_state: None,
         }
@@ -91,10 +94,29 @@ impl NativeContinuationPin {
         self
     }
 
+    /// 冻结产生该会话的来源；旧记录没有来源时保留原有账号绑定语义。
+    #[must_use]
+    pub fn with_source(mut self, source: SourceId) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> Option<&SourceId> {
+        self.source.as_ref()
+    }
+
+    #[must_use]
+    pub fn matches_source(&self, source: Option<&SourceId>) -> bool {
+        self.source
+            .as_ref()
+            .is_none_or(|expected| Some(expected) == source)
+    }
+
     /// 附着仅由对应 Provider 解释的不透明会话状态。
     #[must_use]
     pub fn with_session_state(mut self, state: ProviderSessionState) -> Self {
-        self.session_state = Some(state);
+        self.session_state = Some(Arc::new(state));
         self
     }
 
@@ -136,8 +158,8 @@ impl NativeContinuationPin {
 
     /// 返回与本 pin 同账号绑定的 Provider 私有会话状态。
     #[must_use]
-    pub const fn session_state(&self) -> Option<&ProviderSessionState> {
-        self.session_state.as_ref()
+    pub fn session_state(&self) -> Option<&ProviderSessionState> {
+        self.session_state.as_deref()
     }
 
     /// 校验本次 route/account 选择没有破坏 native pin。
@@ -156,6 +178,7 @@ impl fmt::Debug for NativeContinuationPin {
             .field("client_api_key_id", &self.client_api_key_id)
             .field("provider", &self.provider)
             .field("account", &self.account)
+            .field("source", &self.source)
             .field("scope", &self.scope)
             .field(
                 "session_state",

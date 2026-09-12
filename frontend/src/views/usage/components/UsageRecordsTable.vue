@@ -10,6 +10,7 @@ import {
   usageIsCompact,
   usageUserAgent,
 } from '../utils/records'
+import { upstreamSourceText } from '../utils/source'
 import UsageBillingCell from './UsageBillingCell.vue'
 import UsageClientIpCell from './UsageClientIpCell.vue'
 import UsageLatencyCell from './UsageLatencyCell.vue'
@@ -50,9 +51,12 @@ withDefaults(
     <template #accountEmail="{ row }">
       <span
         class="block max-w-full truncate font-mono text-cp-sm leading-none font-bold text-cp-text"
-        :title="usageAccountText(row)"
+        :title="row.upstreamSource?.kind === 'channel' ? upstreamSourceText(row.upstreamSource) : usageAccountText(row)"
       >
-        {{ usageAccountText(row) }}
+        {{ row.upstreamSource?.kind === 'channel' ? upstreamSourceText(row.upstreamSource) : usageAccountText(row) }}
+      </span>
+      <span v-if="row.upstreamSource?.kind === 'pool'" class="mt-1 block truncate text-cp-xs text-cp-text-secondary" :title="upstreamSourceText(row.upstreamSource)">
+        {{ upstreamSourceText(row.upstreamSource) }}
       </span>
     </template>
 

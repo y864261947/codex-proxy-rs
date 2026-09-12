@@ -11,6 +11,7 @@ import BaseSegmented from '@/components/base/BaseSegmented.vue'
 import AdminApiKeyCard from './components/AdminApiKeyCard.vue'
 import SettingsBackupSection from './components/backup/SettingsBackupSection.vue'
 import ClientVersionSettings from './components/client-version/index.vue'
+import GlobalAdmissionCard from './components/GlobalAdmissionCard.vue'
 import ModelAliasesCard from './components/ModelAliasesCard.vue'
 import RotationStrategyCard from './components/RotationStrategyCard.vue'
 import RuntimeSettingsCard from './components/RuntimeSettingsCard.vue'
@@ -121,6 +122,8 @@ watch(
         @request-delete="showDeleteAdminKeyModal = true"
         @copy="copyAdminApiKey"
       />
+
+      <GlobalAdmissionCard />
 
       <RuntimeSettingsCard
         v-model:max-concurrent-per-account="maxConcurrentPerAccountValue"

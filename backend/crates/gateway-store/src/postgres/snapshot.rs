@@ -12,7 +12,7 @@ use gateway_core::routing::{
         SnapshotStorePort,
     },
 };
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgPool, Postgres, Row as _, Transaction};
 
 use crate::{Revision, StoreError, StoreResult, postgres_unavailable};
 
@@ -20,6 +20,7 @@ use super::ClientApiKeySnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotRuntimeSettings {
+    pub global_limits: gateway_core::policy::RateLimits,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
@@ -32,6 +33,8 @@ pub struct SnapshotRuntimeSettings {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuntimeSnapshotData {
+    pub channels: Vec<gateway_core::routing::snapshot::SnapshotChannelFacts>,
+    pub quotas: Vec<gateway_core::routing::source::QuotaScopePolicy>,
     pub config_revision: Revision,
     pub observed_current_revision: Revision,
     pub settings: SnapshotRuntimeSettings,
@@ -43,6 +46,7 @@ pub struct RuntimeSnapshotData {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAccountGroupData {
+    pub source_controls: gateway_core::routing::source::SourceControls,
     pub id: AccountGroupId,
     pub name: String,
     pub enabled: bool,
@@ -96,6 +100,8 @@ impl RuntimeSnapshotRepository for PgRuntimeSnapshotRepository {
         let account_groups = load_account_groups(&mut transaction).await?;
         let provider_accounts = load_provider_accounts(&mut transaction).await?;
         let group_memberships = load_group_memberships(&mut transaction).await?;
+        let channels = load_channels(&mut transaction).await?;
+        let quotas = load_quotas(&mut transaction).await?;
         transaction
             .commit()
             .await
@@ -104,6 +110,8 @@ impl RuntimeSnapshotRepository for PgRuntimeSnapshotRepository {
         let observed_current_revision =
             RuntimeSnapshotRepository::current_config_revision(self).await?;
         Ok(RuntimeSnapshotData {
+            channels,
+            quotas,
             config_revision,
             observed_current_revision,
             settings,
@@ -147,7 +155,8 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 data.settings.model_mappings,
                 data.settings.min_codex_desktop_version,
                 data.settings.min_codex_cli_version,
-            );
+            )
+            .with_global_limits(data.settings.global_limits);
             let client_policies = data
                 .client_api_keys
                 .into_iter()
@@ -158,12 +167,17 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                         key.group_ids,
                         key.limits,
                     )
+                    .with_customer(key.customer)
+                    .with_access_group(key.access_group)
                 })
                 .collect();
             let account_groups = data
                 .account_groups
                 .into_iter()
-                .map(|group| SnapshotAccountGroupFacts::new(group.id, group.name, group.enabled))
+                .map(|group| {
+                    SnapshotAccountGroupFacts::new(group.id, group.name, group.enabled)
+                        .with_controls(group.source_controls)
+                })
                 .collect();
             let provider_accounts = data
                 .provider_accounts
@@ -193,7 +207,9 @@ impl SnapshotStorePort for PgRuntimeSnapshotRepository {
                 account_groups,
                 provider_accounts,
                 group_memberships,
-            ))
+            )
+            .with_channels(data.channels)
+            .with_quotas(data.quotas))
         })
     }
 
@@ -213,6 +229,63 @@ fn core_revision(revision: Revision) -> Result<ConfigRevision, SnapshotStoreErro
     ConfigRevision::new(revision.get()).map_err(|_| SnapshotStoreError::unavailable())
 }
 
+async fn load_quotas(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> StoreResult<Vec<gateway_core::routing::source::QuotaScopePolicy>> {
+    use gateway_core::{
+        identity::QuotaScopeId, policy::RateLimits, routing::source::QuotaScopePolicy,
+    };
+    let rows = sqlx::query_as::<_, (String, bool, i64, i64)>("select id, enabled, max_concurrency, requests_per_minute from upstream_quota_scopes order by id")
+        .fetch_all(&mut **transaction).await.map_err(|_| postgres_unavailable("load shared quota snapshot"))?;
+    rows.into_iter()
+        .map(|(id, enabled, concurrency, rpm)| {
+            QuotaScopePolicy::new(
+                QuotaScopeId::new(id).map_err(|_| invalid("invalid shared quota ID"))?,
+                enabled,
+                RateLimits {
+                    max_concurrency: to_u64(concurrency)?,
+                    requests_per_minute: to_u64(rpm)?,
+                },
+            )
+            .map_err(|_| invalid("invalid shared quota limits"))
+        })
+        .collect()
+}
+
+async fn load_channels(
+    transaction: &mut Transaction<'_, Postgres>,
+) -> StoreResult<Vec<gateway_core::routing::snapshot::SnapshotChannelFacts>> {
+    use gateway_core::{
+        channel::ChannelBinding,
+        routing::{
+            snapshot::SnapshotChannelFacts,
+            source::{SourceId, SourcePolicy},
+        },
+    };
+    let rows = sqlx::query("select id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, connection_revision, created_at, updated_at, discovery_interval_minutes, discovery_next_due_at, discovery_attempted_at, discovery_completed_at, discovery_succeeded from upstream_channels order by id")
+        .fetch_all(&mut **transaction).await.map_err(|_| postgres_unavailable("load channel snapshot"))?;
+    rows.iter()
+        .map(|row| {
+            let record = super::channels::public_record(row)
+                .map_err(|_| postgres_unavailable("decode channel snapshot"))?;
+            let policy = SourcePolicy::new(
+                SourceId::Channel(record.id.clone()),
+                record.fields.enabled,
+                record.fields.preference,
+                record.fields.limits,
+                record.fields.quota_scope_id,
+            )
+            .and_then(|policy| policy.with_name(record.fields.name))
+            .map_err(|_| postgres_unavailable("decode channel policy"))?;
+            Ok(SnapshotChannelFacts::new(
+                ChannelBinding::new(record.id, record.connection_revision),
+                record.provider,
+                policy,
+            ))
+        })
+        .collect()
+}
+
 async fn load_settings(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<(Revision, SnapshotRuntimeSettings)> {
@@ -228,12 +301,14 @@ async fn load_settings(
             sqlx::types::Json<BTreeMap<String, String>>,
             Option<String>,
             Option<String>,
+            i64,
+            i64,
         ),
     >(
         "select config_revision, refresh_margin_seconds, refresh_concurrency,
                 max_concurrent_per_account, request_interval_ms, rotation_strategy,
                 model_mappings_json, min_codex_desktop_version,
-                min_codex_cli_version
+                min_codex_cli_version, global_max_concurrency, global_requests_per_minute
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -246,6 +321,10 @@ async fn load_settings(
     Ok((
         revision_from_i64(row.0)?,
         SnapshotRuntimeSettings {
+            global_limits: gateway_core::policy::RateLimits {
+                max_concurrency: to_u64(row.9)?,
+                requests_per_minute: to_u64(row.10)?,
+            },
             refresh_margin_seconds: to_u64(row.1)?,
             refresh_concurrency: to_u32(row.2)?,
             max_concurrent_per_account: to_u32(row.3)?,
@@ -261,40 +340,154 @@ async fn load_settings(
 async fn load_client_keys(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<Vec<ClientApiKeySnapshot>> {
-    let rows = sqlx::query_as::<_, (String, String, Vec<String>, i64, i64)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Vec<String>,
+            i64,
+            i64,
+            Option<String>,
+            Option<bool>,
+            Option<i64>,
+            Option<i64>,
+            Option<String>,
+            Option<bool>,
+            Option<i64>,
+            Option<i64>,
+            Option<Vec<String>>,
+            Vec<String>,
+            Vec<String>,
+        ),
+    >(
         "select k.id, k.key,
                 coalesce(array_agg(kg.account_group_id order by kg.account_group_id)
                   filter (where kg.account_group_id is not null), '{}') as group_ids,
-                k.max_concurrency, k.requests_per_minute
+                k.max_concurrency, k.requests_per_minute,
+                c.id, c.enabled, c.max_concurrency, c.requests_per_minute,
+                a.id, a.enabled, a.max_concurrency, a.requests_per_minute, a.allowed_models,
+                array(select p.account_group_id from access_group_pools p
+                      where p.access_group_id = a.id order by p.account_group_id),
+                array(select s.channel_id from access_group_channels s
+                      where s.access_group_id = a.id order by s.channel_id)
          from client_api_keys k
          left join client_api_key_groups kg on kg.client_api_key_id = k.id
+         left join customers c on c.id = k.customer_id
+         left join access_groups a on a.id = k.access_group_id
          where k.enabled
-         group by k.id
+         group by k.id, c.id, a.id
          order by k.id",
     )
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("load snapshot client policies"))?;
+    let ids = rows
+        .iter()
+        .filter_map(|row| row.9.clone())
+        .collect::<Vec<_>>();
+    let routing = super::access_groups::load_access_group_routing(transaction, &ids).await?;
     rows.into_iter()
-        .map(|row| ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4))
+        .map(|row| {
+            let mut key = ClientApiKeySnapshot::from_persisted(row.0, row.1, row.2, row.3, row.4)?;
+            key.customer = row
+                .5
+                .map(|id| {
+                    Ok::<_, StoreError>(gateway_core::policy::CustomerPolicy {
+                        id: gateway_core::policy::CustomerId::new(id)
+                            .map_err(|_| invalid("invalid customer ID"))?,
+                        enabled: row.6.ok_or_else(|| invalid("missing customer status"))?,
+                        limits: gateway_core::policy::RateLimits {
+                            max_concurrency: to_u64(
+                                row.7
+                                    .ok_or_else(|| invalid("missing customer concurrency"))?,
+                            )?,
+                            requests_per_minute: to_u64(
+                                row.8.ok_or_else(|| invalid("missing customer RPM"))?,
+                            )?,
+                        },
+                    })
+                })
+                .transpose()?;
+            key.access_group = row
+                .9
+                .map(|id| {
+                    let group = gateway_core::policy::AccessGroupPolicy {
+                        routing: routing
+                            .get(&id)
+                            .cloned()
+                            .ok_or_else(|| invalid("missing access group routing"))?,
+                        channel_ids: row
+                            .15
+                            .into_iter()
+                            .map(|id| {
+                                gateway_core::identity::ChannelId::new(id)
+                                    .map_err(|_| invalid("invalid access channel ID"))
+                            })
+                            .collect::<StoreResult<_>>()?,
+                        id: gateway_core::policy::AccessGroupId::new(id)
+                            .map_err(|_| invalid("invalid access group ID"))?,
+                        enabled: row
+                            .10
+                            .ok_or_else(|| invalid("missing access group state"))?,
+                        limits: gateway_core::policy::RateLimits {
+                            max_concurrency: to_u64(
+                                row.11
+                                    .ok_or_else(|| invalid("missing access group concurrency"))?,
+                            )?,
+                            requests_per_minute: to_u64(
+                                row.12.ok_or_else(|| invalid("missing access group RPM"))?,
+                            )?,
+                        },
+                        allowed_models: row
+                            .13
+                            .ok_or_else(|| invalid("missing access group models"))?
+                            .into_iter()
+                            .collect(),
+                        pool_group_ids: row
+                            .14
+                            .into_iter()
+                            .map(|id| {
+                                AccountGroupId::new(id)
+                                    .map_err(|_| invalid("invalid access pool ID"))
+                            })
+                            .collect::<StoreResult<_>>()?,
+                    };
+                    group
+                        .validate()
+                        .map_err(|_| invalid("invalid access group policy"))?;
+                    Ok::<_, StoreError>(group)
+                })
+                .transpose()?;
+            Ok(key)
+        })
         .collect()
 }
 
 async fn load_account_groups(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<Vec<SnapshotAccountGroupData>> {
-    let rows = sqlx::query_as::<_, (String, String, bool)>(
-        "select id, name, enabled from account_groups order by id",
+    let rows = sqlx::query(
+        "select id, name, enabled, source_priority, source_weight, max_concurrency, requests_per_minute, quota_scope_id from account_groups order by id",
     )
     .fetch_all(&mut **transaction)
     .await
     .map_err(|_| postgres_unavailable("load snapshot account groups"))?;
     rows.into_iter()
-        .map(|(id, name, enabled)| {
+        .map(|row| {
             Ok(SnapshotAccountGroupData {
-                id: AccountGroupId::new(id).map_err(|_| invalid("invalid account group id"))?,
-                name,
-                enabled,
+                source_controls: super::account_groups::source_controls_from_row(&row)?,
+                id: AccountGroupId::new(
+                    row.try_get::<String, _>("id")
+                        .map_err(|_| invalid("invalid account group id"))?,
+                )
+                .map_err(|_| invalid("invalid account group id"))?,
+                name: row
+                    .try_get("name")
+                    .map_err(|_| invalid("invalid group name"))?,
+                enabled: row
+                    .try_get("enabled")
+                    .map_err(|_| invalid("invalid group enabled"))?,
             })
         })
         .collect()

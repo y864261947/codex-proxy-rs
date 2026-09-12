@@ -18,7 +18,14 @@ use gateway_admin::model::{
         CreateAccountGroup, DeleteAccountGroup, SetAccountGroupEnabled, UpdateAccountGroup,
     },
 };
-use gateway_core::routing::AccountGroupId;
+use gateway_core::{
+    identity::QuotaScopeId,
+    policy::RateLimits,
+    routing::{
+        AccountGroupId,
+        source::{SourceControls, SourcePreference},
+    },
+};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -28,6 +35,46 @@ use super::{
 
 const DEFAULT_PAGE_SIZE: u32 = 50;
 const MAX_PAGE_SIZE: u32 = 200;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SourceControlsWire {
+    priority: u16,
+    weight: u16,
+    max_concurrency: u64,
+    requests_per_minute: u64,
+    quota_scope_id: Option<String>,
+}
+
+impl SourceControlsWire {
+    fn into_controls(self) -> Result<SourceControls, WireValidationError> {
+        SourceControls::new(
+            SourcePreference::new(self.priority, self.weight)
+                .map_err(|_| WireValidationError::new("sourceControls.priority/weight"))?,
+            RateLimits {
+                max_concurrency: self.max_concurrency,
+                requests_per_minute: self.requests_per_minute,
+            },
+            self.quota_scope_id
+                .map(QuotaScopeId::new)
+                .transpose()
+                .map_err(|_| WireValidationError::new("sourceControls.quotaScopeId"))?,
+        )
+        .map_err(|_| WireValidationError::new("sourceControls.limits"))
+    }
+}
+
+impl From<SourceControls> for SourceControlsWire {
+    fn from(value: SourceControls) -> Self {
+        Self {
+            priority: value.preference().priority(),
+            weight: value.preference().weight(),
+            max_concurrency: value.limits().max_concurrency,
+            requests_per_minute: value.limits().requests_per_minute,
+            quota_scope_id: value.quota_scope_id().map(|id| id.as_str().to_owned()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -70,6 +117,7 @@ impl ListAccountGroupsQuery {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CreateAccountGroupRequest {
+    source_controls: Option<SourceControlsWire>,
     name: String,
     description: Option<String>,
     color: String,
@@ -78,6 +126,7 @@ struct CreateAccountGroupRequest {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UpdateAccountGroupRequest {
+    source_controls: Option<SourceControlsWire>,
     id: String,
     name: String,
     description: Option<String>,
@@ -93,6 +142,7 @@ struct AccountGroupIdRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AccountGroupView {
+    source_controls: SourceControlsWire,
     id: String,
     name: String,
     description: Option<String>,
@@ -133,6 +183,7 @@ struct AccountGroupUsageView {
 impl From<AccountGroupRecord> for AccountGroupView {
     fn from(record: AccountGroupRecord) -> Self {
         Self {
+            source_controls: SourceControlsWire::from(record.source_controls),
             id: record.id.to_string(),
             name: record.name,
             description: record.description,
@@ -269,6 +320,11 @@ where
             .create(
                 &auth.context().mutation_context(),
                 CreateAccountGroup {
+                    source_controls: request
+                        .source_controls
+                        .map(SourceControlsWire::into_controls)
+                        .transpose()
+                        .map_err(map_wire_error)?,
                     name: request.name,
                     description: request.description,
                     color: group_color(&request.color)?,
@@ -295,6 +351,11 @@ where
             .update(
                 &auth.context().mutation_context(),
                 UpdateAccountGroup {
+                    source_controls: request
+                        .source_controls
+                        .map(SourceControlsWire::into_controls)
+                        .transpose()
+                        .map_err(map_wire_error)?,
                     id: group_id(request.id)?,
                     name: request.name,
                     description: request.description,

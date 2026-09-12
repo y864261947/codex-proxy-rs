@@ -7,6 +7,8 @@ pub mod execution;
 mod observation;
 pub mod probe;
 pub mod provider;
+pub mod source_admission;
+pub mod traffic;
 
 pub use coordinator::{AttemptCoordinator, ResponseExecutionSession};
 
@@ -117,10 +119,14 @@ impl AttemptTrigger {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProviderAttemptOutcome {
     /// 上游流自然完成且通过 canonical event 序列校验。
-    Succeeded { provider_kind: ProviderKind },
+    Succeeded {
+        provider_kind: ProviderKind,
+        source: Option<crate::routing::source::SourceId>,
+    },
     /// 上游打开或流式阶段返回了稳定 Provider 错误。
     Failed {
         provider_kind: ProviderKind,
+        source: Option<crate::routing::source::SourceId>,
         error_kind: ProviderErrorKind,
     },
 }
@@ -130,7 +136,17 @@ impl ProviderAttemptOutcome {
     #[must_use]
     pub const fn provider_kind(&self) -> &ProviderKind {
         match self {
-            Self::Succeeded { provider_kind } | Self::Failed { provider_kind, .. } => provider_kind,
+            Self::Succeeded { provider_kind, .. } | Self::Failed { provider_kind, .. } => {
+                provider_kind
+            }
+        }
+    }
+
+    /// 采用本次尝试冻结的来源，改名、改组与共享配额不改变健康归属。
+    #[must_use]
+    pub const fn source(&self) -> Option<&crate::routing::source::SourceId> {
+        match self {
+            Self::Succeeded { source, .. } | Self::Failed { source, .. } => source.as_ref(),
         }
     }
 
@@ -520,6 +536,8 @@ pub struct NewModelRequest {
     pub id: ModelRequestId,
     pub client_api_key_id: Option<ClientApiKeyId>,
     pub client_api_key_ref: ClientApiKeyId,
+    pub customer_ref: Option<crate::policy::CustomerId>,
+    pub access_group_ref: Option<crate::policy::AccessGroupId>,
     pub config_revision: ConfigRevision,
     pub routing: crate::routing::AccountRoutingSnapshot,
     pub protocol: String,
@@ -545,6 +563,7 @@ pub struct NewModelRequest {
 /// 每次真实上游发送前对同一 `model_requests` 行的更新。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttemptRecord {
+    pub source: Option<crate::routing::source::SourceSnapshot>,
     pub request_id: ModelRequestId,
     pub attempt_count: NonZeroU32,
     pub trigger: AttemptTrigger,
@@ -564,6 +583,7 @@ pub struct AttemptRecord {
 /// 需要解释换号的中间失败。
 #[derive(Debug)]
 pub struct IntermediateFailure {
+    pub source: Option<crate::routing::source::SourceSnapshot>,
     pub request_id: ModelRequestId,
     pub attempt_index: NonZeroU32,
     pub trigger: AttemptTrigger,
@@ -784,12 +804,21 @@ pub enum EngineError {
 pub struct GatewayEngine<S: ?Sized> {
     store: Arc<S>,
     providers: provider::ProviderRegistry,
+    source_admissions: Arc<dyn source_admission::SourceAdmissionPort>,
 }
 
 impl<S: ?Sized> GatewayEngine<S> {
     #[must_use]
-    pub const fn new(store: Arc<S>, providers: provider::ProviderRegistry) -> Self {
-        Self { store, providers }
+    pub const fn new(
+        store: Arc<S>,
+        providers: provider::ProviderRegistry,
+        source_admissions: Arc<dyn source_admission::SourceAdmissionPort>,
+    ) -> Self {
+        Self {
+            store,
+            providers,
+            source_admissions,
+        }
     }
 
     #[must_use]
@@ -800,5 +829,10 @@ impl<S: ?Sized> GatewayEngine<S> {
     #[must_use]
     pub const fn providers(&self) -> &provider::ProviderRegistry {
         &self.providers
+    }
+
+    #[must_use]
+    pub const fn source_admissions(&self) -> &Arc<dyn source_admission::SourceAdmissionPort> {
+        &self.source_admissions
     }
 }

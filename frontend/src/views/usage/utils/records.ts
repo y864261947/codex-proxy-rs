@@ -1,6 +1,7 @@
 // Usage 列表与详情使用独立读模型；共享展示函数只依赖两者的公共字段。
 
 import type {
+  UpstreamSource,
   UsageAttempt,
   UsageBilling,
   UsageCost,
@@ -16,6 +17,7 @@ import { formatDuration } from './format'
 
 // Usage 记录的规范化 view model：组件只消费这个形状。
 export interface UsageViewModel {
+  upstreamSource: UpstreamSource | null
   id: string
   requestId: string
   clientApiKeyId: string | null
@@ -83,6 +85,7 @@ export function normalizeUsageRecord(record: UsageRecordDetail): UsageViewModel 
   const metadata = record.metadata
 
   return {
+    upstreamSource: record.upstreamSource ?? null,
     id: record.id,
     requestId: record.requestId,
     clientApiKeyId: record.clientApiKeyId,

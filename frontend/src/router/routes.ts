@@ -17,18 +17,54 @@ export const routes: RouteRecordRaw[] = [
       },
       {
         path: 'accounts',
-        name: 'accounts',
-        component: () => import('@/views/accounts/index.vue'),
+        redirect: '/pools/accounts',
       },
       {
         path: 'account-groups',
-        name: 'account-groups',
-        component: () => import('@/views/account-groups/index.vue'),
+        redirect: '/pools/groups',
+      },
+      {
+        path: 'channels/quotas',
+        name: 'quota-scopes',
+        component: () => import('@/views/quota-scopes/index.vue'),
+      },
+      {
+        path: 'channels',
+        name: 'channels',
+        component: () => import('@/views/channels/index.vue'),
+      },
+      {
+        path: 'pools',
+        component: () => import('@/views/pools/index.vue'),
+        children: [
+          { path: '', redirect: '/pools/accounts' },
+          { path: 'accounts', name: 'accounts', component: () => import('@/views/accounts/index.vue') },
+          { path: 'groups', name: 'account-groups', component: () => import('@/views/account-groups/index.vue') },
+        ],
+      },
+      {
+        path: 'models',
+        name: 'models',
+        component: () => import('@/views/models/index.vue'),
+      },
+      {
+        path: 'monitoring',
+        name: 'monitoring',
+        component: () => import('@/views/monitoring/index.vue'),
       },
       {
         path: 'api-keys',
-        name: 'api-keys',
-        component: () => import('@/views/api-keys/index.vue'),
+        redirect: '/access/keys',
+      },
+      {
+        path: 'access',
+        component: () => import('@/views/access/index.vue'),
+        children: [
+          { path: '', redirect: '/access/keys' },
+          { path: 'keys', name: 'api-keys', component: () => import('@/views/api-keys/index.vue') },
+          { path: 'customers', name: 'customers', component: () => import('@/views/customers/index.vue') },
+          { path: 'groups', name: 'access-groups', component: () => import('@/views/access-groups/index.vue') },
+        ],
       },
       {
         path: 'usage',

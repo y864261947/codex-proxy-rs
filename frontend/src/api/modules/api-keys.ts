@@ -1,9 +1,13 @@
+import type { AccessGroupRef } from './access-groups'
 import type { AccountGroupRef } from './account-groups'
+import type { CustomerRef } from './customers'
 import request from '../request'
 
-export type ApiKeyRoutingScope = 'all' | 'groups'
+export type ApiKeyRoutingScope = 'all' | 'groups' | 'access_group'
 
 export interface ApiKey {
+  customer: CustomerRef | null
+  accessGroup: AccessGroupRef | null
   id: string
   name: string
   label: string | null
@@ -73,7 +77,7 @@ export function getApiKeys(data: ApiKeyListParams) {
   })
 }
 
-export function createApiKey(data: ApiKeyWriteParam) {
+export function createApiKey(data: ApiKeyWriteParam & { customerId?: string | null, accessGroupId?: string | null }) {
   return request<ApiKeyCreateResponse>({
     url: '/api/admin/client-keys/create',
     method: 'POST',

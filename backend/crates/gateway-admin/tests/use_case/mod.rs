@@ -2,6 +2,8 @@ mod account_groups;
 mod accounts;
 mod auth;
 mod backup;
+mod catalog;
+mod channels;
 mod client_keys;
 mod observability;
 mod openai;
@@ -13,6 +15,57 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex},
 };
+
+#[async_trait]
+impl gateway_admin::ports::store::AccessGroupStore for UnavailableStore {
+    async fn list_access_groups(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::access_groups::AccessGroupPage> {
+        Err(unavailable("access_group"))
+    }
+    async fn change_access_group(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("access_group"))
+    }
+}
+
+#[async_trait]
+impl gateway_admin::ports::store::CustomerStore for UnavailableStore {
+    async fn list_customers(
+        &self,
+        _: gateway_admin::model::customers::CustomerListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::customers::CustomerPage> {
+        Err(unavailable("customer"))
+    }
+    async fn change_customer(
+        &self,
+        _: gateway_admin::model::customers::CustomerChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("customer"))
+    }
+}
+
+#[async_trait]
+impl gateway_admin::ports::store::QuotaScopeStore for UnavailableStore {
+    async fn list_quota_scopes(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::quota_scopes::QuotaScopePage> {
+        Err(unavailable("quota_scope"))
+    }
+    async fn change_quota_scope(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("quota_scope"))
+    }
+}
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -89,6 +142,10 @@ pub(super) struct AdminHarness {
     observability: Arc<dyn ObservabilityStore>,
     settings: Arc<dyn SettingsStore>,
     backup: BackupStorePorts,
+    channels: Arc<dyn gateway_admin::ports::store::ChannelStore>,
+    channel_providers: Vec<Arc<dyn gateway_admin::ports::channels::ChannelProviderAdmin>>,
+    model_catalog: gateway_core::catalog::SharedModelCatalogReader,
+    snapshot: Arc<dyn SnapshotControl>,
     providers: Vec<Arc<dyn ProviderAdmin>>,
     probe: Arc<dyn AccountProbe>,
     system: Arc<dyn SystemOperations>,
@@ -108,10 +165,14 @@ impl AdminHarness {
             observability: unavailable.clone(),
             settings: unavailable,
             backup: BackupStorePorts::disabled(),
+            channels: Arc::new(UnavailableStore),
+            channel_providers: Vec::new(),
+            snapshot: Arc::new(NoopSnapshot),
             providers: vec![
                 Arc::new(UnavailableProvider::new("openai")),
                 Arc::new(UnavailableProvider::new("xai")),
             ],
+            model_catalog: Arc::new(gateway_core::runtime::RuntimeSnapshotHandle::default()),
             probe: Arc::new(UnavailableProbe),
             system: Arc::new(UnavailableSystem),
         }
@@ -119,6 +180,29 @@ impl AdminHarness {
 
     pub(super) fn default_password(mut self, password: &str) -> Self {
         self.default_password = password.to_owned();
+        self
+    }
+
+    pub(super) fn model_catalog(
+        mut self,
+        reader: gateway_core::catalog::SharedModelCatalogReader,
+    ) -> Self {
+        self.model_catalog = reader;
+        self
+    }
+
+    pub(super) fn snapshot(mut self, snapshot: Arc<dyn SnapshotControl>) -> Self {
+        self.snapshot = snapshot;
+        self
+    }
+
+    pub(super) fn channels(
+        mut self,
+        store: Arc<dyn gateway_admin::ports::store::ChannelStore>,
+        provider: Arc<dyn gateway_admin::ports::channels::ChannelProviderAdmin>,
+    ) -> Self {
+        self.channels = store;
+        self.channel_providers.push(provider);
         self
     }
 
@@ -198,14 +282,28 @@ impl AdminHarness {
                     self.account_groups,
                 ),
                 self.auth,
-                self.client_keys,
+                gateway_admin::ports::store::AdminDownstreamStorePorts::new(
+                    self.client_keys,
+                    Arc::new(UnavailableStore),
+                    Arc::new(UnavailableStore),
+                ),
                 self.observability,
                 self.settings,
                 self.backup,
+                gateway_admin::ports::store::AdminUpstreamStorePorts::new(
+                    self.channels,
+                    Arc::new(UnavailableStore),
+                ),
             ),
-            self.providers,
-            Arc::new(NoopSnapshot),
-            self.probe,
+            gateway_admin::ProviderAdminContributions {
+                accounts: self.providers,
+                channels: self.channel_providers,
+            },
+            gateway_admin::AdminRuntimePorts {
+                snapshot: self.snapshot,
+                probe: self.probe,
+                model_catalog: self.model_catalog,
+            },
             Arc::new(NoopClientDistribution),
             self.system,
         )
@@ -574,6 +672,28 @@ impl ObservabilityStore for UnavailableStore {
 
 #[async_trait]
 impl SettingsStore for UnavailableStore {
+    async fn load_global_admission(
+        &self,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        Err(gateway_admin::ports::store::AdminStoreError::new(
+            gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+            "global admission",
+            "unused in this fixture",
+        ))
+    }
+
+    async fn replace_global_admission(
+        &self,
+        _: gateway_core::policy::RateLimits,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        Err(gateway_admin::ports::store::AdminStoreError::new(
+            gateway_admin::ports::store::AdminStoreErrorKind::Unavailable,
+            "global admission",
+            "unused in this fixture",
+        ))
+    }
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Err(unavailable("settings"))
     }

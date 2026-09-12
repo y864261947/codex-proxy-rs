@@ -4,6 +4,8 @@
 //! 具体客户端协议和具体 Provider 都通过外层 adapter 接入。
 
 pub mod account;
+pub mod catalog;
+pub mod channel;
 pub mod diagnostics;
 pub mod engine;
 pub mod error;
@@ -34,6 +36,7 @@ use engine::execution::{
 };
 use engine::probe::AccountProbe;
 use engine::provider::ProviderRegistry;
+use engine::traffic::TrafficMonitor;
 use health::HealthProbe;
 use routing::snapshot::{RuntimeSnapshotCompiler, SnapshotStorePort};
 use runtime::{
@@ -47,6 +50,7 @@ pub struct CoreStorePorts {
     execution: Arc<dyn ExecutionStore>,
     admissions: Arc<dyn ClientAdmissionPort>,
     admission_recovery: Arc<dyn ClientAdmissionRecoveryPort>,
+    source_admissions: Arc<dyn engine::source_admission::SourceAdmissionPort>,
     circuits: Arc<dyn ProviderCircuitPort>,
     continuation: Arc<dyn NativeContinuationPort>,
     snapshots: Arc<dyn SnapshotStorePort>,
@@ -69,11 +73,13 @@ impl CoreStorePorts {
             Arc<dyn SnapshotSubscriptionPort>,
         ),
         client_api_key_usage: Arc<dyn ClientApiKeyUsageSink>,
+        source_admissions: Arc<dyn engine::source_admission::SourceAdmissionPort>,
     ) -> Self {
         Self {
             execution,
             admissions,
             admission_recovery,
+            source_admissions,
             circuits,
             continuation,
             snapshots,
@@ -84,6 +90,8 @@ impl CoreStorePorts {
 }
 
 pub struct CoreBundle {
+    model_catalog: catalog::SharedModelCatalogReader,
+    traffic: TrafficMonitor,
     execution: Arc<dyn ExecutionService>,
     snapshot_control: Arc<dyn SnapshotControl>,
     account_probe: Arc<dyn AccountProbe>,
@@ -92,6 +100,16 @@ pub struct CoreBundle {
 }
 
 impl CoreBundle {
+    #[must_use]
+    pub fn model_catalog(&self) -> catalog::SharedModelCatalogReader {
+        Arc::clone(&self.model_catalog)
+    }
+
+    #[must_use]
+    pub fn traffic_monitor(&self) -> TrafficMonitor {
+        self.traffic.clone()
+    }
+
     #[must_use]
     pub fn execution_service(&self) -> Arc<dyn ExecutionService> {
         Arc::clone(&self.execution)
@@ -149,16 +167,20 @@ pub async fn initialize(
         snapshots.clone(),
         ports.execution,
         providers,
-        ports.admissions,
+        (ports.admissions, ports.source_admissions),
         ports.circuits,
         ports.continuation,
         ports.client_api_key_usage,
     ));
+    let traffic = service.traffic_monitor();
     let execution: Arc<dyn ExecutionService> = service.clone();
     let account_probe: Arc<dyn AccountProbe> = service;
     let snapshot_control: Arc<dyn SnapshotControl> = publisher;
+    let model_catalog: catalog::SharedModelCatalogReader = Arc::new(snapshots.clone());
     let health_probes: Vec<Arc<dyn HealthProbe>> = vec![Arc::new(snapshots)];
     Ok(CoreBundle {
+        model_catalog,
+        traffic,
         execution,
         snapshot_control,
         account_probe,

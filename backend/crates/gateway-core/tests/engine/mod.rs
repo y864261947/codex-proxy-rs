@@ -4,6 +4,7 @@ mod coordinator;
 mod execution;
 mod probe;
 mod provider;
+mod traffic;
 
 use gateway_core::engine::AttemptTrigger;
 

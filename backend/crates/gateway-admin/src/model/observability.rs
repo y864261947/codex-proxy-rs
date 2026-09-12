@@ -531,6 +531,7 @@ pub struct DashboardObservation {
 /// 使用记录表格的窄读模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageListRecord {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub id: String,
     pub endpoint: String,
     pub client_transport: String,
@@ -580,6 +581,7 @@ pub struct UsageListRecord {
 /// 一次完整模型请求的公共观测记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageRecord {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub id: String,
     pub client_api_key_ref: String,
     pub config_revision: u64,
@@ -667,6 +669,7 @@ pub struct UsagePage {
 /// 请求中的一次上游尝试或运维事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageAttempt {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub source: String,
     pub id: String,
     pub attempt_index: u32,
@@ -758,6 +761,7 @@ pub struct DiagnosticObservation {
 /// 统一运维错误记录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpsError {
+    pub upstream_source: Option<gateway_core::routing::source::SourceSnapshot>,
     pub source: String,
     pub event_id: String,
     pub request_id: Option<String>,

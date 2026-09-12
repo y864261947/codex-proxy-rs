@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import {
+  Activity,
   ArrowUpCircle,
+  Boxes,
   ChartNoAxesColumn,
-  FolderTree,
   Info,
   KeyRound,
   LayoutDashboard,
@@ -11,6 +12,7 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
+  Plug,
   Settings,
   Sun,
   Users,
@@ -57,10 +59,12 @@ const preferredMotion = usePreferredReducedMotion()
 
 const navItems = [
   { label: '概览', icon: LayoutDashboard, path: '/' },
-  { label: '账号管理', icon: Users, path: '/accounts' },
-  { label: '分组管理', icon: FolderTree, path: '/account-groups' },
-  { label: 'API 密钥', icon: KeyRound, path: '/api-keys' },
-  { label: '使用统计', icon: ChartNoAxesColumn, path: '/usage' },
+  { label: '上游渠道', icon: Plug, path: '/channels' },
+  { label: '自建号池', icon: Users, path: '/pools' },
+  { label: '下游接入', icon: KeyRound, path: '/access' },
+  { label: '模型管理', icon: Boxes, path: '/models' },
+  { label: '监控中心', icon: Activity, path: '/monitoring' },
+  { label: '请求与用量', icon: ChartNoAxesColumn, path: '/usage' },
   { label: '主题设置', icon: Palette, path: '/theme' },
   { label: '系统设置', icon: Settings, path: '/settings' },
 ]

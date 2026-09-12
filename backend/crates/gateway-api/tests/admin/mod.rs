@@ -6,6 +6,57 @@ use std::{
     },
 };
 
+#[async_trait]
+impl gateway_admin::ports::store::AccessGroupStore for UnusedStore {
+    async fn list_access_groups(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::access_groups::AccessGroupPage> {
+        Err(unavailable("access_group"))
+    }
+    async fn change_access_group(
+        &self,
+        _: gateway_admin::model::access_groups::AccessGroupChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("access_group"))
+    }
+}
+
+#[async_trait]
+impl gateway_admin::ports::store::CustomerStore for UnusedStore {
+    async fn list_customers(
+        &self,
+        _: gateway_admin::model::customers::CustomerListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::customers::CustomerPage> {
+        Err(unavailable("customer"))
+    }
+    async fn change_customer(
+        &self,
+        _: gateway_admin::model::customers::CustomerChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("customer"))
+    }
+}
+
+#[async_trait]
+impl gateway_admin::ports::store::QuotaScopeStore for UnusedStore {
+    async fn list_quota_scopes(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeListQuery,
+    ) -> AdminStoreResult<gateway_admin::model::quota_scopes::QuotaScopePage> {
+        Err(unavailable("quota_scope"))
+    }
+    async fn change_quota_scope(
+        &self,
+        _: gateway_admin::model::quota_scopes::QuotaScopeChange,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::Revision> {
+        Err(unavailable("quota_scope"))
+    }
+}
+
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 use futures::future::BoxFuture;
@@ -76,18 +127,24 @@ use gateway_core::{
     runtime::SnapshotControl,
 };
 
+mod access_groups;
 mod account_groups;
 mod accounts;
 mod auth;
+mod catalog;
+mod channels;
 mod client_keys;
+mod customers;
 mod errors;
 mod observability;
+mod quota_scopes;
 mod settings;
 mod system;
 mod wire;
 
 pub(super) struct AdminTestFixture {
     pub services: AdminServices,
+    pub model_catalog: gateway_core::runtime::RuntimeSnapshotHandle,
     pub auth: Arc<MemoryAuthStore>,
     pub settings: Arc<MemorySettingsStore>,
     pub usage_records: Arc<Mutex<Vec<UsageListRecord>>>,
@@ -104,6 +161,19 @@ impl AdminTestFixture {
     }
 
     pub async fn with_system(system: Arc<dyn SystemOperations>) -> Self {
+        Self::with_channel_store_and_system(None, system).await
+    }
+
+    pub async fn with_channel_store(
+        store: Arc<dyn gateway_admin::ports::store::ChannelStore>,
+    ) -> Self {
+        Self::with_channel_store_and_system(Some(store), Arc::new(UnusedSystem)).await
+    }
+
+    async fn with_channel_store_and_system(
+        channel_store: Option<Arc<dyn gateway_admin::ports::store::ChannelStore>>,
+        system: Arc<dyn SystemOperations>,
+    ) -> Self {
         let api_key = Arc::new(Mutex::new(None));
         let auth = Arc::new(MemoryAuthStore::new(api_key.clone()));
         let settings = Arc::new(MemorySettingsStore::new(api_key));
@@ -123,18 +193,25 @@ impl AdminTestFixture {
             dashboard_observation: Arc::clone(&dashboard_observation),
             dashboard_summary_range: Arc::clone(&dashboard_summary_range),
         });
+        let channel_store = channel_store.unwrap_or_else(|| unused.clone());
         let stores = AdminStorePorts::new(
             AdminAccountStorePorts::new(unused.clone(), unused.clone(), account_groups.clone()),
             auth.clone(),
-            client_keys.clone(),
-            unused,
+            gateway_admin::ports::store::AdminDownstreamStorePorts::new(
+                client_keys.clone(),
+                unused.clone(),
+                unused.clone(),
+            ),
+            unused.clone(),
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
+            gateway_admin::ports::store::AdminUpstreamStorePorts::new(channel_store, unused),
         );
         let providers: Vec<Arc<dyn ProviderAdmin>> = vec![
             Arc::new(UnusedProvider::new("openai")),
             Arc::new(UnusedProvider::new("xai")),
         ];
+        let model_catalog = gateway_core::runtime::RuntimeSnapshotHandle::default();
         let bundle = gateway_admin::initialize(
             AdminConfig {
                 session_ttl_minutes: 60,
@@ -142,9 +219,15 @@ impl AdminTestFixture {
                 default_password: InitialAdminPassword::new("strong-admin-password"),
             },
             stores,
-            providers,
-            Arc::new(NoopSnapshot),
-            Arc::new(NoopProbe),
+            gateway_admin::ProviderAdminContributions {
+                accounts: providers,
+                channels: vec![],
+            },
+            gateway_admin::AdminRuntimePorts {
+                snapshot: Arc::new(NoopSnapshot),
+                probe: Arc::new(NoopProbe),
+                model_catalog: Arc::new(model_catalog.clone()),
+            },
             Arc::new(StaticClientDistribution),
             system,
         )
@@ -152,6 +235,7 @@ impl AdminTestFixture {
         .expect("initialize test admin services");
         Self {
             services: bundle.services(),
+            model_catalog,
             auth,
             settings,
             usage_records,
@@ -164,7 +248,7 @@ impl AdminTestFixture {
     }
 
     pub fn state(&self) -> AdminTestState {
-        AdminTestState(self.services.clone())
+        AdminTestState(self.services.clone(), Default::default())
     }
 }
 
@@ -193,9 +277,13 @@ impl ClientDistributionResolver for StaticClientDistribution {
 }
 
 #[derive(Clone)]
-pub(super) struct AdminTestState(AdminServices);
+pub(super) struct AdminTestState(AdminServices, gateway_core::engine::traffic::TrafficMonitor);
 
 impl AdminSessionState for AdminTestState {
+    fn traffic_monitor(&self) -> &gateway_core::engine::traffic::TrafficMonitor {
+        &self.1
+    }
+
     fn admin_services(&self) -> &AdminServices {
         &self.0
     }
@@ -305,6 +393,7 @@ impl AuthStore for MemoryAuthStore {
 }
 
 pub(super) struct MemorySettingsStore {
+    global_limits: Mutex<gateway_core::policy::RateLimits>,
     settings: Mutex<RuntimeSettings>,
     api_key: Arc<Mutex<Option<AdminApiKey>>>,
 }
@@ -313,6 +402,7 @@ impl MemorySettingsStore {
     fn new(api_key: Arc<Mutex<Option<AdminApiKey>>>) -> Self {
         Self {
             settings: Mutex::new(test_runtime_settings()),
+            global_limits: Mutex::new(gateway_core::policy::RateLimits::unlimited()),
             api_key,
         }
     }
@@ -324,6 +414,30 @@ impl MemorySettingsStore {
 
 #[async_trait]
 impl SettingsStore for MemorySettingsStore {
+    async fn load_global_admission(
+        &self,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        let settings = self.settings.lock().expect("settings");
+        Ok(gateway_admin::model::settings::GlobalAdmissionSettings {
+            limits: *self.global_limits.lock().expect("global limits"),
+            config_revision: settings.config_revision,
+        })
+    }
+
+    async fn replace_global_admission(
+        &self,
+        limits: gateway_core::policy::RateLimits,
+        _: &MutationContext,
+    ) -> AdminStoreResult<gateway_admin::model::settings::GlobalAdmissionSettings> {
+        let mut settings = self.settings.lock().expect("settings");
+        *self.global_limits.lock().expect("global limits") = limits;
+        settings.config_revision = next_revision(settings.config_revision);
+        Ok(gateway_admin::model::settings::GlobalAdmissionSettings {
+            limits,
+            config_revision: settings.config_revision,
+        })
+    }
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings> {
         Ok(self.settings.lock().expect("settings").clone())
     }
@@ -406,6 +520,7 @@ impl MemoryAccountGroupStore {
             (
                 primary_id.clone(),
                 AccountGroupRecord {
+                    source_controls: Default::default(),
                     id: primary_id,
                     name: "Alpha routing".to_owned(),
                     description: Some("Primary traffic".to_owned()),
@@ -427,6 +542,7 @@ impl MemoryAccountGroupStore {
             (
                 secondary_id.clone(),
                 AccountGroupRecord {
+                    source_controls: Default::default(),
                     id: secondary_id,
                     name: "Beta routing".to_owned(),
                     description: None,
@@ -542,6 +658,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         let mut state = self.state.lock().expect("account groups");
         let now = Utc::now();
         let record = AccountGroupRecord {
+            source_controls: command.source_controls.unwrap_or_default(),
             id: command.id.clone(),
             name: command.name,
             description: command.description,
@@ -573,6 +690,9 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         record.name = command.name;
         record.description = command.description;
         record.color = command.color;
+        if let Some(controls) = command.source_controls {
+            record.source_controls = controls;
+        }
         record.updated_at = Utc::now();
         mutation(&mut state, command.id, true)
     }
@@ -640,6 +760,8 @@ impl ClientKeyStore for MemoryClientKeyStore {
         let now = Utc::now();
         Ok(Some(ClientKeySecret::new(
             ClientKeyRecord {
+                customer: None,
+                access_group: None,
                 id: id.clone(),
                 name: "revealed".to_owned(),
                 label: None,

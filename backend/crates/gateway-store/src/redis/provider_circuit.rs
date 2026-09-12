@@ -4,9 +4,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use gateway_core::engine::execution::{
     ProviderCircuitDecision as CoreCircuitDecision, ProviderCircuitError, ProviderCircuitPolicy,
-    ProviderCircuitPort,
+    ProviderCircuitPort, ProviderCircuitScope,
 };
-use gateway_core::routing::ProviderKind;
 use redis::{Script, aio::ConnectionManager};
 
 use crate::{StoreError, StoreResult, redis_unavailable, require_nonempty};
@@ -153,10 +152,10 @@ impl ProviderCircuitRepository for RedisProviderCircuitRepository {
 impl ProviderCircuitPort for RedisProviderCircuitRepository {
     fn decision<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> futures::future::BoxFuture<'a, Result<CoreCircuitDecision, ProviderCircuitError>> {
         Box::pin(async move {
-            self.provider_circuit_decision(provider_kind.as_str())
+            self.provider_circuit_decision(&circuit_reference(scope))
                 .await
                 .map(|decision| match decision {
                     ProviderCircuitDecision::Allow => CoreCircuitDecision::Allow,
@@ -170,10 +169,10 @@ impl ProviderCircuitPort for RedisProviderCircuitRepository {
 
     fn observe_failure<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> futures::future::BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async move {
-            self.observe_provider_failure(provider_kind.as_str())
+            self.observe_provider_failure(&circuit_reference(scope))
                 .await
                 .map(|_| ())
                 .map_err(|_| ProviderCircuitError)
@@ -182,10 +181,10 @@ impl ProviderCircuitPort for RedisProviderCircuitRepository {
 
     fn observe_success<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> futures::future::BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async move {
-            self.observe_provider_success(provider_kind.as_str())
+            self.observe_provider_success(&circuit_reference(scope))
                 .await
                 .map_err(|_| ProviderCircuitError)
         })
@@ -204,5 +203,15 @@ fn invalid(message: &str) -> StoreError {
     StoreError::InvalidData {
         entity: "provider circuit",
         message: message.to_owned(),
+    }
+}
+
+// 保留旧 Provider key；保留前缀无法成为 ProviderKind，防止来源身份碰撞。
+fn circuit_reference(scope: &ProviderCircuitScope) -> std::borrow::Cow<'_, str> {
+    match scope {
+        ProviderCircuitScope::Provider(provider) => std::borrow::Cow::Borrowed(provider.as_str()),
+        ProviderCircuitScope::Source(source) => {
+            std::borrow::Cow::Owned(format!("__source:{source}"))
+        }
     }
 }

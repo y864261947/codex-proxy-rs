@@ -7,6 +7,10 @@ where
     S: AdminSessionState + Clone + Send + Sync + 'static,
 {
     Router::new()
+        .route(
+            "/api/admin/dashboard/realtime",
+            get(dashboard_realtime::<S>),
+        )
         .route("/api/admin/dashboard/summary", get(dashboard_summary::<S>))
         .route("/api/admin/dashboard/trend", get(dashboard_trend::<S>))
         .route("/api/admin/usage/records", get(usage_records::<S>))
@@ -27,6 +31,29 @@ where
             get(usage_insights_diagnostics::<S>),
         )
         .route("/api/admin/operations/errors", get(ops_errors::<S>))
+}
+
+pub(crate) async fn dashboard_realtime<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let snapshot = state.traffic_monitor().snapshot();
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(RealtimeTrafficView {
+            observed_at: Utc::now(),
+            scope: "process",
+            window_seconds: snapshot.window_seconds,
+            uptime_seconds: snapshot.uptime_seconds,
+            ingress_requests_last_minute: snapshot.ingress_requests_last_minute,
+            in_flight_requests: snapshot.in_flight_requests,
+            preparing_requests: snapshot.preparing_requests,
+            executing_requests: snapshot.executing_requests,
+        }),
+    ))
 }
 
 pub(crate) async fn dashboard_summary<S>(

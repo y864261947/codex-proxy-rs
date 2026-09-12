@@ -6,6 +6,7 @@ use gateway_core::engine::continuation::{
 use gateway_core::operation::ProviderSessionState;
 use gateway_core::policy::ClientApiKeyId;
 use gateway_core::routing::ProviderKind;
+use gateway_core::routing::{AccountGroupId, source::SourceId};
 use gateway_store::redis::RedisNativeContinuationRepository;
 use redis::aio::ConnectionManager;
 use serde_json::{Map, Value};
@@ -18,6 +19,9 @@ async fn native_continuation_round_trips_opaque_state_without_exposing_response_
     };
     let previous_response_id =
         PreviousResponseId::new(format!("resp_{}\0client-visible-secret", "x".repeat(257)));
+    let source = SourceId::AccountPool(
+        AccountGroupId::new("grp_11111111111111111111111111111111").expect("pool"),
+    );
     let state = ProviderSessionState::new(
         "openai",
         Map::from_iter([(
@@ -37,6 +41,7 @@ async fn native_continuation_round_trips_opaque_state_without_exposing_response_
                 ProviderAccountId::new("acct_primary").expect("account"),
             )
             .with_scope(NativeContinuationScope::Persisted)
+            .with_source(source.clone())
             .with_session_state(state.clone()),
         )
         .await
@@ -52,6 +57,7 @@ async fn native_continuation_round_trips_opaque_state_without_exposing_response_
         previous_response_id.as_str()
     );
     assert_eq!(resolved.account().as_str(), "acct_primary");
+    assert_eq!(resolved.source(), Some(&source));
     assert_eq!(resolved.session_state(), Some(&state));
 
     let keys = namespace_keys(&mut connection, &namespace).await;
@@ -69,6 +75,39 @@ async fn native_continuation_round_trips_opaque_state_without_exposing_response_
         .await
         .expect("read continuation TTL");
     assert!((14_000_000..=14_400_000).contains(&ttl));
+
+    let payload: String = redis::cmd("GET")
+        .arg(entry_key)
+        .query_async(&mut connection)
+        .await
+        .expect("payload");
+    let mut legacy: Value = serde_json::from_str(&payload).expect("wire");
+    legacy.as_object_mut().expect("object").remove("poolId");
+    redis::cmd("SET")
+        .arg(entry_key)
+        .arg(legacy.to_string())
+        .query_async::<()>(&mut connection)
+        .await
+        .expect("old payload");
+    let resolved = repository
+        .resolve(&client_key("key_primary"), &previous_response_id)
+        .await
+        .expect("legacy read")
+        .expect("legacy pin");
+    assert!(resolved.source().is_none());
+    assert_eq!(resolved.account().as_str(), "acct_primary");
+    legacy["poolId"] = Value::String("invalid-pool".to_owned());
+    redis::cmd("SET")
+        .arg(entry_key)
+        .arg(legacy.to_string())
+        .query_async::<()>(&mut connection)
+        .await
+        .expect("invalid payload");
+    let error = repository
+        .resolve(&client_key("key_primary"), &previous_response_id)
+        .await
+        .expect_err("invalid source must not fall back to account-only affinity");
+    assert_eq!(error.kind(), NativeContinuationStoreErrorKind::InvalidData);
 
     delete_namespace_keys(&mut connection, &namespace).await;
 }

@@ -51,6 +51,8 @@ const CLIENT_API_KEY_LAST_USED_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientApiKeySnapshot {
+    pub customer: Option<gateway_core::policy::CustomerPolicy>,
+    pub access_group: Option<gateway_core::policy::AccessGroupPolicy>,
     pub id: ClientApiKeyId,
     pub plaintext_key: PlaintextClientApiKey,
     pub group_ids: Vec<AccountGroupId>,
@@ -67,6 +69,8 @@ impl ClientApiKeySnapshot {
     ) -> StoreResult<Self> {
         Ok(Self {
             id: ClientApiKeyId::new(id).map_err(|_| invalid("persisted key ID is invalid"))?,
+            customer: None,
+            access_group: None,
             plaintext_key: PlaintextClientApiKey::new(key)
                 .map_err(|_| invalid("persisted plaintext key is invalid"))?,
             group_ids: group_ids
@@ -105,6 +109,8 @@ impl fmt::Debug for ClientApiKeySecret {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientApiKeyRecord {
+    pub customer: Option<gateway_admin::model::customers::CustomerRef>,
+    pub access_group: Option<gateway_admin::model::access_groups::AccessGroupRef>,
     pub id: String,
     pub name: String,
     pub label: Option<String>,
@@ -264,6 +270,8 @@ pub struct ClientApiKeyPage {
 
 #[derive(Clone)]
 pub struct NewClientApiKey {
+    pub customer_id: Option<String>,
+    pub access_group_id: Option<String>,
     pub id: String,
     pub name: String,
     pub label: Option<String>,
@@ -286,6 +294,14 @@ impl fmt::Debug for NewClientApiKey {
 
 impl NewClientApiKey {
     pub fn validate(&self) -> StoreResult<()> {
+        if let Some(id) = &self.customer_id {
+            gateway_core::policy::CustomerId::new(id)
+                .map_err(|_| invalid("invalid customer ID"))?;
+        }
+        if let Some(id) = &self.access_group_id {
+            gateway_core::policy::AccessGroupId::new(id)
+                .map_err(|_| invalid("invalid access group ID"))?;
+        }
         require_nonempty(ENTITY, "id", &self.id)?;
         require_nonempty(ENTITY, "name", &self.name)?;
         validate_group_ids(&self.group_ids)?;
@@ -349,10 +365,12 @@ impl ClientApiKeyRepository for PgClientApiKeyRepository {
         query.validate()?;
         let total = count_client_api_keys(&self.pool, query.search.as_deref()).await?;
         let mut statement = QueryBuilder::<Postgres>::new(
-            "select k.id, k.name, k.label, left(k.key, 10) as prefix, k.enabled,
+            "select k.id, k.name, k.label, k.customer_id, c.name as customer_name, c.enabled as customer_enabled, k.access_group_id, ag.name as access_group_name, ag.enabled as access_group_enabled, left(k.key, 10) as prefix, k.enabled,
                     k.max_concurrency, k.requests_per_minute, k.last_used_at, k.created_at,
                     k.updated_at, '[]'::jsonb as groups, '{}'::text[] as provider_kinds
              from client_api_keys k
+             left join customers c on c.id = k.customer_id
+             left join access_groups ag on ag.id = k.access_group_id
              where true",
         );
         push_client_key_search(&mut statement, query.search.as_deref());
@@ -406,46 +424,21 @@ impl ClientApiKeyRepository for PgClientApiKeyRepository {
 
     async fn get_client_api_key(&self, id: &str) -> StoreResult<Option<ClientApiKeyRecord>> {
         require_nonempty(ENTITY, "id", id)?;
-        sqlx::query(
-            "select k.id, k.name, k.label, left(k.key, 10) as prefix, k.enabled,
+        let rows = sqlx::query(
+            "select k.id, k.name, k.label, k.customer_id, c.name as customer_name, c.enabled as customer_enabled, k.access_group_id, ag.name as access_group_name, ag.enabled as access_group_enabled, left(k.key, 10) as prefix, k.enabled,
                     k.max_concurrency, k.requests_per_minute, k.last_used_at, k.created_at,
-                    k.updated_at, coalesce(groups.groups, '[]'::jsonb) as groups,
-                    case
-                      when groups.binding_count = 0 then coalesce(
-                        (select array_agg(distinct a.provider_kind order by a.provider_kind)
-                         from provider_accounts a),
-                        '{}'
-                      )
-                      else coalesce(groups.provider_kinds, '{}')
-                    end as provider_kinds
+                    k.updated_at, '[]'::jsonb as groups, '{}'::text[] as provider_kinds
              from client_api_keys k
-             left join lateral (
-               select
-                 (select count(*)::bigint
-                  from client_api_key_groups kg
-                  where kg.client_api_key_id = k.id) as binding_count,
-                 (select jsonb_agg(jsonb_build_object(
-                           'id', g.id, 'name', g.name, 'color', g.color, 'enabled', g.enabled
-                         ) order by g.id)
-                  from client_api_key_groups kg
-                  join account_groups g on g.id = kg.account_group_id
-                  where kg.client_api_key_id = k.id) as groups,
-                 (select array_agg(distinct a.provider_kind order by a.provider_kind)
-                  from client_api_key_groups kg
-                  join account_groups g on g.id = kg.account_group_id and g.enabled
-                  join account_group_accounts gm on gm.account_group_id = g.id
-                  join provider_accounts a on a.id = gm.provider_account_id
-                  where kg.client_api_key_id = k.id) as provider_kinds
-             ) groups on true
+             left join customers c on c.id = k.customer_id
+             left join access_groups ag on ag.id = k.access_group_id
              where k.id = $1",
-        )
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|_| postgres_unavailable("get client API key"))?
-        .as_ref()
-        .map(client_record_from_row)
-        .transpose()
+        ).bind(id).fetch_all(&self.pool).await.map_err(|_| postgres_unavailable("get client API key"))?;
+        let mut records = rows
+            .iter()
+            .map(client_record_from_row)
+            .collect::<StoreResult<Vec<_>>>()?;
+        load_client_key_memberships(&self.pool, &mut records).await?;
+        Ok(records.pop())
     }
 
     async fn touch_client_api_keys(
@@ -710,6 +703,8 @@ impl ClientKeyStore for PgAdminClientKeyStore {
             .control_plane
             .create_client_api_key(
                 NewClientApiKey {
+                    customer_id: command.customer_id.map(|id| id.to_string()),
+                    access_group_id: command.access_group_id.map(|id| id.to_string()),
                     id: id.as_str().to_owned(),
                     name: command.name,
                     label: command.label,
@@ -731,6 +726,8 @@ impl ClientKeyStore for PgAdminClientKeyStore {
                         "name",
                         "label",
                         "group_ids",
+                        "customer_id",
+                        "access_group_id",
                         "key",
                         "enabled",
                         "max_concurrency",
@@ -908,6 +905,8 @@ fn admin_client_key_cursor(cursor: ClientApiKeyCursor) -> AdminStoreResult<Admin
 
 fn admin_client_key_record(record: ClientApiKeyRecord) -> AdminStoreResult<AdminClientKeyRecord> {
     Ok(AdminClientKeyRecord {
+        customer: record.customer,
+        access_group: record.access_group,
         id: ClientApiKeyId::new(record.id)
             .map_err(|_| admin_store_error(ENTITY, invalid("invalid client key id")))?,
         name: record.name,
@@ -956,8 +955,8 @@ pub(crate) async fn insert_client_api_key_in_transaction(
     sqlx::query(
         "insert into client_api_keys (
            id, name, label, key, enabled, max_concurrency, requests_per_minute,
-           last_used_at, created_at, updated_at
-         ) values ($1, $2, $3, $4, true, $5, $6, null, now(), now())",
+           last_used_at, created_at, updated_at, customer_id, access_group_id
+         ) values ($1, $2, $3, $4, true, $5, $6, null, now(), now(), $7, $8)",
     )
     .bind(&key.id)
     .bind(&key.name)
@@ -965,9 +964,27 @@ pub(crate) async fn insert_client_api_key_in_transaction(
     .bind(&key.key)
     .bind(to_i64(key.max_concurrency)?)
     .bind(to_i64(key.requests_per_minute)?)
+    .bind(&key.customer_id)
+    .bind(&key.access_group_id)
     .execute(&mut **transaction)
     .await
-    .map_err(|_| postgres_unavailable("insert client API key in transaction"))?;
+    .map_err(|error| {
+        if matches!(
+            error
+                .as_database_error()
+                .and_then(|error| error.code())
+                .as_deref(),
+            Some("23503" | "23505")
+        ) {
+            StoreError::Conflict {
+                entity: ENTITY,
+                id: key.id.clone(),
+                kind: crate::ConflictKind::InvalidTransition,
+            }
+        } else {
+            postgres_unavailable("insert client API key in transaction")
+        }
+    })?;
     replace_client_api_key_groups_in_transaction(transaction, &key.id, &key.group_ids).await?;
     Ok(())
 }
@@ -1121,6 +1138,38 @@ fn client_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<ClientApiK
         .try_get("groups")
         .map_err(|_| invalid("invalid groups"))?;
     Ok(ClientApiKeyRecord {
+        access_group: row
+            .try_get::<Option<String>, _>("access_group_id")
+            .map_err(|_| invalid("invalid access group ID"))?
+            .map(|id| {
+                Ok::<_, StoreError>(gateway_admin::model::access_groups::AccessGroupRef {
+                    id: gateway_core::policy::AccessGroupId::new(id)
+                        .map_err(|_| invalid("invalid access group ID"))?,
+                    name: row
+                        .try_get("access_group_name")
+                        .map_err(|_| invalid("invalid access group name"))?,
+                    enabled: row
+                        .try_get("access_group_enabled")
+                        .map_err(|_| invalid("invalid access group state"))?,
+                })
+            })
+            .transpose()?,
+        customer: row
+            .try_get::<Option<String>, _>("customer_id")
+            .map_err(|_| invalid("invalid customer ID"))?
+            .map(|id| {
+                Ok::<_, StoreError>(gateway_admin::model::customers::CustomerRef {
+                    id: gateway_core::policy::CustomerId::new(id)
+                        .map_err(|_| invalid("invalid customer ID"))?,
+                    name: row
+                        .try_get("customer_name")
+                        .map_err(|_| invalid("invalid customer name"))?,
+                    enabled: row
+                        .try_get("customer_enabled")
+                        .map_err(|_| invalid("invalid customer status"))?,
+                })
+            })
+            .transpose()?,
         id: row.try_get("id").map_err(|_| invalid("invalid id"))?,
         name: row.try_get("name").map_err(|_| invalid("invalid name"))?,
         label: row.try_get("label").map_err(|_| invalid("invalid label"))?,
@@ -1156,7 +1205,7 @@ fn client_record_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<ClientApiK
 
 async fn count_client_api_keys(pool: &PgPool, search: Option<&str>) -> StoreResult<u64> {
     let mut statement =
-        QueryBuilder::<Postgres>::new("select count(*)::bigint from client_api_keys where true");
+        QueryBuilder::<Postgres>::new("select count(*)::bigint from client_api_keys k where true");
     push_client_key_search(&mut statement, search);
     let count = statement
         .build_query_scalar::<i64>()
@@ -1169,13 +1218,13 @@ async fn count_client_api_keys(pool: &PgPool, search: Option<&str>) -> StoreResu
 fn push_client_key_search(statement: &mut QueryBuilder<Postgres>, search: Option<&str>) {
     if let Some(search) = search {
         let prefix = literal_prefix_pattern(search);
-        statement.push(" and (lower(name) like ");
+        statement.push(" and (lower(k.name) like ");
         statement.push_bind(prefix.clone());
         statement.push(" escape '\\'");
-        statement.push(" or lower(coalesce(label, '')) like ");
+        statement.push(" or lower(coalesce(k.label, '')) like ");
         statement.push_bind(prefix.clone());
         statement.push(" escape '\\'");
-        statement.push(" or lower(left(key, 10)) like ");
+        statement.push(" or lower(left(k.key, 10)) like ");
         statement.push_bind(prefix);
         statement.push(" escape '\\'");
         statement.push(")");
@@ -1203,6 +1252,20 @@ async fn load_client_key_memberships(
              from provider_accounts
          )
          select requested_keys.key_id,
+                case when keys.access_group_id is not null then array(
+                    select distinct pa.provider_kind from access_group_pools ap
+                    join access_groups ag on ag.id = ap.access_group_id and ag.enabled
+                    join account_groups pg on pg.id = ap.account_group_id and pg.enabled
+                    join account_group_accounts am on am.account_group_id = pg.id
+                    join provider_accounts pa on pa.id = am.provider_account_id
+                    where ap.access_group_id = keys.access_group_id
+                    union
+                    select ch.provider_kind from access_group_channels ac
+                    join access_groups ag on ag.id=ac.access_group_id and ag.enabled
+                    join upstream_channels ch on ch.id=ac.channel_id and ch.enabled
+                    where ac.access_group_id=keys.access_group_id
+                    order by provider_kind
+                ) else null end as access_provider_kinds,
                 groups.id as group_id, groups.name as group_name, groups.color as group_color,
                 groups.enabled as group_enabled,
                 global_providers.provider_kinds as global_provider_kinds,
@@ -1210,6 +1273,7 @@ async fn load_client_key_memberships(
                   filter (where accounts.provider_kind is not null), '{}')
                   as group_provider_kinds
            from requested_keys
+           join client_api_keys keys on keys.id = requested_keys.key_id
            cross join global_providers
            left join client_api_key_groups bindings
              on bindings.client_api_key_id = requested_keys.key_id
@@ -1218,7 +1282,7 @@ async fn load_client_key_memberships(
              on memberships.account_group_id = groups.id and groups.enabled
            left join provider_accounts accounts
              on accounts.id = memberships.provider_account_id
-          group by requested_keys.key_id, global_providers.provider_kinds,
+          group by requested_keys.key_id, keys.id, global_providers.provider_kinds,
                    groups.id, groups.name, groups.color, groups.enabled
           order by requested_keys.key_id, groups.id",
     )
@@ -1228,11 +1292,18 @@ async fn load_client_key_memberships(
     .map_err(|_| postgres_unavailable("load client API key memberships"))?;
     let mut groups = BTreeMap::<String, Vec<ClientApiKeyGroupRecord>>::new();
     let mut providers = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut access_providers = BTreeMap::new();
     for row in rows {
         use sqlx::Row as _;
         let key_id: String = row
             .try_get("key_id")
             .map_err(|_| invalid("invalid client API key membership"))?;
+        if let Some(kinds) = row
+            .try_get::<Option<Vec<String>>, _>("access_provider_kinds")
+            .map_err(|_| invalid("invalid access provider kinds"))?
+        {
+            access_providers.insert(key_id.clone(), kinds);
+        }
         let group_id: Option<String> = row
             .try_get("group_id")
             .map_err(|_| invalid("invalid client API key group"))?;
@@ -1270,6 +1341,9 @@ async fn load_client_key_memberships(
             .unwrap_or_default()
             .into_iter()
             .collect();
+        if let Some(kinds) = access_providers.remove(&record.id) {
+            record.provider_kinds = kinds;
+        }
     }
     Ok(())
 }
@@ -1293,7 +1367,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
     };
     match &cursor.value {
         ClientApiKeyCursorValue::Name(name) => {
-            statement.push(" and (lower(name), id)");
+            statement.push(" and (lower(k.name), k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(name.to_lowercase());
@@ -1302,7 +1376,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push(")");
         }
         ClientApiKeyCursorValue::Enabled(enabled) => {
-            statement.push(" and (enabled, id)");
+            statement.push(" and (k.enabled, k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(*enabled);
@@ -1311,7 +1385,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push(")");
         }
         ClientApiKeyCursorValue::CreatedAt(created_at) => {
-            statement.push(" and (created_at, id)");
+            statement.push(" and (k.created_at, k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(*created_at);
@@ -1320,7 +1394,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push(")");
         }
         ClientApiKeyCursorValue::LastUsedAt(Some(last_used_at)) => {
-            statement.push(" and (last_used_at is null or (last_used_at, id)");
+            statement.push(" and (k.last_used_at is null or (k.last_used_at, k.id)");
             statement.push(comparison);
             statement.push("(");
             statement.push_bind(*last_used_at);
@@ -1329,7 +1403,7 @@ fn push_client_key_cursor(statement: &mut QueryBuilder<Postgres>, cursor: &Clien
             statement.push("))");
         }
         ClientApiKeyCursorValue::LastUsedAt(None) => {
-            statement.push(" and last_used_at is null and id");
+            statement.push(" and k.last_used_at is null and k.id");
             statement.push(comparison);
             statement.push_bind(cursor.id.clone());
         }
@@ -1342,16 +1416,16 @@ fn push_client_key_order(statement: &mut QueryBuilder<Postgres>, sort: ClientApi
         ClientApiKeySortDirection::Desc => " desc",
     };
     match sort.field {
-        ClientApiKeySortField::Name => statement.push(" order by lower(name)"),
-        ClientApiKeySortField::Enabled => statement.push(" order by enabled"),
-        ClientApiKeySortField::CreatedAt => statement.push(" order by created_at"),
-        ClientApiKeySortField::LastUsedAt => statement.push(" order by last_used_at"),
+        ClientApiKeySortField::Name => statement.push(" order by lower(k.name)"),
+        ClientApiKeySortField::Enabled => statement.push(" order by k.enabled"),
+        ClientApiKeySortField::CreatedAt => statement.push(" order by k.created_at"),
+        ClientApiKeySortField::LastUsedAt => statement.push(" order by k.last_used_at"),
     };
     statement.push(direction);
     if sort.field == ClientApiKeySortField::LastUsedAt {
         statement.push(" nulls last");
     }
-    statement.push(", id");
+    statement.push(", k.id");
     statement.push(direction);
 }
 

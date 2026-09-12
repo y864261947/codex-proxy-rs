@@ -1,9 +1,12 @@
 mod account;
+mod catalog;
+mod channel;
 mod diagnostics;
 mod engine;
 mod error;
 mod event;
 mod health;
+mod identity;
 mod lifecycle;
 mod metering;
 mod operation;

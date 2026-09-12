@@ -1132,7 +1132,13 @@ async fn execute_forwards_required_account_to_selector() {
         .await
         .expect("required account stream");
 
-    assert_eq!(stream.metadata().provider_account_id(), &required);
+    assert_eq!(
+        stream
+            .metadata()
+            .provider_account_id()
+            .expect("account execution target"),
+        &required
+    );
     assert_eq!(
         selector
             .required_accounts
@@ -1157,7 +1163,10 @@ async fn execute_returns_cold_stream_and_records_selected_account() {
         .expect("provider stream");
     assert_eq!(transport.calls.load(Ordering::SeqCst), 0);
     assert_eq!(
-        stream.metadata().provider_account_id(),
+        stream
+            .metadata()
+            .provider_account_id()
+            .expect("account execution target"),
         &account_id("provider")
     );
     let events = stream.by_ref().collect::<Vec<_>>().await;

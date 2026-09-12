@@ -10,18 +10,23 @@ use sqlx::{
 };
 use uuid::Uuid;
 
+mod access_groups;
 mod account_groups;
 mod admin_security_audit;
 mod admission_recovery;
 mod backup;
+mod channels;
 mod client_keys;
+mod customers;
 mod execution;
 mod execution_buffer;
+mod global_admission;
 mod health;
 mod observability;
 mod ops_events;
 mod provider_accounts;
 mod query_budget;
+mod quota_scopes;
 mod retention;
 mod runtime_settings;
 mod schema_integrity;
@@ -222,18 +227,25 @@ async fn connect_and_migrate_should_apply_all_migrations_once_and_reopen_cleanly
         first_tables,
         [
             "_sqlx_migrations",
+            "access_group_channels",
+            "access_group_pools",
+            "access_groups",
             "account_group_accounts",
             "account_groups",
             "admin_audit_events",
             "admin_users",
             "backup_records",
             "backup_settings",
+            "channel_model_discoveries",
             "client_api_key_groups",
             "client_api_keys",
+            "customers",
             "model_requests",
             "ops_events",
             "provider_accounts",
             "runtime_settings",
+            "upstream_channels",
+            "upstream_quota_scopes",
         ]
     );
     assert_eq!(session_settings, ("codex-proxy-rs".to_owned(), 30, 5, 30));

@@ -11,31 +11,40 @@ use crate::{
     StoreBackend, StoreError, StorePoolConfig, StoreResult, postgres_unavailable,
 };
 
+mod access_groups;
 mod account_groups;
 mod admin_security_audit;
 mod admission_recovery;
 mod backup;
+mod channels;
 mod client_keys;
+mod customers;
 mod execution;
 mod execution_buffer;
+mod global_admission;
 mod observability;
 mod ops_events;
 mod provider_accounts;
+mod quota_scopes;
 mod retention;
 mod runtime_settings;
 mod snapshot;
 mod usage_facts;
 
+pub use access_groups::*;
 pub use account_groups::*;
 pub use admin_security_audit::*;
 pub use admission_recovery::*;
 pub use backup::*;
+pub use channels::*;
 pub use client_keys::*;
+pub use customers::*;
 pub use execution::*;
 pub use execution_buffer::*;
 pub use observability::*;
 pub use ops_events::*;
 pub use provider_accounts::*;
+pub use quota_scopes::*;
 pub use retention::*;
 pub use runtime_settings::*;
 pub use snapshot::*;

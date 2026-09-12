@@ -2,7 +2,10 @@
 
 use axum::{
     Router,
-    extract::DefaultBodyLimit,
+    extract::{DefaultBodyLimit, Request, State},
+    http::Method,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
 };
 
@@ -16,7 +19,7 @@ use super::{
 use crate::ApiState;
 
 /// 构造 OpenAI 客户端协议路由。
-pub(crate) fn router() -> Router<ApiState> {
+pub(crate) fn router(state: ApiState) -> Router<ApiState> {
     Router::new()
         .route("/v1/images/generations", post(image_generations))
         .route("/v1/images/edits", post(image_edits))
@@ -28,4 +31,17 @@ pub(crate) fn router() -> Router<ApiState> {
         // OpenAI 数据面正文属于客户端/上游协议；代理不能用私有大小上限提前拒绝
         // 上游本可接受的未来 payload。
         .layer(DefaultBodyLimit::disable())
+        .route_layer(middleware::from_fn_with_state(state, observe_ingress))
+}
+
+async fn observe_ingress(State(state): State<ApiState>, request: Request, next: Next) -> Response {
+    if request.method() == Method::POST
+        && matches!(
+            request.uri().path(),
+            "/v1/responses" | "/v1/images/generations" | "/v1/images/edits" | "/v1/alpha/search"
+        )
+    {
+        state.openai().record_ingress();
+    }
+    next.run(request).await
 }

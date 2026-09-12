@@ -10,6 +10,78 @@ use gateway_api::admin::observability::{
 };
 use serde_json::json;
 
+#[tokio::test]
+async fn channel_request_detail_exposes_source_snapshot_without_an_account_alias() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::{Body, to_bytes},
+        http::{Request, StatusCode, header},
+    };
+    use gateway_admin::model::observability::UsageDetail;
+    use gateway_core::{
+        identity::ChannelId,
+        routing::source::{SourceId, SourceSnapshot},
+    };
+    use tower::ServiceExt as _;
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let mut request = usage_record_with_account(
+        "req_channel",
+        "unused",
+        "unused",
+        "unused@example.invalid",
+        "api_key",
+        Utc::now(),
+    );
+    request.provider_kind = Some("api_openai".to_owned());
+    request.provider_account_ref = None;
+    request.provider_account_name = None;
+    request.provider_account_email = None;
+    request.provider_account_authentication_kind = None;
+    request.routing_scope = "none".to_owned();
+    request.upstream_source = Some(
+        SourceSnapshot::new(
+            SourceId::Channel(ChannelId::new("chan_actual").expect("channel")),
+            Some("A channel at request time".to_owned()),
+        )
+        .expect("source"),
+    );
+    fixture
+        .usage_detail
+        .lock()
+        .expect("detail")
+        .replace(UsageDetail {
+            request,
+            attempts: Vec::new(),
+            trace: None,
+            related_requests: Vec::new(),
+        });
+    let response = gateway_api::admin::observability::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/usage/records/detail?id=req_channel")
+                .header(header::COOKIE, "cpr_admin_session=valid-session")
+                .header("x-request-id", "req_source_projection")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .expect("body");
+    let value: serde_json::Value = serde_json::from_slice(&body).expect("JSON");
+    assert_eq!(
+        value["data"]["upstreamSource"],
+        json!({"kind":"channel", "id":"chan_actual", "name":"A channel at request time"})
+    );
+    assert_eq!(value["data"]["routingScope"], "none");
+    assert!(value["data"]["accountId"].is_null());
+    assert!(value["data"]["accountName"].is_null());
+}
+
 #[test]
 fn usage_page_should_keep_terminal_camel_case_shape() {
     let data = PageData {
@@ -440,6 +512,7 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
                 now,
             ),
             attempts: vec![UsageAttempt {
+                upstream_source: None,
                 source: "ops_event".to_owned(),
                 id: "ops_detail".to_owned(),
                 attempt_index: 1,
@@ -537,6 +610,7 @@ async fn ops_errors_should_keep_account_label_and_authentication_contract() {
         .lock()
         .expect("ops errors")
         .push(OpsError {
+            upstream_source: None,
             source: "model_request".to_owned(),
             event_id: "err_snapshot".to_owned(),
             request_id: Some("req_err".to_owned()),
@@ -727,6 +801,7 @@ fn usage_record_with_account(
     use gateway_admin::model::observability::{RequestOutcome, UsageRecord};
 
     UsageRecord {
+        upstream_source: None,
         id: id.to_owned(),
         client_api_key_ref: "key_detail".to_owned(),
         config_revision: 1,
@@ -859,6 +934,7 @@ async fn usage_route_should_expose_table_facts_without_detail_payload() {
         .lock()
         .expect("usage records")
         .push(UsageListRecord {
+            upstream_source: None,
             id: "request_endpoint".to_owned(),
             endpoint: "/v1/responses".to_owned(),
             client_transport: "websocket".to_owned(),

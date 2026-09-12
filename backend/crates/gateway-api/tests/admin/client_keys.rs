@@ -11,6 +11,32 @@ use serde_json::json;
 use super::{AdminTestFixture, AdminTestState};
 
 #[test]
+fn client_key_creation_validates_customer_and_access_group_in_the_same_command() {
+    let valid = json!({"name":"Scoped", "label":null, "groupIds":[], "maxConcurrency":2, "requestsPerMinute":20, "customerId":"cust_team", "accessGroupId":"access_team"});
+    let command = serde_json::from_value::<CreateClientKeyRequest>(valid.clone())
+        .expect("request")
+        .into_command()
+        .expect("command");
+    assert_eq!(command.customer_id.expect("customer").as_str(), "cust_team");
+    assert_eq!(
+        command.access_group_id.expect("group").as_str(),
+        "access_team"
+    );
+    for field in ["customerId", "accessGroupId"] {
+        let mut invalid = valid.clone();
+        invalid[field] = json!("");
+        assert_eq!(
+            serde_json::from_value::<CreateClientKeyRequest>(invalid)
+                .expect("wire")
+                .into_command()
+                .expect_err("invalid owner")
+                .field(),
+            field
+        );
+    }
+}
+
+#[test]
 fn client_key_queries_should_reject_unknown_zero_and_oversized_fields() {
     let unknown = serde_json::from_value::<ListClientKeysQuery>(json!({ "other": true }));
     let zero = serde_json::from_value::<ListClientKeysQuery>(json!({ "limit": 0 }))
@@ -207,6 +233,8 @@ fn client_key_responses_should_keep_shape_and_redact_creation_debug() {
         .single()
         .expect("valid time");
     let view = ClientKeyView::from(gateway_admin::model::client_keys::ClientKeyRecord {
+        customer: None,
+        access_group: None,
         id: gateway_core::policy::ClientApiKeyId::new("key_visible").expect("Client Key ID"),
         name: "visible".to_owned(),
         label: None,

@@ -8,14 +8,19 @@ use axum::{
     routing::any,
 };
 
+pub mod access_groups;
 pub mod account_groups;
 pub mod accounts;
 pub mod auth;
 pub mod backups;
+pub mod catalog;
+pub mod channels;
 pub mod client_keys;
+pub mod customers;
 mod extract;
 pub mod observability;
 pub mod presenter;
+pub mod quota_scopes;
 pub mod settings;
 pub mod system;
 pub mod wire;
@@ -37,7 +42,12 @@ where
         .merge(accounts::router::<S>())
         .merge(auth::router::<S>())
         .merge(backups::router::<S>())
+        .merge(channels::router::<S>())
+        .merge(catalog::router::<S>())
         .merge(client_keys::router::<S>())
+        .merge(customers::router::<S>())
+        .merge(quota_scopes::router::<S>())
+        .merge(access_groups::router::<S>())
         .merge(observability::router::<S>())
         .merge(settings::router::<S>())
         .merge(system::router::<S>())

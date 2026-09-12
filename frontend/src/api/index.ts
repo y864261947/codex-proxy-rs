@@ -1,9 +1,10 @@
+export * from './modules/access-groups'
+
 // 账号分组
 export * from './modules/account-groups'
 
 // 账号管理
 export * from './modules/accounts'
-
 // API Keys 管理
 export * from './modules/api-keys'
 
@@ -12,9 +13,14 @@ export * from './modules/auth'
 
 // 备份管理
 export * from './modules/backups'
-
+export * from './modules/channels'
+export * from './modules/customers'
 // Dashboard 聚合
 export * from './modules/dashboard'
+
+export * from './modules/model-catalog'
+
+export * from './modules/quota-scopes'
 
 // 设置管理
 export * from './modules/settings'

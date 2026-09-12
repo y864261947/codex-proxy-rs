@@ -94,6 +94,8 @@ impl ClientKeyService for DefaultClientKeyService {
             .store
             .create_client_key(
                 NewClientKey {
+                    customer_id: command.customer_id,
+                    access_group_id: command.access_group_id,
                     id,
                     name: command.name,
                     label: command.label,

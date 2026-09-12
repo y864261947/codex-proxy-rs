@@ -17,6 +17,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
 pub mod backup;
+pub mod discovery;
 pub mod model;
 pub mod ports;
 mod use_case;
@@ -30,6 +31,7 @@ pub use use_case::{
 
 use model::{AdminError, AdminErrorKind};
 use ports::{
+    channels::{ChannelAdminRegistry, ChannelProviderAdmin},
     client_distribution::ClientDistributionResolver,
     provider::{ProviderAdmin, ProviderAdminError, ProviderAdminErrorKind, ProviderAdminRegistry},
     store::AdminStorePorts,
@@ -149,6 +151,11 @@ pub enum AdminConfigError {
 /// 字段全部私有；调用方经 accessor 直接调用能力，不需要命名内部 `use_case` 模块。
 #[derive(Clone)]
 pub struct AdminServices {
+    model_catalog: Arc<dyn use_case::catalog::ModelCatalogService>,
+    channels: Arc<dyn use_case::channels::ChannelService>,
+    customers: Arc<dyn use_case::customers::CustomerService>,
+    quota_scopes: Arc<dyn use_case::quota_scopes::QuotaScopeService>,
+    access_groups: Arc<dyn use_case::access_groups::AccessGroupService>,
     auth: Arc<dyn AuthService>,
     accounts: Arc<dyn AccountsService>,
     account_groups: Arc<dyn AccountGroupService>,
@@ -163,6 +170,29 @@ pub struct AdminServices {
 }
 
 impl AdminServices {
+    #[must_use]
+    pub fn model_catalog(&self) -> &dyn use_case::catalog::ModelCatalogService {
+        self.model_catalog.as_ref()
+    }
+
+    #[must_use]
+    pub fn channels(&self) -> &dyn use_case::channels::ChannelService {
+        self.channels.as_ref()
+    }
+    #[must_use]
+    pub fn quota_scopes(&self) -> &dyn use_case::quota_scopes::QuotaScopeService {
+        self.quota_scopes.as_ref()
+    }
+
+    #[must_use]
+    pub fn customers(&self) -> &dyn use_case::customers::CustomerService {
+        self.customers.as_ref()
+    }
+
+    #[must_use]
+    pub fn access_groups(&self) -> &dyn use_case::access_groups::AccessGroupService {
+        self.access_groups.as_ref()
+    }
     #[must_use]
     pub fn auth(&self) -> &dyn AuthService {
         self.auth.as_ref()
@@ -231,10 +261,22 @@ impl AdminBundle {
         self.services.clone()
     }
 
-    /// 取出 Backup Worker 贡献；只能调用一次，与其它 Bundle 的贡献一并交给 Host。
+    /// 取出 Admin Worker 贡献；只能调用一次，与其它 Bundle 的贡献一并交给 Host。
     pub fn take_worker_contributions(&mut self) -> Vec<WorkerContribution> {
         std::mem::take(&mut self.worker_contributions)
     }
+}
+
+pub struct AdminRuntimePorts {
+    pub snapshot: Arc<dyn SnapshotControl>,
+    pub probe: Arc<dyn AccountProbe>,
+    pub model_catalog: gateway_core::catalog::SharedModelCatalogReader,
+}
+
+/// 账号与 API 渠道贡献分别注册，不以虚构账号承载渠道凭据。
+pub struct ProviderAdminContributions {
+    pub accounts: Vec<Arc<dyn ProviderAdmin>>,
+    pub channels: Vec<Arc<dyn ChannelProviderAdmin>>,
 }
 
 /// 校验配置、建立动态 Provider 注册表并完成默认管理员幂等初始化。
@@ -245,16 +287,23 @@ impl AdminBundle {
 pub async fn initialize(
     mut config: AdminConfig,
     store: AdminStorePorts,
-    providers: Vec<Arc<dyn ProviderAdmin>>,
-    snapshot: Arc<dyn SnapshotControl>,
-    probe: Arc<dyn AccountProbe>,
+    providers: ProviderAdminContributions,
+    runtime: AdminRuntimePorts,
     client_distribution: Arc<dyn ClientDistributionResolver>,
     system: Arc<dyn SystemOperations>,
 ) -> Result<AdminBundle, AdminError> {
+    let AdminRuntimePorts {
+        snapshot,
+        probe,
+        model_catalog,
+    } = runtime;
     config
         .resolve_and_validate(Path::new("."))
         .map_err(|error| AdminError::invalid(error.to_string()))?;
-    let registry = ProviderAdminRegistry::new(providers).map_err(map_provider_registry_error)?;
+    let registry =
+        ProviderAdminRegistry::new(providers.accounts).map_err(map_provider_registry_error)?;
+    let channel_registry =
+        ChannelAdminRegistry::new(providers.channels).map_err(map_provider_registry_error)?;
     let openai = registry
         .require(&provider_kind(OPENAI_PROVIDER_KIND)?)
         .map_err(map_provider_registry_error)?;
@@ -290,6 +339,26 @@ pub async fn initialize(
         backup_ports.object_store(),
     );
     let services = AdminServices {
+        model_catalog: Arc::new(use_case::catalog::DefaultModelCatalogService::new(
+            model_catalog,
+        )),
+        quota_scopes: Arc::new(use_case::quota_scopes::DefaultQuotaScopeService::new(
+            store.quota_scopes(),
+            snapshot.clone(),
+        )),
+        channels: Arc::new(use_case::channels::DefaultChannelService::new(
+            store.channels(),
+            channel_registry,
+            snapshot.clone(),
+        )),
+        access_groups: Arc::new(use_case::access_groups::DefaultAccessGroupService::new(
+            store.access_groups(),
+            snapshot.clone(),
+        )),
+        customers: Arc::new(use_case::customers::DefaultCustomerService::new(
+            store.customers(),
+            snapshot.clone(),
+        )),
         auth,
         accounts,
         account_groups: Arc::new(DefaultAccountGroupService::new(
@@ -325,7 +394,10 @@ pub async fn initialize(
         )),
         backups,
     };
-    let worker_contributions = backup_worker_contribution(backup_task)?;
+    let mut worker_contributions = backup_worker_contribution(backup_task)?;
+    worker_contributions.push(
+        discovery::ChannelDiscoveryTask::new(store.channels(), services.clone()).contribution()?,
+    );
     Ok(AdminBundle {
         services,
         worker_contributions,

@@ -23,7 +23,9 @@ fn client_admission_startup_recovery_should_preserve_order_and_exact_facts() {
         let now = SystemTime::now();
         let request = ModelRequestId::new("req_recovery").expect("request id");
         let recovery = ClientAdmissionRecovery {
-            client_api_key_id: ClientApiKeyId::new("key_recovery").expect("key id"),
+            scope_id: gateway_core::policy::AdmissionScopeId::Key(
+                ClientApiKeyId::new("key_recovery").expect("key id"),
+            ),
             recent_requests: vec![RecentAdmissionFact {
                 model_request_id: request.clone(),
                 started_at: now - Duration::from_secs(2),
@@ -96,7 +98,9 @@ fn client_admission_startup_recovery_should_fail_closed_at_each_boundary() {
 
 fn empty_recovery() -> ClientAdmissionRecovery {
     ClientAdmissionRecovery {
-        client_api_key_id: ClientApiKeyId::new("key_empty").expect("key id"),
+        scope_id: gateway_core::policy::AdmissionScopeId::Key(
+            ClientApiKeyId::new("key_empty").expect("key id"),
+        ),
         recent_requests: Vec::new(),
         running_requests: Vec::new(),
     }
@@ -191,7 +195,7 @@ impl ClientAdmissionPort for RecordingAdmissions {
     }
     fn release<'a>(
         &'a self,
-        _: &'a ClientApiKeyId,
+        _: &'a [gateway_core::policy::AdmissionScopeId],
         _: &'a ModelRequestId,
     ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
         unreachable!()

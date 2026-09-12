@@ -24,6 +24,8 @@ use super::TestDatabase;
 #[test]
 fn client_key_requires_the_frozen_plaintext_format() {
     let key = NewClientApiKey {
+        customer_id: None,
+        access_group_id: None,
         id: "key-1".to_owned(),
         name: "default".to_owned(),
         label: None,
@@ -160,6 +162,70 @@ async fn admin_client_key_adapter_should_preserve_the_full_nonzero_u16_page_size
 
     assert_eq!(page.total, 0);
     assert!(page.items.is_empty());
+    database.close().await;
+}
+
+#[tokio::test]
+async fn key_provider_projection_includes_only_explicit_enabled_channels_and_keeps_legacy_scope() {
+    let Some(database) = TestDatabase::create("channel_key_providers").await else {
+        return;
+    };
+    sqlx::raw_sql("insert into access_groups (id,name) values ('access_channels','Channels'); insert into upstream_channels (id,provider_kind,name,provider_config_json) values ('chan_granted','openai_api','Granted','{\"test\":true}'::jsonb),('chan_ungranted','other_api','Ungrant','{\"test\":true}'::jsonb); insert into access_group_channels values ('access_channels','chan_granted'); insert into client_api_keys (id,name,key,access_group_id,created_at,updated_at) values ('key_assigned','Assigned','sk_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ','access_channels',now(),now()),('key_legacy','Legacy','sk_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq',null,now(),now());").execute(&database.pool).await.expect("seed");
+    let store = PgAdminClientKeyStore::new(database.pool.clone());
+    let query = || AdminClientKeyListQuery {
+        cursor: None,
+        page_size: ClientKeyPageSize::new(20).expect("page"),
+        search: None,
+        sort: AdminClientKeySort {
+            field: AdminClientKeySortField::CreatedAt,
+            direction: AdminSortDirection::Desc,
+        },
+    };
+    let page = store.list_client_keys(query()).await.expect("page");
+    let assigned = page
+        .items
+        .iter()
+        .find(|key| key.id.as_str() == "key_assigned")
+        .expect("assigned");
+    assert_eq!(
+        assigned
+            .provider_kinds
+            .iter()
+            .map(|p| p.as_str())
+            .collect::<Vec<_>>(),
+        ["openai_api"]
+    );
+    assert!(
+        page.items
+            .iter()
+            .find(|key| key.id.as_str() == "key_legacy")
+            .expect("legacy")
+            .provider_kinds
+            .is_empty()
+    );
+    sqlx::query("update upstream_channels set enabled=false where id='chan_granted'")
+        .execute(&database.pool)
+        .await
+        .expect("disable channel");
+    assert!(
+        store
+            .list_client_keys(query())
+            .await
+            .expect("page")
+            .items
+            .iter()
+            .all(|key| key.provider_kinds.is_empty())
+    );
+    sqlx::raw_sql("update upstream_channels set enabled=true where id='chan_granted'; update access_groups set enabled=false where id='access_channels';").execute(&database.pool).await.expect("disable group");
+    assert!(
+        store
+            .list_client_keys(query())
+            .await
+            .expect("page")
+            .items
+            .iter()
+            .all(|key| key.provider_kinds.is_empty())
+    );
     database.close().await;
 }
 
@@ -382,6 +448,8 @@ async fn dedicated_reveal_returns_plaintext_without_debug_exposure() {
 fn client_key_debug_redacts_plaintext() {
     let secret = format!("sk_{}", "s".repeat(43));
     let key = NewClientApiKey {
+        customer_id: None,
+        access_group_id: None,
         id: "key-1".to_owned(),
         name: "default".to_owned(),
         label: None,

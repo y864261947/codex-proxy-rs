@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
 import { failureClassText } from '../utils/opsErrorPresentation'
+import { upstreamSourceText } from '../utils/source'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
@@ -56,6 +57,8 @@ const requestFields = computed(() => visibleFields([
 ]))
 
 const routeFields = computed(() => visibleFields([
+  { label: '实际来源', value: props.record?.upstreamSource ? upstreamSourceText(props.record.upstreamSource) : null },
+  { label: '来源 ID', value: props.record?.upstreamSource?.id, mono: true },
   { label: '端点', value: props.record?.route, mono: true },
   { label: 'Provider', value: props.record?.provider, mono: true },
   { label: '认证类型', value: props.record?.authenticationKind, mono: true },

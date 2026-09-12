@@ -11,8 +11,8 @@ use crate::{
     model::{
         AdminError, MutationContext,
         settings::{
-            AdminApiKey, AdminApiKeyMutation, RegeneratedAdminApiKey, ReplaceRuntimeSettings,
-            RuntimeSettings,
+            AdminApiKey, AdminApiKeyMutation, GlobalAdmissionSettings, RegeneratedAdminApiKey,
+            ReplaceRuntimeSettings, RuntimeSettings,
         },
     },
     ports::store::SettingsStore,
@@ -23,6 +23,12 @@ use super::{map_store_error, publish_committed};
 /// API 消费的 Runtime settings 管理服务。
 #[async_trait]
 pub trait SettingsService: Send + Sync {
+    async fn global_admission(&self) -> Result<GlobalAdmissionSettings, AdminError>;
+    async fn replace_global_admission(
+        &self,
+        context: &MutationContext,
+        limits: gateway_core::policy::RateLimits,
+    ) -> Result<GlobalAdmissionSettings, AdminError>;
     async fn load(&self) -> Result<RuntimeSettings, AdminError>;
     async fn replace(
         &self,
@@ -54,6 +60,30 @@ impl DefaultSettingsService {
 
 #[async_trait]
 impl SettingsService for DefaultSettingsService {
+    async fn global_admission(&self) -> Result<GlobalAdmissionSettings, AdminError> {
+        self.store
+            .load_global_admission()
+            .await
+            .map_err(|error| map_store_error(error, "global admission"))
+    }
+
+    async fn replace_global_admission(
+        &self,
+        context: &MutationContext,
+        limits: gateway_core::policy::RateLimits,
+    ) -> Result<GlobalAdmissionSettings, AdminError> {
+        if !limits.is_valid() {
+            return Err(AdminError::invalid("全站限额必须为可精确表示的非负整数"));
+        }
+        let result = self
+            .store
+            .replace_global_admission(limits, context)
+            .await
+            .map_err(|error| map_store_error(error, "global admission"))?;
+        publish_committed(self.snapshot.as_ref(), result.config_revision).await?;
+        Ok(result)
+    }
+
     async fn load(&self) -> Result<RuntimeSettings, AdminError> {
         self.store
             .load_runtime_settings()

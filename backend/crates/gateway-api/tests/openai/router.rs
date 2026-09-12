@@ -10,6 +10,108 @@ use super::models::ModelsExecution;
 const REMOVED_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 
 #[tokio::test]
+async fn realtime_counts_only_business_ingress_and_requires_admin_auth() {
+    use gateway_core::engine::traffic::TrafficMonitor;
+    use std::sync::Arc;
+
+    let admin = crate::admin::AdminTestFixture::new().await;
+    let admin_key = format!("admin-{}", "a".repeat(64));
+    admin.auth.set_api_key(&admin_key);
+    let traffic = TrafficMonitor::default();
+    let router = gateway_api::initialize(
+        gateway_api::ApiConfig {
+            asset_directory: std::env::temp_dir(),
+            cors_allowed_origins: Vec::new(),
+            request_timeout_seconds: None,
+            request_id_header: "x-request-id".to_owned(),
+        },
+        ModelsExecution::new(),
+        traffic.clone(),
+        admin.services,
+        Vec::new(),
+        Arc::new(super::EmptyWorkerHealth),
+        Arc::new(super::TestLifecycle::default()),
+    )
+    .expect("API bundle")
+    .router();
+
+    for (method, path) in [
+        (Method::GET, "/healthz"),
+        (Method::GET, "/v1/models"),
+        (Method::POST, "/v1/models"),
+        (Method::GET, "/v1/responses"),
+        (Method::POST, "/v1/unknown"),
+    ] {
+        router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+    assert_eq!(traffic.snapshot().ingress_requests_last_minute, 0);
+
+    for path in [
+        "/v1/responses",
+        "/v1/images/generations",
+        "/v1/images/edits",
+        "/v1/alpha/search",
+    ] {
+        let response = router
+            .clone()
+            .oneshot(Request::post(path).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert!(response.status().is_client_error());
+    }
+    assert_eq!(traffic.snapshot().ingress_requests_last_minute, 4);
+    assert_eq!(traffic.snapshot().in_flight_requests, 0);
+
+    let unauthorized = router
+        .clone()
+        .oneshot(
+            Request::get("/api/admin/dashboard/realtime")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(unauthorized.status(), StatusCode::UNAUTHORIZED);
+    let lease = traffic.begin_execution();
+    let response = router
+        .oneshot(
+            Request::get("/api/admin/dashboard/realtime")
+                .header("x-api-key", &admin_key)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()["cache-control"]
+            .to_str()
+            .unwrap()
+            .contains("no-store")
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(value["data"]["scope"], "process");
+    assert_eq!(value["data"]["windowSeconds"], 60);
+    assert_eq!(value["data"]["ingressRequestsLastMinute"], 4);
+    assert_eq!(value["data"]["inFlightRequests"], 1);
+    assert_eq!(value["data"]["preparingRequests"], 1);
+    drop(lease);
+}
+
+#[tokio::test]
 async fn removed_responses_review_route_should_not_reach_the_responses_handler() {
     let response = api_router_with_origins(ModelsExecution::new(), Vec::new())
         .await

@@ -2,6 +2,20 @@ import request from '../request'
 
 export type RotationStrategy = 'smart' | 'quota_reset_priority' | 'round_robin' | 'sticky'
 
+export interface GlobalAdmissionSettings {
+  maxConcurrency: number
+  requestsPerMinute: number
+  configRevision: number
+}
+
+export function getGlobalAdmissionSettings(signal?: AbortSignal) {
+  return request<GlobalAdmissionSettings>({ url: '/api/admin/settings/admission', method: 'GET', signal })
+}
+
+export function updateGlobalAdmissionSettings(data: Omit<GlobalAdmissionSettings, 'configRevision'>) {
+  return request<GlobalAdmissionSettings>({ url: '/api/admin/settings/admission', method: 'POST', data })
+}
+
 export interface RuntimeSettings {
   modelMappings: Record<string, string>
   refreshMarginSeconds: number

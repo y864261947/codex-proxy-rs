@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// 当前进程内存中的实时事实，不与数据库中的完成统计混算。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeTrafficView {
+    pub observed_at: DateTime<Utc>,
+    pub scope: &'static str,
+    pub window_seconds: u64,
+    pub uptime_seconds: u64,
+    pub ingress_requests_last_minute: u64,
+    pub in_flight_requests: u64,
+    pub preparing_requests: u64,
+    pub executing_requests: u64,
+}
+
 /// 观测列表响应数据。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -74,6 +88,7 @@ pub struct BillingView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageListRecordView {
+    pub upstream_source: Option<UpstreamSourceView>,
     pub id: String,
     pub provider: Option<String>,
     pub authentication_kind: Option<String>,
@@ -102,10 +117,19 @@ pub struct UsageListRecordView {
     pub user_agent: Option<String>,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpstreamSourceView {
+    pub kind: &'static str,
+    pub id: String,
+    pub name: Option<String>,
+}
+
 /// 单条逻辑请求详情展示。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageRecordView {
+    pub upstream_source: Option<UpstreamSourceView>,
     pub id: String,
     pub request_id: String,
     pub client_api_key_id: Option<String>,
@@ -213,6 +237,7 @@ pub struct UsageLatencyDetailsView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageAttemptView {
+    pub upstream_source: Option<UpstreamSourceView>,
     pub id: String,
     pub attempt_index: u32,
     pub trigger: String,
@@ -759,6 +784,7 @@ pub struct DiagnosticsView {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpsErrorView {
+    pub upstream_source: Option<UpstreamSourceView>,
     pub id: String,
     pub request_id: Option<String>,
     pub client_api_key_id: Option<String>,

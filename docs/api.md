@@ -18,9 +18,14 @@ Codex 原生生图配置还会携带 `X-OpenAI-Actor-Authorization: proxy-manage
 它仅用于客户端识别服务端托管认证，不能代替 Client Key。网关和 OpenAI Provider 都会过滤该请求头，
 上游账号身份只由服务端选中的账号提供；不要把真实账号 token 放进该标记。
 
-Client Key 通过账号分组限定路由范围：未绑定分组时可使用全部账号，绑定一个或多个分组时只能使用
-已启用分组成员的并集。分组可以混合 `openai` 与 `xai` 账号；同一请求只会在模型能力明确匹配且满足
-重放安全边界时跨 Provider fallback。
+Client Key 绑定接入分组时，以该组显式授权的模型、号池和渠道为准，空集合不会获得全部权限。
+未绑定接入分组的旧 Key 保留账号分组范围：无账号分组关联时可使用全部账号，有关联时只能使用已启用
+分组成员的并集。实际调用继续检查来源启停、健康与容量；旧 Key 的无来源后备只包含未分池账号。
+账号分组可混合 `openai` 与 `xai`；同一请求只会在能力匹配且满足重放安全边界时切换来源。
+
+Key、所属客户或接入分组停用后拒绝新请求。全站、客户、接入分组、Key 的并发/RPM 分别检查，来源和
+共享配额按实际尝试另行准入。来源容量不足返回 HTTP `503`，OpenAI 风格错误码为
+`source_capacity_unavailable`；没有可用候选为 `no_available_provider`，不向下游泄露来源凭据。
 
 运行设置可以分别配置 `minCodexDesktopVersion` 与 `minCodexCliVersion`。两者只接受 SemVer，`null`
 表示不限制。API 在 Client Key 鉴权成功后识别官方 Desktop/CLI 请求头；已识别客户端没有合法版本，或版本
@@ -557,6 +562,7 @@ errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 | 方法 | 路由 | 说明 |
 | --- | --- | --- |
 | `GET` | `/api/admin/dashboard/summary` | Dashboard 汇总；支持 `kind`、`startTime`、`endTime` |
+| `GET` | `/api/admin/dashboard/realtime` | 当前进程实时并发与近 60 秒入口 RPM；[指标口径](realtime-traffic.md) |
 | `GET` | `/api/admin/dashboard/trend` | Dashboard 趋势；`kind=usage|latency|errors` |
 | `GET` | `/api/admin/usage/records` | 请求记录分页列表 |
 | `GET` | `/api/admin/usage/records/detail` | 按 `id` 查询请求详情 |
@@ -606,3 +612,102 @@ priority 价格，缺少专用价格时回退到标准价格的 `2.00x`；Flex �
 在线更新仅在当前部署模式、Release 资产和进程重启能力都满足要求时可用，且只在同一 major 版本内
 提供：跨大版本目标会以 `40901` 冲突拒绝，需按发布说明重新部署。
 实例升级和仓库发版见 [部署文档](../deploy/README.md#镜像升级与源码构建)。
+
+## 12. 网关管理扩展
+
+本节对应网关改造分支的源码合同，部署可用性和各批次验证状态见 [实施记录](implementation-progress.md)。
+所有接口沿用管理员鉴权、成功/错误信封与 `no-store`。下面四类列表均支持 `page`、`pageSize`、`search`，
+返回 `items`、`total`、`configRevision`；配置写入同时提交版本与审计，事务失败不留下半完成配置。
+
+| 方法 | 路由 | 主要内容 |
+| --- | --- | --- |
+| `GET` | `/api/admin/customers` | 轻量客户列表及关联 Key 数量 |
+| `POST` | `/api/admin/customers/create`、`/update`、`/delete` | 创建、修改、删除客户；关联 Key 的客户不可删除 |
+| `POST` | `/api/admin/customers/assign-key` | `{ keyId, customerId }`；`null` 解除归属 |
+| `GET` | `/api/admin/access-groups` | 模型白名单、号池/渠道授权及组限额 |
+| `POST` | `/api/admin/access-groups/create`、`/update`、`/delete` | 分组配置及来源关系一起提交；有关联 Key 时不可删除 |
+| `POST` | `/api/admin/access-groups/assign-key` | `{ keyId, accessGroupId }`；`null` 解除归属 |
+| `GET` | `/api/admin/channels` | 渠道来源、默认优先级/权重、限额、共享配额及配置版本 |
+| `GET` | `/api/admin/channels/providers` | 可用的渠道适配器配置说明 |
+| `GET` | `/api/admin/channels/connection?id=...` | Provider 脱敏后的编辑配置；不是明文凭据导出 |
+| `POST` | `/api/admin/channels/create`、`/update`、`/delete` | 渠道 CRUD；修改和删除要求 `expectedRevision` |
+| `GET` | `/api/admin/quota-scopes` | 具名共享配额及 `sourceCount` 引用数量 |
+| `POST` | `/api/admin/quota-scopes/create`、`/update`、`/delete` | 共享并发/RPM；仍被渠道或号池引用时不可删除 |
+| `GET`、`POST` | `/api/admin/settings/admission` | 读取、替换全站 `maxConcurrency`、`requestsPerMinute` |
+| `GET` | `/api/admin/dashboard/realtime` | 当前进程实时并发和最近 60 秒请求量 |
+
+表中缩写的 `/update`、`/delete` 均属于同一行的资源前缀，例如客户修改完整路径为
+`/api/admin/customers/update`。客户和共享配额创建/修改使用 `name`、`note`、`enabled`、
+`maxConcurrency`、`requestsPerMinute`；修改另带 `id`。分组在这些字段之外使用 `allowedModels`、
+`poolGroupIds`、`channelIds`、`allowCapacityFallback` 和 `sourcePreferences`，创建/更新均要求显式提供。不因模型列表为空或渠道未勾选而隐式授权。
+
+`sourcePreferences` 是覆盖数组，每项为 `{ kind: "account_pool" | "channel", sourceId, priority, weight }`。
+`priority`、`weight` 可分别为 `null`（或省略）以继承来源默认值；每项至少覆盖一个字段，覆盖值须为 1–65535 的整数。
+来源必须位于本次提交的授权集合，重复来源或未授权覆盖拒绝；传空数组清除全部覆盖，不改变来源限额或共享配额。
+`allowCapacityFallback: false` 在来源或账号容量拒绝时允许同级来源，但禁止进入更低优先级来源；
+不禁用既有故障重试，也不解除原生会话来源锁定。迁移后的既有分组默认为 `true`，无分组旧 Key 的行为不变。
+有效偏好及回退开关随请求计划冻结，关系、版本和审计在同一事务提交。
+
+渠道公开配置包括 `provider`、`priority`、`weight`、`quotaScopeId`；创建时还需要 Provider 验证的
+`config`。配置版本 `connectionRevision` 和更新时的 `expectedRevision` 为字符串，避免数字精度损失。
+版本冲突需重新读取；旧请求候选不能使用轮换后的配置。首个 `openai_api` 渠道仅开放已验证的 Responses
+路径，不因录入模型 ID 自动获得 Chat Completions、图片或视频适配。
+
+号池在既有账号分组接口的 `sourceControls` 中配置 `priority`、`weight`、`maxConcurrency`、
+`requestsPerMinute`、`quotaScopeId`。更新省略整个 `sourceControls` 时保留已有值。优先级 1 最高，
+权重只比较同级来源；限额 0 表示不限。设置 `quotaScopeId: null` 解除共享配额关联，停用共享配额会阻止
+其关联来源的新调用，不能把它理解为不限额。
+
+实时视图返回 `scope: "process"`、`observedAt`、`windowSeconds`、`uptimeSeconds`、
+`ingressRequestsLastMinute`、`inFlightRequests`、`preparingRequests`、`executingRequests`。
+重试不新增下游逻辑请求，固定账号诊断与 WebSocket 心跳不计入业务请求；进程重启后该实时窗口重新积累。
+历史统计继续使用既有用量接口，实时 RPM 与各级准入 RPM 不是同一个计数器。
+
+### 渠道模型发现与成功记录
+
+`POST /api/admin/channels/discover-models` 使用管理员会话鉴权，响应禁止缓存。请求仅包含 `id` 和字符串 `expectedRevision`；不能临时传入 URL、API Key 或其他连接字段。
+
+- 当前支持 `openai_api` 渠道。Provider 使用该渠道已保存的地址、Key、Organization 和 Project 请求相对路径 `models`，不使用 OAuth 账号或下游认证头，不执行 Responses 生成。
+- 查询前检查渠道连接版本并预留发现序号，成功后在短事务内锁定渠道、复核版本并保存记录。版本不匹配、查询期间更新或删除渠道、较新序号的成功结果已保存时返回 409。初始读取时渠道不存在返回 404，Provider/Store 暂不可用为 503，上游状态或目录格式异常为 502。发现只保存观测记录，不提交配置、不增加配置版本、不写配置变更审计、不发布运行快照。
+- 成功的 `data` 为 `{ id, connectionRevision, generation, fetchedAt, added, missing, unchanged }`。版本和发现序号都是十进制字符串，不得转换成 JS Number；序号由数据库在查询前分配，允许跳号，不按完成时间排序。时间为本次成功查询完成时间。三个数组按上游模型 ID 排序，分别表示相对于该版本已配置列表的新增、本次未发现和重合项；不会随之后的配置变更重算。`missing` 不表示应删除，也不是关停证据。
+- 第一版只接受完整单页的 `object: "list"`、`data: [{ id }]` 合同。限制 15 秒、2 MiB 响应和 1000 项；拒绝重定向、重复或非法 ID、非 200 状态、未知顶层字段、`Link` 响应头以及正文分页续页信号，不返回部分结果。尚不支持分页渠道；未知格式失败不影响本地已配置模型。模型条目上的额外能力/价格字段不作为能力或定价证据。
+- 页面入口为“上游渠道 → 编辑 → 上游模型发现”。查询显式触发；选择新增模型后只追加到编辑草稿，最后通过原 `/channels/update` 版本检查、审计事务与发布链保存。保留未发现的旧模型，不自动授权接入分组或证明模型支持 Responses。
+- `GET /api/admin/channels/model-discovery?id=...` 使用同样的管理员鉴权和禁止缓存合同，只读本地最新成功记录，不读取渠道凭据或请求上游。已有渠道但从未成功发现时 `data` 为 null；有记录时返回上述对象，包括旧连接版本的记录。不存在的渠道返回 404，存储暂不可用返回 503。
+- 每次成功保存追加一条不可变记录，成功且保存完成才返回 POST 成功；上游失败或保存事务回滚不改动旧记录。较早启动的查询若晚于较新成功结果保存，会被拒绝且不进入成功历史。最新记录仍为该渠道最大的发现序号。超时或响应丢失导致保存结果不确定时，可通过 GET 重新读取确认，不必立即重查上游。删除渠道同步删除全部发现记录。
+- `GET /api/admin/channels/model-discoveries?id=...` 只读本地成功历史，使用同样的管理员鉴权和禁止缓存合同。可选 `pageSize` 默认 20、范围 1–50；`beforeGeneration` 为不含符号、前导零的十进制正整数字符串，最大 9223372036854775807。未知或非法参数返回 400，不存在的渠道返回 404，存储暂不可用返回 503；已有渠道的空历史返回空数组，不将存储失败伪装为空结果。
+- 历史响应 `data` 为 `{ items, nextBeforeGeneration }`；每项同上述成功对象，游标为字符串或 null。按渠道隔离、发现序号降序，下一页严格小于返回的游标；并发新增记录不会导致向旧记录翻页时重复。没有总数或跨请求事务快照，回到首页可读取新成功记录。
+- 打开编辑窗口自动读取最新本地记录；手动查询才访问上游。失败保留上次显示但禁止添加，成功重新读取或查询后恢复；旧连接版本记录始终只读，须查询当前版本才能添加。未保存连接更改时禁用发现。关闭窗口丢弃草稿，不删除成功记录；空发现结果与从未成功发现分别展示。
+- “查看发现历史”才加载历史列表，每页 10 条，可向前/后翻页、刷新及展开记录；历史均只读，无直接采用按钮。显示当前渠道名称/Provider/ID及各条记录的连接版本、查询时间；名称不是历史名称快照。记录中的差异始终相对于查询时配置，并非两次发现之间的比较。失败保留上一页并提示可能过期；关闭后迟到响应失效。
+- 迁移 `0012` 延续原表最后成功记录，不恢复升级前已被覆盖的记录。当前无自动清理策略，渠道删除时级联清理；完整失败尝试历史尚未实现。
+
+### 渠道定时模型发现
+
+渠道创建与更新请求增加 `discoveryIntervalMinutes`：null 或省略表示关闭，整数 5–1440 表示间隔分钟数，仅允许 `openai_api`。这是完整渠道配置字段，更新调用方应携带当前值以保留计划。非法间隔返回 400，版本冲突继续返回 409。保存仍走配置版本、审计及发布事务，不在 HTTP 请求中立即查询上游。
+
+- 既有渠道和新建渠道默认关闭。管理页在新增/变更间隔或重新启用带计划渠道时要求确认；保存后开始计时。每次渠道保存都会重新计时并清空最近尝试状态，停用渠道暂停后台查询，成功历史不受影响。
+- 渠道列表的每项增加 `discoveryIntervalMinutes` 和 `discoverySchedule: { nextDueAt, attemptedAt, completedAt, succeeded }`。时间为 ISO 时间字符串或 null；`succeeded` 为 true/false/null。true 仅表示最近定时尝试已成功保存历史且完成状态写入已确认；false 表示执行返回但未确认成功，null 表示未确认完成（从未执行、仍在执行、中断或超时，结合 attemptedAt 判断）。不提供上游原始错误或凭据，也不把此状态解释为模型健康。
+- `nextDueAt` 是到期时间而非精确执行承诺；停用时不会领取，即使保留的时间已过期。Host 每轮最多处理一个渠道，正常轮询间隔 30 秒，整轮限时 30 秒；Provider 请求继续受既有 15 秒限制。失败时保留原成功记录，领取时已推进下一周期，重启/失败不补跑遗漏周期；大量渠道到期可能排队延迟。
+- Worker 只调用既有模型列表发现用例，不执行 Responses、能力探针、价格同步或自动变更模型配置。上游单页限制、版本及发现序号保护不变。已领取或已发出的请求无法保证被关闭动作撤回，但旧连接版本结果不会继续保存；完成状态还受领取标识保护，迟到尝试不能覆盖新尝试。
+- 最近状态只读列表刷新，不由前端轮询上游。完成状态丢失时可读取成功历史核对，不应立即重复查询。迁移 `0013` 保存计划与最近尝试状态，不保存完整失败日志，不自动清理历史；自动查询会持续增加成功记录，应按实际需要设置间隔。
+
+### 两次渠道发现比较
+
+`GET /api/admin/channels/model-discoveries/compare?id=...&baseGeneration=...&targetGeneration=...` 使用管理员鉴权与 `no-store`，仅比较同一渠道的两条已保存成功记录，不查上游、不读取凭据、不写配置或审计。
+
+- 两个序号均为规范十进制正整数字符串，范围 1–9223372036854775807，必须 `baseGeneration < targetGeneration`。同一记录、逆序、未知参数或非法值返回 400；渠道或任意选中记录不存在返回 404，存储暂不可用返回 503，不能把错误展示成“没有变化”。不按墙上时钟判断先后。
+- Store 在单次查询中按渠道和两个序号读取，防止混用其他渠道的记录；比较期间后续成功发现不会改变这组不可变记录。
+- `data` 为 `{ id, base, target, sameConnectionRevision, appeared, disappeared, unchanged }`；`base`、`target` 均包含字符串 `generation`、`connectionRevision` 和 `fetchedAt`。三个模型数组排序并去重，分别表示仅目标发现、仅基准发现、两次均发现。
+- 比较集合由每条记录的 `added ∪ unchanged` 还原；记录中的 `missing` 是查询时配置而非上游已发现集合，不参与还原。只改变本地配置分区而未改变发现集合时，比较结果没有新增或消失。
+- 允许跨连接版本比较，但 `sameConnectionRevision` 为 false，页面明确提示地址、凭据或配置变化也可能造成差异，不直接解释为上游新增/下架。未再发现不自动删除，也不推断能力、价格或可用性。
+- 历史中可跨页设置基准和目标，点击“比较所选记录”才请求比较。结果只读，没有直接采用按钮；采用模型仍走当前渠道发现和草稿保存。改变选择清空旧结果，清空/收起/关闭使迟到响应失效；同一组重读失败保留旧比较并明确本次读取未确认。
+
+### 管理运行模型目录
+
+`GET /api/admin/model-catalog` 使用管理员会话鉴权并返回 `Cache-Control: no-store`，不使用 Client Key。只读取当前运行快照，不触发上游发现或测试。
+
+- 查询：`page` 默认 1 且必须大于 0；`pageSize` 默认 20、范围 1–200；可选 `search`（最多 256 字节）、`provider`、`sourceKind`、`configurationReady`（布尔）。未知字段、非法枚举或分页参数返回 400，快照不可用返回 503 而非空目录。
+- `data` 包含 `items`、筛选后 `total`、`configRevision`、`providerGenerations` 和全目录 `providers`。配置版本、连接版本和目录代数均为十进制字符串，客户端不得转换成 JS Number。
+- 每项包含 `identityKey`、`provider`、`upstreamModel`、`publicNames`、展示名称/描述、`source`、`configurationReady`、操作/能力和上下文/输出上限。`identityKey` 为不透明稳定行键，同名模型跨来源分别保留；公开名称解析映射链，被映射覆盖的原模型名不自动视为其公开名称。
+- `source.kind` 为 `channel`、`account_pool`、`unpooled` 或 `provider_catalog`；最后一种表示适配器有模型目录但没有账号来源，不代表可调用。来源包含可空的 `id`、`name`、`connectionRevision`、默认优先级/权重、并发/RPM 和共享配额 ID，不含连接配置或凭据。来源容量 0 表示不限，未知值为 null。
+- `features` 固定列出 `tools`、`vision`、`reasoning`、`json_schema`、`native_continuation`，值为 `native`、`emulated`、`unsupported` 或 `unknown`；能力缺失保持未知，即使 `upstreamValidatesFeatures` 为 true 也不能推断为支持。能力来自适配器目录，不是每账号实测证据。
+- 配置就绪仅反映来源启停/共享配额配置及账号来源存在性，不验证健康、凭据、余额、客户授权或生成成功。停用渠道若不在运行快照中不会列出；此接口不是所有持久化配置的完整目录，也不返回价格、上游同步时间或虚构测试结果。

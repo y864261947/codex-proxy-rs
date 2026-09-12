@@ -84,6 +84,94 @@ impl AdminStoreError {
 
 pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 
+#[async_trait]
+pub trait ChannelStore: Send + Sync {
+    async fn claim_due_model_discovery(
+        &self,
+    ) -> AdminStoreResult<Option<crate::model::channels::ChannelDiscoveryClaim>>;
+    async fn finish_scheduled_model_discovery(
+        &self,
+        claim: &crate::model::channels::ChannelDiscoveryClaim,
+        succeeded: bool,
+    ) -> AdminStoreResult<()>;
+    async fn load_discovery_pair(
+        &self,
+        query: crate::model::channels::ChannelDiscoveryComparisonQuery,
+    ) -> AdminStoreResult<Option<crate::model::channels::ChannelDiscoveryPair>>;
+    async fn list_model_discoveries(
+        &self,
+        query: crate::model::channels::ChannelDiscoveryQuery,
+    ) -> AdminStoreResult<crate::model::channels::ChannelDiscoveryPage>;
+    async fn reserve_model_discovery(
+        &self,
+        id: &gateway_core::identity::ChannelId,
+        revision: gateway_core::channel::ChannelRevision,
+    ) -> AdminStoreResult<u64>;
+    async fn save_model_discovery(
+        &self,
+        preview: &crate::model::channels::ChannelModelPreview,
+    ) -> AdminStoreResult<()>;
+    async fn load_model_discovery(
+        &self,
+        id: &gateway_core::identity::ChannelId,
+    ) -> AdminStoreResult<Option<crate::model::channels::ChannelModelPreview>>;
+
+    /// 包括停用渠道，仅转交对应 Provider 做编辑合并和脱敏投影。
+    async fn load_channel_for_edit(
+        &self,
+        id: &gateway_core::identity::ChannelId,
+    ) -> AdminStoreResult<Option<gateway_core::channel::StoredChannel>>;
+
+    async fn list_channels(
+        &self,
+        query: crate::model::channels::ChannelListQuery,
+    ) -> AdminStoreResult<crate::model::channels::ChannelPage>;
+    async fn change_channel(
+        &self,
+        change: crate::model::channels::ChannelChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
+#[async_trait]
+pub trait CustomerStore: Send + Sync {
+    async fn list_customers(
+        &self,
+        query: crate::model::customers::CustomerListQuery,
+    ) -> AdminStoreResult<crate::model::customers::CustomerPage>;
+    async fn change_customer(
+        &self,
+        change: crate::model::customers::CustomerChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
+#[async_trait]
+pub trait QuotaScopeStore: Send + Sync {
+    async fn list_quota_scopes(
+        &self,
+        query: crate::model::quota_scopes::QuotaScopeListQuery,
+    ) -> AdminStoreResult<crate::model::quota_scopes::QuotaScopePage>;
+    async fn change_quota_scope(
+        &self,
+        change: crate::model::quota_scopes::QuotaScopeChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
+#[async_trait]
+pub trait AccessGroupStore: Send + Sync {
+    async fn list_access_groups(
+        &self,
+        query: crate::model::access_groups::AccessGroupListQuery,
+    ) -> AdminStoreResult<crate::model::access_groups::AccessGroupPage>;
+    async fn change_access_group(
+        &self,
+        change: crate::model::access_groups::AccessGroupChange,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
+}
+
 /// 账号目录与公共账号写操作。
 #[async_trait]
 pub trait AccountStore: Send + Sync {
@@ -354,6 +442,16 @@ pub trait ObservabilityStore: Send + Sync {
 /// Runtime settings 与管理员 API Key 写入。
 #[async_trait]
 pub trait SettingsStore: Send + Sync {
+    async fn load_global_admission(
+        &self,
+    ) -> AdminStoreResult<crate::model::settings::GlobalAdmissionSettings>;
+
+    async fn replace_global_admission(
+        &self,
+        limits: gateway_core::policy::RateLimits,
+        context: &MutationContext,
+    ) -> AdminStoreResult<crate::model::settings::GlobalAdmissionSettings>;
+
     async fn load_runtime_settings(&self) -> AdminStoreResult<RuntimeSettings>;
 
     async fn admin_api_key_exists(&self) -> AdminStoreResult<bool>;
@@ -403,10 +501,33 @@ impl AdminAccountStorePorts {
 ///
 /// 字段保持私有，每个 getter 只交出一种明确能力。该类型不提供通用拆包入口。
 #[derive(Clone)]
+pub struct AdminDownstreamStorePorts {
+    client_keys: Arc<dyn ClientKeyStore>,
+    customers: Arc<dyn CustomerStore>,
+    access_groups: Arc<dyn AccessGroupStore>,
+}
+
+impl AdminDownstreamStorePorts {
+    #[must_use]
+    pub fn new(
+        client_keys: Arc<dyn ClientKeyStore>,
+        customers: Arc<dyn CustomerStore>,
+        access_groups: Arc<dyn AccessGroupStore>,
+    ) -> Self {
+        Self {
+            client_keys,
+            customers,
+            access_groups,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct AdminStorePorts {
+    upstream: AdminUpstreamStorePorts,
+    downstream: AdminDownstreamStorePorts,
     accounts: AdminAccountStorePorts,
     auth: Arc<dyn AuthStore>,
-    client_keys: Arc<dyn ClientKeyStore>,
     observability: Arc<dyn ObservabilityStore>,
     settings: Arc<dyn SettingsStore>,
     backup: BackupStorePorts,
@@ -417,24 +538,36 @@ impl AdminStorePorts {
     pub fn new(
         accounts: AdminAccountStorePorts,
         auth: Arc<dyn AuthStore>,
-        client_keys: Arc<dyn ClientKeyStore>,
+        downstream: AdminDownstreamStorePorts,
         observability: Arc<dyn ObservabilityStore>,
         settings: Arc<dyn SettingsStore>,
         backup: BackupStorePorts,
+        upstream: AdminUpstreamStorePorts,
     ) -> Self {
         Self {
             accounts,
             auth,
-            client_keys,
+            downstream,
             observability,
             settings,
             backup,
+            upstream,
         }
     }
 
     #[must_use]
     pub fn accounts(&self) -> Arc<dyn AccountStore> {
         self.accounts.accounts.clone()
+    }
+
+    #[must_use]
+    pub fn channels(&self) -> Arc<dyn ChannelStore> {
+        self.upstream.channels.clone()
+    }
+
+    #[must_use]
+    pub fn quota_scopes(&self) -> Arc<dyn QuotaScopeStore> {
+        self.upstream.quotas.clone()
     }
 
     #[must_use]
@@ -454,7 +587,17 @@ impl AdminStorePorts {
 
     #[must_use]
     pub fn client_keys(&self) -> Arc<dyn ClientKeyStore> {
-        self.client_keys.clone()
+        self.downstream.client_keys.clone()
+    }
+
+    #[must_use]
+    pub fn customers(&self) -> Arc<dyn CustomerStore> {
+        self.downstream.customers.clone()
+    }
+
+    #[must_use]
+    pub fn access_groups(&self) -> Arc<dyn AccessGroupStore> {
+        self.downstream.access_groups.clone()
     }
 
     #[must_use]
@@ -470,5 +613,18 @@ impl AdminStorePorts {
     #[must_use]
     pub fn backup(&self) -> BackupStorePorts {
         self.backup.clone()
+    }
+}
+
+/// 渠道及其共享配额，独立于下游客户和权限分组。
+#[derive(Clone)]
+pub struct AdminUpstreamStorePorts {
+    channels: Arc<dyn ChannelStore>,
+    quotas: Arc<dyn QuotaScopeStore>,
+}
+impl AdminUpstreamStorePorts {
+    #[must_use]
+    pub fn new(channels: Arc<dyn ChannelStore>, quotas: Arc<dyn QuotaScopeStore>) -> Self {
+        Self { channels, quotas }
     }
 }

@@ -26,6 +26,7 @@ import {
   visibleRequestText,
   visibleResponseText,
 } from '../utils/records'
+import { upstreamSourceText } from '../utils/source'
 import RequestDiagnosticsPanel from './RequestDiagnosticsPanel.vue'
 import UsageDetailCodePanel from './UsageDetailCodePanel.vue'
 import UsageDetailFieldGrid from './UsageDetailFieldGrid.vue'
@@ -51,7 +52,9 @@ const latencyDetails = computed(() => props.record ? usageLatencyDetails(props.r
 const panelClass = 'min-w-0 rounded-cp-card bg-cp-fill-quaternary px-4 py-3.5'
 const panelTitleClass = 'm-0 text-cp-sm leading-none font-heavy text-cp-text-secondary'
 
-const accountDisplay = computed(() => props.record ? usageAccountText(props.record) : '—')
+const accountDisplay = computed(() => props.record?.upstreamSource?.kind === 'channel'
+  ? props.record.upstreamSource.name || props.record.upstreamSource.id
+  : props.record ? usageAccountText(props.record) : '—')
 const finalAttemptIndex = computed(() => {
   const attempts = props.record?.attempts ?? []
   const last = attempts[attempts.length - 1]
@@ -71,6 +74,8 @@ const overviewItems = computed(() => [
 ])
 
 const modelRouteItems = computed(() => [
+  { label: '实际来源', value: upstreamSourceText(props.record?.upstreamSource) },
+  { label: '来源 ID', value: props.record?.upstreamSource?.id, mono: true },
   { label: '端点', value: props.record?.route, mono: true },
   { label: '推理强度', value: props.record ? usageReasoningEffort(props.record) : '—' },
   { label: '请求模型', value: modelDisplay.value.primary, mono: true },
@@ -124,7 +129,7 @@ const attemptColumns = defineTableColumns<AttemptRow>([
   { key: 'model', label: '模型', kind: 'mono', size: 'lg' },
   { key: 'transport', label: '上游传输', kind: 'status', size: 'md' },
   { key: 'statusCode', label: '状态', kind: 'status', size: 'sm' },
-  { key: 'accountLabel', label: '账号', kind: 'mono', size: '2xl' },
+  { key: 'accountLabel', label: '来源 / 账号', kind: 'mono', size: '2xl' },
   { key: 'latencyMs', label: '耗时', kind: 'numeric', size: 'sm' },
 ])
 
@@ -137,7 +142,7 @@ const attemptRows = computed<AttemptRow[]>(() =>
     model: attempt.model,
     transport: attempt.transport,
     statusCode: attempt.statusCode,
-    accountLabel: attempt.accountEmail || attempt.accountName || attempt.accountId || '—',
+    accountLabel: attempt.upstreamSource ? [upstreamSourceText(attempt.upstreamSource), attempt.accountEmail || attempt.accountName || attempt.accountId].filter(Boolean).join(' / ') : attempt.accountEmail || attempt.accountName || attempt.accountId || '—',
     accountId: attempt.accountId,
     latencyMs: attempt.latencyMs,
   })),
@@ -285,7 +290,7 @@ const tokenDonutOption = computed<EChartsOption>(() => {
         >
           <div class="col-span-2 min-w-0 lg:col-span-1">
             <dt :class="fieldLabelClass">
-              账号
+              {{ record.upstreamSource?.kind === 'channel' ? '渠道' : '账号' }}
             </dt>
             <dd
               class="mt-1.5 mb-0 min-w-0 break-all font-mono text-cp-sm leading-snug font-heavy text-cp-text"

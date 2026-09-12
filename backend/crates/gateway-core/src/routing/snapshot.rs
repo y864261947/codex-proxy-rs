@@ -27,6 +27,7 @@ const MAXIMUM_CATALOG_STABILITY_ATTEMPTS: usize = 4;
 /// Store 在一个一致性读取中提供的调度设置事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotSettingsFacts {
+    global_limits: RateLimits,
     max_concurrent_per_account: u32,
     request_interval_ms: u64,
     rotation_strategy: String,
@@ -36,6 +37,12 @@ pub struct SnapshotSettingsFacts {
 }
 
 impl SnapshotSettingsFacts {
+    #[must_use]
+    pub const fn with_global_limits(mut self, limits: RateLimits) -> Self {
+        self.global_limits = limits;
+        self
+    }
+
     #[must_use]
     pub fn new(
         max_concurrent_per_account: u32,
@@ -47,6 +54,7 @@ impl SnapshotSettingsFacts {
     ) -> Self {
         Self {
             max_concurrent_per_account,
+            global_limits: RateLimits::unlimited(),
             request_interval_ms,
             rotation_strategy: rotation_strategy.into(),
             model_mappings,
@@ -59,6 +67,8 @@ impl SnapshotSettingsFacts {
 /// Store 读取到的一个启用 Client API Key 策略事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotClientPolicyFacts {
+    customer: Option<crate::policy::CustomerPolicy>,
+    access_group: Option<crate::policy::AccessGroupPolicy>,
     key_id: ClientApiKeyId,
     plaintext_key: PlaintextClientApiKey,
     group_ids: Vec<AccountGroupId>,
@@ -66,6 +76,18 @@ pub struct SnapshotClientPolicyFacts {
 }
 
 impl SnapshotClientPolicyFacts {
+    #[must_use]
+    pub fn with_access_group(mut self, group: Option<crate::policy::AccessGroupPolicy>) -> Self {
+        self.access_group = group;
+        self
+    }
+
+    #[must_use]
+    pub fn with_customer(mut self, customer: Option<crate::policy::CustomerPolicy>) -> Self {
+        self.customer = customer;
+        self
+    }
+
     #[must_use]
     pub fn new(
         key_id: ClientApiKeyId,
@@ -75,6 +97,8 @@ impl SnapshotClientPolicyFacts {
     ) -> Self {
         Self {
             key_id,
+            customer: None,
+            access_group: None,
             plaintext_key,
             group_ids,
             limits,
@@ -88,12 +112,24 @@ pub struct SnapshotAccountGroupFacts {
     id: AccountGroupId,
     name: String,
     enabled: bool,
+    controls: super::source::SourceControls,
 }
 
 impl SnapshotAccountGroupFacts {
     #[must_use]
     pub fn new(id: AccountGroupId, name: String, enabled: bool) -> Self {
-        Self { id, name, enabled }
+        Self {
+            id,
+            name,
+            enabled,
+            controls: super::source::SourceControls::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_controls(mut self, controls: super::source::SourceControls) -> Self {
+        self.controls = controls;
+        self
     }
 }
 
@@ -131,9 +167,42 @@ impl SnapshotAccountGroupMemberFacts {
     }
 }
 
+/// 渠道的公共策略和连接版本；不携带 Provider 凭据。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotChannelFacts {
+    binding: crate::channel::ChannelBinding,
+    provider: ProviderKind,
+    policy: super::source::SourcePolicy,
+}
+
+impl SnapshotChannelFacts {
+    #[must_use]
+    pub const fn new(
+        binding: crate::channel::ChannelBinding,
+        provider: ProviderKind,
+        policy: super::source::SourcePolicy,
+    ) -> Self {
+        Self {
+            binding,
+            provider,
+            policy,
+        }
+    }
+    #[must_use]
+    pub const fn binding(&self) -> &crate::channel::ChannelBinding {
+        &self.binding
+    }
+    #[must_use]
+    pub const fn policy(&self) -> &super::source::SourcePolicy {
+        &self.policy
+    }
+}
+
 /// 一次一致性读取产生的全部 RuntimeSnapshot 持久事实。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotFacts {
+    channels: Vec<SnapshotChannelFacts>,
+    quotas: Vec<super::source::QuotaScopePolicy>,
     config_revision: ConfigRevision,
     observed_current_revision: ConfigRevision,
     settings: SnapshotSettingsFacts,
@@ -155,6 +224,8 @@ impl SnapshotFacts {
         group_memberships: Vec<SnapshotAccountGroupMemberFacts>,
     ) -> Self {
         Self {
+            channels: Vec::new(),
+            quotas: Vec::new(),
             config_revision,
             observed_current_revision,
             settings,
@@ -163,6 +234,18 @@ impl SnapshotFacts {
             provider_accounts,
             group_memberships,
         }
+    }
+
+    #[must_use]
+    pub fn with_channels(mut self, channels: Vec<SnapshotChannelFacts>) -> Self {
+        self.channels = channels;
+        self
+    }
+
+    #[must_use]
+    pub fn with_quotas(mut self, quotas: Vec<super::source::QuotaScopePolicy>) -> Self {
+        self.quotas = quotas;
+        self
     }
 
     #[must_use]
@@ -259,6 +342,16 @@ async fn compile_runtime_snapshot(
 ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
     let provider_kinds = providers.provider_kinds().cloned().collect::<Vec<_>>();
     let registered_providers = provider_kinds.iter().cloned().collect::<BTreeSet<_>>();
+    let mut channels = BTreeMap::new();
+    for channel in facts.channels {
+        if channel.policy.id() != &super::source::SourceId::Channel(channel.binding.id().clone())
+            || channels
+                .insert(channel.binding.id().clone(), channel)
+                .is_some()
+        {
+            return Err(RuntimeSnapshotCompileError::InvalidData);
+        }
+    }
 
     // 目录查询失败表示未知；查询成功后，即使为空，也必须与“已知缺少模型”区分。
     let mut provider_models = Vec::new();
@@ -268,17 +361,30 @@ async fn compile_runtime_snapshot(
             continue;
         };
         known_provider_catalogs.insert(provider.clone());
-        provider_models.extend(models.into_iter().map(|model| {
+        for model in models {
+            if let Some(binding) = model.channel_binding() {
+                let Some(channel) = channels.get(binding.id()) else {
+                    return Err(RuntimeSnapshotCompileError::CatalogChanged);
+                };
+                if channel.binding != *binding || channel.provider != *provider {
+                    return Err(RuntimeSnapshotCompileError::CatalogChanged);
+                }
+            }
             let compiled = ProviderModel::new(
                 provider.clone(),
                 model.upstream_model().clone(),
                 model.capabilities().clone(),
             );
-            match model.presentation().cloned() {
+            let compiled = match model.channel_binding().cloned() {
+                Some(channel) => compiled.with_channel(channel),
+                None => compiled,
+            };
+            let compiled = match model.presentation().cloned() {
                 Some(presentation) => compiled.with_presentation(presentation),
                 None => compiled,
-            }
-        }));
+            };
+            provider_models.push(compiled);
+        }
     }
 
     let mut groups = BTreeMap::new();
@@ -356,9 +462,23 @@ async fn compile_runtime_snapshot(
             .ok_or(RuntimeSnapshotCompileError::InvalidData)?,
         Duration::from_millis(facts.settings.request_interval_ms),
     );
+    if !facts.settings.global_limits.is_valid() {
+        return Err(RuntimeSnapshotCompileError::InvalidData);
+    }
     let mut client_policies = Vec::with_capacity(facts.client_policies.len());
-    for policy in facts.client_policies {
-        let account_scope = if policy.group_ids.is_empty() {
+    for mut policy in facts.client_policies {
+        if let Some(group) = &policy.access_group {
+            group
+                .validate()
+                .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?;
+            policy.group_ids = group.pool_group_ids.iter().cloned().collect();
+        }
+        let account_scope = if policy.group_ids.is_empty() && policy.access_group.is_some() {
+            FrozenAccountScope::new(
+                Arc::clone(&account_directory),
+                ClientRoutingScope::no_accounts(),
+            )
+        } else if policy.group_ids.is_empty() {
             FrozenAccountScope::new(
                 Arc::clone(&account_directory),
                 ClientRoutingScope::all_accounts(),
@@ -390,15 +510,35 @@ async fn compile_runtime_snapshot(
                     .map_err(|_| RuntimeSnapshotCompileError::InvalidData)?,
             )
         };
-        client_policies.push(ClientPolicy::new(
-            policy.key_id,
-            policy.plaintext_key,
-            Arc::new(account_scope),
-            true,
-            policy.limits,
-        ));
+        client_policies.push(
+            ClientPolicy::new(
+                policy.key_id,
+                policy.plaintext_key,
+                Arc::new(account_scope),
+                true,
+                policy.limits,
+            )
+            .with_global_limits(facts.settings.global_limits)
+            .with_customer(policy.customer)
+            .with_access_group(policy.access_group),
+        );
     }
 
+    let mut source_policies = groups
+        .values()
+        .map(|group| {
+            super::source::SourcePolicy::new(
+                super::source::SourceId::AccountPool(group.id.clone()),
+                group.enabled,
+                group.controls.preference(),
+                group.controls.limits(),
+                group.controls.quota_scope_id().cloned(),
+            )
+            .and_then(|policy| policy.with_name(group.name.clone()))
+            .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    source_policies.extend(channels.into_values().map(|channel| channel.policy));
     RuntimeSnapshot::new(
         facts.config_revision,
         selection_policy,
@@ -406,6 +546,8 @@ async fn compile_runtime_snapshot(
         provider_models,
         client_policies,
     )
+    .and_then(|snapshot| snapshot.with_source_policies(source_policies))
+    .and_then(|snapshot| snapshot.with_quota_policies(facts.quotas))
     .map_err(|_| RuntimeSnapshotCompileError::InvalidData)
     .map(|snapshot| {
         snapshot
@@ -419,6 +561,10 @@ async fn compile_runtime_snapshot(
 /// 数据面使用的不可变配置快照。
 #[derive(Debug, Clone)]
 pub struct RuntimeSnapshot {
+    channel_models:
+        Arc<BTreeMap<crate::identity::ChannelId, BTreeMap<UpstreamModelId, ProviderModel>>>,
+    source_policies: Arc<BTreeMap<super::source::SourceId, super::source::SourcePolicy>>,
+    quota_policies: Arc<BTreeMap<crate::identity::QuotaScopeId, super::source::QuotaScopePolicy>>,
     revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     providers: Arc<BTreeSet<ProviderKind>>,
@@ -434,6 +580,113 @@ pub struct RuntimeSnapshot {
 }
 
 impl RuntimeSnapshot {
+    #[must_use]
+    pub fn model_catalog(&self) -> crate::catalog::ModelCatalogSnapshot {
+        use super::source::SourceId;
+        use crate::catalog::{CatalogModel, CatalogModelKey, ModelCatalogSnapshot};
+        let public_names = |model: &UpstreamModelId| {
+            std::iter::once(model.as_str().to_owned())
+                .chain(self.model_mappings.keys().cloned())
+                .filter(|name| self.mapped_model(name) == model.as_str())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>()
+        };
+        let mut items = Vec::new();
+        for models in self.channel_models.values() {
+            for model in models.values() {
+                let binding = model.channel_binding().expect("channel catalog binding");
+                let source = SourceId::Channel(binding.id().clone());
+                let policy = self.source_policy(&source);
+                items.push(CatalogModel {
+                    key: CatalogModelKey {
+                        provider: model.provider.clone(),
+                        upstream_model: model.upstream_model.clone(),
+                        source: Some(source.clone()),
+                    },
+                    public_names: public_names(&model.upstream_model),
+                    source: Some(policy.map_or_else(
+                        || super::source::SourceSnapshot::unnamed(source),
+                        super::source::SourcePolicy::snapshot,
+                    )),
+                    source_controls: policy.map(|policy| policy.controls().clone()),
+                    configuration_ready: policy
+                        .is_some_and(|policy| self.source_is_available(policy)),
+                    has_account_source: false,
+                    connection_revision: Some(binding.revision()),
+                    capabilities: model.capabilities.clone(),
+                    presentation: model.presentation.clone(),
+                });
+            }
+        }
+        let unpooled_scope = self.all_account_scope().only_unpooled();
+        let unpooled_providers = unpooled_scope.provider_kinds();
+        for (provider, models) in self.provider_models.iter() {
+            let pools = self
+                .source_policies
+                .values()
+                .filter(|policy| match policy.id() {
+                    SourceId::AccountPool(pool) => self
+                        .account_directory
+                        .providers_for_groups([pool])
+                        .contains(provider),
+                    SourceId::Channel(_) => false,
+                })
+                .collect::<Vec<_>>();
+            for (model, capabilities) in models {
+                let presentation = self
+                    .provider_model_presentations
+                    .get(provider)
+                    .and_then(|models| models.get(model))
+                    .cloned();
+                for policy in &pools {
+                    items.push(CatalogModel {
+                        key: CatalogModelKey {
+                            provider: provider.clone(),
+                            upstream_model: model.clone(),
+                            source: Some(policy.id().clone()),
+                        },
+                        public_names: public_names(model),
+                        source: Some(policy.snapshot()),
+                        source_controls: Some(policy.controls().clone()),
+                        configuration_ready: self.source_is_available(policy),
+                        has_account_source: true,
+                        connection_revision: None,
+                        capabilities: capabilities.clone(),
+                        presentation: presentation.clone(),
+                    });
+                }
+                if unpooled_providers.contains(provider) || pools.is_empty() {
+                    items.push(CatalogModel {
+                        key: CatalogModelKey {
+                            provider: provider.clone(),
+                            upstream_model: model.clone(),
+                            source: None,
+                        },
+                        public_names: public_names(model),
+                        source: None,
+                        source_controls: None,
+                        configuration_ready: unpooled_providers.contains(provider),
+                        has_account_source: unpooled_providers.contains(provider),
+                        connection_revision: None,
+                        capabilities: capabilities.clone(),
+                        presentation,
+                    });
+                }
+            }
+        }
+        items.sort_by(|first, second| first.key.cmp(&second.key));
+        ModelCatalogSnapshot {
+            config_revision: self.revision,
+            provider_generations: self
+                .provider_catalog_generations
+                .iter()
+                .map(|(provider, generation)| (provider.clone(), generation.get()))
+                .collect(),
+            items,
+        }
+    }
+
     /// 校验 Provider、实时模型目录和 Client API Key，并构建快照。
     pub fn new(
         revision: ConfigRevision,
@@ -453,12 +706,42 @@ impl RuntimeSnapshot {
         }
 
         let mut known_provider_catalogs = BTreeSet::new();
+        let mut channel_models =
+            BTreeMap::<crate::identity::ChannelId, BTreeMap<UpstreamModelId, ProviderModel>>::new();
         let mut model_map =
             BTreeMap::<ProviderKind, BTreeMap<UpstreamModelId, ModelCapabilities>>::new();
         let mut presentation_map =
             BTreeMap::<ProviderKind, BTreeMap<UpstreamModelId, super::ModelPresentation>>::new();
         for model in provider_models {
+            if let Some(channel) = model.channel.clone() {
+                let channel_id = channel.id();
+                if !provider_set.contains(&model.provider) {
+                    return Err(RoutingError::NotFound {
+                        entity: "provider",
+                        id: model.provider.to_string(),
+                    });
+                }
+                // 成功返回渠道目录不能授权该适配器的未知账号路径。
+                known_provider_catalogs.insert(model.provider.clone());
+                let models = channel_models.entry(channel_id.clone()).or_default();
+                if models.values().any(|existing| {
+                    existing.provider != model.provider || existing.channel != model.channel
+                }) {
+                    return Err(RoutingError::DuplicateEntity {
+                        entity: "channel provider or revision",
+                        id: channel_id.to_string(),
+                    });
+                }
+                if models.insert(model.upstream_model.clone(), model).is_some() {
+                    return Err(RoutingError::DuplicateEntity {
+                        entity: "channel model",
+                        id: channel_id.to_string(),
+                    });
+                }
+                continue;
+            }
             let ProviderModel {
+                channel: _,
                 provider,
                 upstream_model,
                 capabilities,
@@ -502,6 +785,9 @@ impl RuntimeSnapshot {
         client_policy_map.retain(|_, policy| policy.enabled());
 
         Ok(Self {
+            channel_models: Arc::new(channel_models),
+            source_policies: Arc::new(BTreeMap::new()),
+            quota_policies: Arc::new(BTreeMap::new()),
             revision,
             account_selection_policy,
             providers: Arc::new(provider_set),
@@ -513,6 +799,405 @@ impl RuntimeSnapshot {
             account_directory: Arc::new(RuntimeAccountDirectory::default()),
             client_policies: Arc::new(client_policy_map),
             min_codex_client_versions: CodexClientMinVersions::default(),
+        })
+    }
+
+    /// 与来源配置一同冻结共享配额，重复身份拒绝编译。
+    pub fn with_quota_policies(
+        mut self,
+        policies: Vec<super::source::QuotaScopePolicy>,
+    ) -> Result<Self, RoutingError> {
+        let mut quotas = BTreeMap::new();
+        for policy in policies {
+            let id = policy.id().clone();
+            if quotas.insert(id.clone(), policy).is_some() {
+                return Err(RoutingError::DuplicateEntity {
+                    entity: "shared quota",
+                    id: id.to_string(),
+                });
+            }
+        }
+        self.quota_policies = Arc::new(quotas);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn quota_policy(
+        &self,
+        id: &crate::identity::QuotaScopeId,
+    ) -> Option<&super::source::QuotaScopePolicy> {
+        self.quota_policies.get(id)
+    }
+
+    fn source_is_available(&self, policy: &super::source::SourcePolicy) -> bool {
+        policy.enabled()
+            && policy.quota_scope_id().is_none_or(|id| {
+                self.quota_policy(id)
+                    .is_some_and(super::source::QuotaScopePolicy::enabled)
+            })
+    }
+
+    /// 发布与模型目录同一请求快照的来源启停、容量与调度策略。
+    pub fn with_source_policies(
+        mut self,
+        policies: Vec<super::source::SourcePolicy>,
+    ) -> Result<Self, RoutingError> {
+        let mut sources = BTreeMap::new();
+        for policy in policies {
+            let id = policy.id().clone();
+            if sources.insert(id.clone(), policy).is_some() {
+                return Err(RoutingError::DuplicateEntity {
+                    entity: "source",
+                    id: id.to_string(),
+                });
+            }
+        }
+        self.source_policies = Arc::new(sources);
+        Ok(self)
+    }
+
+    #[must_use]
+    pub fn source_policy(
+        &self,
+        source: &super::source::SourceId,
+    ) -> Option<&super::source::SourcePolicy> {
+        self.source_policies.get(source)
+    }
+
+    /// 旧 Key 和固定账号诊断也使用真实号池来源；只有未分池账号保留无来源路径。
+    pub fn plan_account_sources(
+        &self,
+        target: super::SourceRoutingTarget<'_>,
+        operation: &Operation,
+        account_scope: Arc<FrozenAccountScope>,
+        context: &RoutingContext,
+        seed: u64,
+    ) -> Result<RoutingPlan, RoutingError> {
+        let allowed = super::source::AllowedSources::new(
+            account_scope
+                .pool_group_ids()
+                .into_iter()
+                .map(super::source::SourceId::AccountPool),
+        );
+        // 原 Provider circuit 只约束未分池路径，不能连带阻断已独立计健康的号池。
+        let pool_context = RoutingContext {
+            required_provider: context.required_provider.clone(),
+            blocked_sources: context.blocked_sources.clone(),
+            ..RoutingContext::default()
+        };
+        let pool_plan = self.plan_sources(
+            target,
+            operation,
+            Arc::clone(&account_scope),
+            &pool_context,
+            &allowed,
+            seed,
+        );
+        let unpooled = Arc::new(account_scope.only_unpooled());
+        let unpooled_plan = match target {
+            super::SourceRoutingTarget::Model(model) => {
+                self.plan(model, operation, unpooled, context)
+            }
+            super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                self.plan_provider_endpoint(provider, operation, unpooled, context)
+            }
+        };
+        let mut candidates = Vec::new();
+        for plan in [pool_plan, unpooled_plan] {
+            match plan {
+                Ok(plan) => candidates.extend(plan.candidates().iter().cloned()),
+                Err(
+                    RoutingError::EmptyAccountScope
+                    | RoutingError::NoCapableProvider { .. }
+                    | RoutingError::NoCapableProviderEndpoint { .. },
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if candidates.is_empty() {
+            return Err(match target {
+                super::SourceRoutingTarget::Model(model) => RoutingError::NoCapableProvider {
+                    model: model.to_string(),
+                },
+                super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                    RoutingError::NoCapableProviderEndpoint {
+                        provider: provider.to_string(),
+                    }
+                }
+            });
+        }
+        Ok(RoutingPlan {
+            allow_capacity_fallback: true,
+            config_revision: self.revision,
+            account_selection_policy: self.account_selection_policy,
+            operation: operation.kind(),
+            max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
+                .expect("constant request attempt limit is non-zero"),
+            account_scope,
+            candidates: Arc::from(candidates),
+        })
+    }
+
+    /// 接入分组选定来源后，号池候选使用该池与请求权限的交集。
+    pub fn plan_sources(
+        &self,
+        target: super::SourceRoutingTarget<'_>,
+        operation: &Operation,
+        account_scope: Arc<FrozenAccountScope>,
+        context: &RoutingContext,
+        allowed: &super::source::AllowedSources,
+        seed: u64,
+    ) -> Result<RoutingPlan, RoutingError> {
+        let order = super::source::selection_order(
+            allowed
+                .iter()
+                .filter(|source| !context.blocked_sources.contains(*source))
+                .filter_map(|source| {
+                    self.source_policy(source)
+                        .filter(|policy| self.source_is_available(policy))
+                        .map(|policy| (source.clone(), allowed.preference(policy)))
+                })
+                .collect(),
+            seed,
+        );
+        let mut candidates = Vec::new();
+        for source in order {
+            let policy = self
+                .source_policy(&source)
+                .expect("ordered source belongs to this immutable snapshot");
+            let plan = match &source {
+                super::source::SourceId::AccountPool(group) => {
+                    let scope = Arc::new(
+                        account_scope.within_group(RoutingGroupSnapshot::new(
+                            group.clone(),
+                            policy
+                                .snapshot()
+                                .name()
+                                .unwrap_or(group.as_str())
+                                .to_owned(),
+                        )),
+                    );
+                    if scope.provider_kinds().is_empty() {
+                        continue;
+                    }
+                    match target {
+                        super::SourceRoutingTarget::Model(model) => {
+                            self.plan(model, operation, scope, context)
+                        }
+                        super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                            self.plan_provider_endpoint(provider, operation, scope, context)
+                        }
+                    }
+                }
+                super::source::SourceId::Channel(_) => match target {
+                    super::SourceRoutingTarget::Model(model) => self.plan_channels(
+                        model,
+                        operation,
+                        Arc::clone(&account_scope),
+                        context,
+                        &super::source::AllowedSources::new([source.clone()]),
+                    ),
+                    super::SourceRoutingTarget::ProviderEndpoint(_) => continue,
+                },
+            };
+            match plan {
+                Ok(plan) => {
+                    candidates.extend(plan.candidates().iter().cloned().map(|mut candidate| {
+                        candidate.source = Some(policy.snapshot());
+                        candidate.source_controls = super::source::SourceControls::new(
+                            allowed.preference(policy),
+                            policy.limits(),
+                            policy.quota_scope_id().cloned(),
+                        )
+                        .expect("validated source controls");
+                        candidate.shared_quota = policy
+                            .quota_scope_id()
+                            .and_then(|id| self.quota_policy(id))
+                            .cloned();
+                        candidate
+                    }))
+                }
+                Err(
+                    RoutingError::EmptyAccountScope
+                    | RoutingError::NoCapableProvider { .. }
+                    | RoutingError::NoCapableProviderEndpoint { .. },
+                ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        if candidates.is_empty() {
+            return Err(match target {
+                super::SourceRoutingTarget::Model(model) => RoutingError::NoCapableProvider {
+                    model: model.to_string(),
+                },
+                super::SourceRoutingTarget::ProviderEndpoint(provider) => {
+                    RoutingError::NoCapableProviderEndpoint {
+                        provider: provider.to_string(),
+                    }
+                }
+            });
+        }
+        Ok(RoutingPlan {
+            allow_capacity_fallback: allowed.allow_capacity_fallback(),
+            config_revision: self.revision,
+            account_selection_policy: self.account_selection_policy,
+            operation: operation.kind(),
+            max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
+                .expect("nonzero attempt limit"),
+            account_scope,
+            candidates: Arc::from(candidates),
+        })
+    }
+
+    /// 只返回显式允许且启用渠道中真实发现的模型；别名也必须解析到该渠道。
+    #[must_use]
+    pub fn public_models_for_channels(
+        &self,
+        allowed: &super::source::AllowedSources,
+    ) -> Vec<PublicModelId> {
+        let mut visible = BTreeSet::new();
+        for source in allowed.iter() {
+            let super::source::SourceId::Channel(channel) = source else {
+                continue;
+            };
+            if !self
+                .source_policy(source)
+                .is_some_and(|policy| self.source_is_available(policy))
+            {
+                continue;
+            }
+            let Some(models) = self.channel_models.get(channel) else {
+                continue;
+            };
+            visible.extend(
+                models
+                    .keys()
+                    .filter_map(|model| PublicModelId::new(model.as_str()).ok()),
+            );
+            for alias in self.model_mappings.keys() {
+                let mapped = self.mapped_model(alias);
+                if models.keys().any(|model| model.as_str() == mapped)
+                    && let Ok(alias) = PublicModelId::new(alias.clone())
+                {
+                    visible.insert(alias);
+                }
+            }
+        }
+        visible.into_iter().collect()
+    }
+
+    /// 渠道必须同时有显式权限、启用策略及该来源自己的能力事实。
+    #[must_use]
+    pub fn public_model_profiles_for_channels(
+        &self,
+        allowed: &super::source::AllowedSources,
+    ) -> Vec<super::PublicModelProfile> {
+        self.public_models_for_channels(allowed)
+            .into_iter()
+            .filter_map(|public_model| {
+                let target = self.mapped_model(public_model.as_str());
+                let presentation = allowed.iter().find_map(|source| {
+                    let super::source::SourceId::Channel(channel) = source else {
+                        return None;
+                    };
+                    if !self
+                        .source_policy(source)
+                        .is_some_and(|policy| self.source_is_available(policy))
+                    {
+                        return None;
+                    }
+                    self.channel_models
+                        .get(channel)?
+                        .values()
+                        .find(|model| model.upstream_model.as_str() == target)?
+                        .presentation
+                        .clone()
+                })?;
+                Some(super::PublicModelProfile::new(public_model, presentation))
+            })
+            .collect()
+    }
+
+    /// 渠道必须同时有显式权限、启用策略及该来源自己的能力事实。
+    /// 账号 scope 保留在计划中用于请求历史，绝不作为渠道授权的替代。
+    pub fn plan_channels(
+        &self,
+        public_model: &PublicModelId,
+        operation: &Operation,
+        account_scope: Arc<FrozenAccountScope>,
+        context: &RoutingContext,
+        allowed: &super::source::AllowedSources,
+    ) -> Result<RoutingPlan, RoutingError> {
+        let requirements = operation.capability_requirements();
+        let mapped = self.mapped_model(public_model.as_str());
+        let mut candidates = Vec::new();
+        for source in allowed.iter() {
+            if context.blocked_sources.contains(source) {
+                continue;
+            }
+            let super::source::SourceId::Channel(channel) = source else {
+                continue;
+            };
+            if !self
+                .source_policy(source)
+                .is_some_and(|policy| self.source_is_available(policy))
+            {
+                continue;
+            }
+            let Some(model) = self.channel_models.get(channel).and_then(|models| {
+                models
+                    .values()
+                    .find(|model| model.upstream_model.as_str() == mapped)
+            }) else {
+                continue;
+            };
+            if context.blocked_providers.contains(&model.provider)
+                || context
+                    .required_provider
+                    .as_ref()
+                    .is_some_and(|required| required != &model.provider)
+            {
+                continue;
+            }
+            let Some(emulated_features) = model.capabilities.match_requirements(&requirements)
+            else {
+                continue;
+            };
+            candidates.push(ProviderCandidate {
+                channel: model.channel.clone(),
+                shared_quota: self
+                    .source_policy(source)
+                    .and_then(|policy| policy.quota_scope_id())
+                    .and_then(|id| self.quota_policy(id))
+                    .cloned(),
+                source_controls: self
+                    .source_policy(source)
+                    .expect("validated source policy")
+                    .controls()
+                    .clone(),
+                source: self
+                    .source_policy(source)
+                    .map(super::source::SourcePolicy::snapshot),
+                provider: model.provider.clone(),
+                upstream_model: Some(model.upstream_model.clone()),
+                emulated_features,
+                account_scope: Arc::clone(&account_scope),
+            });
+        }
+        if candidates.is_empty() {
+            return Err(RoutingError::NoCapableProvider {
+                model: public_model.to_string(),
+            });
+        }
+        Ok(RoutingPlan {
+            allow_capacity_fallback: true,
+            config_revision: self.revision,
+            account_selection_policy: self.account_selection_policy,
+            operation: operation.kind(),
+            max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
+                .expect("nonzero request attempt limit"),
+            account_scope,
+            candidates: Arc::from(candidates),
         })
     }
 
@@ -727,15 +1412,12 @@ impl RuntimeSnapshot {
         let requirements = operation.capability_requirements();
         let mut candidates = Vec::new();
 
-        if context.required_provider.is_none() && account_scope.provider_kinds().is_empty() {
+        if account_scope.provider_kinds().is_empty() {
             return Err(RoutingError::EmptyAccountScope);
         }
 
-        let providers = context.required_provider.as_ref().map_or_else(
-            || account_scope.provider_kinds().clone(),
-            |provider| BTreeSet::from([provider.clone()]),
-        );
-        for provider in &providers {
+        // 显式 Provider 是过滤条件，不能给空范围或其他 Provider 的账号授予权限。
+        for provider in account_scope.provider_kinds() {
             if !self.providers.contains(provider) {
                 continue;
             }
@@ -770,6 +1452,10 @@ impl RuntimeSnapshot {
                 None => BTreeSet::new(),
             };
             candidates.push(ProviderCandidate {
+                channel: None,
+                source: None,
+                source_controls: super::source::SourceControls::default(),
+                shared_quota: None,
                 provider: provider.clone(),
                 upstream_model: Some(upstream_model),
                 emulated_features,
@@ -784,6 +1470,7 @@ impl RuntimeSnapshot {
         }
 
         Ok(RoutingPlan {
+            allow_capacity_fallback: true,
             config_revision: self.revision,
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),
@@ -819,12 +1506,17 @@ impl RuntimeSnapshot {
             });
         }
         let candidate = ProviderCandidate {
+            channel: None,
+            source: None,
+            source_controls: super::source::SourceControls::default(),
+            shared_quota: None,
             provider: provider.clone(),
             upstream_model: None,
             emulated_features: BTreeSet::new(),
             account_scope: Arc::clone(&account_scope),
         };
         Ok(RoutingPlan {
+            allow_capacity_fallback: true,
             config_revision: self.revision,
             account_selection_policy: self.account_selection_policy,
             operation: operation.kind(),

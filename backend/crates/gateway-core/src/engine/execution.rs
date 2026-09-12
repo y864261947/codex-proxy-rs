@@ -7,7 +7,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use futures::{FutureExt, future::BoxFuture, pin_mut, select_biased};
+use futures::{FutureExt, StreamExt, future::BoxFuture, pin_mut, select_biased};
 use futures_timer::Delay;
 use uuid::Uuid;
 
@@ -24,6 +24,7 @@ use crate::engine::probe::{
     AccountProbeResult, AccountProbeUpstreamResponse,
 };
 use crate::engine::provider::ProviderRegistry;
+use crate::engine::traffic::{TrafficLease, TrafficMonitor};
 use crate::engine::{
     AttemptCoordinator, AttemptRecord, CoordinatedEvent, EngineError, ExecutionStore,
     GatewayEngine, IntermediateFailure, ModelRequestFinalization, ModelRequestId, NewModelRequest,
@@ -34,7 +35,8 @@ use crate::event::{GatewayEvent, ProviderEvent, ProviderResponseHeader};
 use crate::identity::ProviderKind;
 use crate::lifecycle::CancellationToken;
 use crate::operation::{Operation, ProviderSessionState};
-use crate::policy::{ClientApiKeyId, ClientPolicy};
+use crate::policy::{AdmissionScopeId, ClientApiKeyId, ClientPolicy};
+use crate::routing::source::SourceId;
 use crate::routing::{
     PublicModelId, PublicModelProfile, RoutingContext, RuntimeSnapshot, UpstreamModelId,
 };
@@ -141,6 +143,7 @@ impl ExecutionTarget {
 }
 
 struct PendingStartExecution {
+    traffic: TrafficLease,
     client: AuthenticatedClient,
     target: ExecutionTarget,
     operation: Operation,
@@ -230,22 +233,39 @@ impl Default for ProviderCircuitPolicy {
     }
 }
 
+/// 健康反馈按实际来源隔离；无来源的旧账号计划保留 Provider 范围。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ProviderCircuitScope {
+    Provider(ProviderKind),
+    Source(SourceId),
+}
+
+impl fmt::Display for ProviderCircuitScope {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Provider(provider) => write!(formatter, "provider:{provider}"),
+            Self::Source(source) => write!(formatter, "source:{source}"),
+        }
+    }
+}
+
 pub trait ProviderCircuitPort: Send + Sync {
     fn decision<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>>;
     fn observe_failure<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>>;
     fn observe_success<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>>;
 }
 
 pub struct DefaultExecutionService {
+    traffic: TrafficMonitor,
     snapshots: RuntimeSnapshotHandle,
     coordinator: Arc<AttemptCoordinator<dyn ExecutionStore>>,
     probe_coordinator: Arc<AttemptCoordinator<dyn ExecutionStore>>,
@@ -264,17 +284,29 @@ impl DefaultExecutionService {
         snapshots: RuntimeSnapshotHandle,
         execution: Arc<dyn ExecutionStore>,
         providers: ProviderRegistry,
-        admissions: Arc<dyn ClientAdmissionPort>,
+        (admissions, source_admissions): (
+            Arc<dyn ClientAdmissionPort>,
+            Arc<dyn super::source_admission::SourceAdmissionPort>,
+        ),
         circuits: Arc<dyn ProviderCircuitPort>,
         continuation: Arc<dyn NativeContinuationPort>,
         client_api_key_usage: Arc<dyn ClientApiKeyUsageSink>,
     ) -> Self {
         let observations = Arc::clone(&execution);
-        let engine = GatewayEngine::<dyn ExecutionStore>::new(execution, providers.clone());
+        let engine = GatewayEngine::<dyn ExecutionStore>::new(
+            execution,
+            providers.clone(),
+            source_admissions.clone(),
+        );
         let transient: Arc<dyn ExecutionStore> = Arc::new(TransientExecutionStore);
-        let probe_engine = GatewayEngine::<dyn ExecutionStore>::new(transient, providers.clone());
+        let probe_engine = GatewayEngine::<dyn ExecutionStore>::new(
+            transient,
+            providers.clone(),
+            source_admissions,
+        );
         Self {
             snapshots,
+            traffic: TrafficMonitor::default(),
             coordinator: Arc::new(AttemptCoordinator::new(engine)),
             probe_coordinator: Arc::new(AttemptCoordinator::new(probe_engine)),
             observations,
@@ -286,6 +318,11 @@ impl DefaultExecutionService {
         }
     }
 
+    #[must_use]
+    pub fn traffic_monitor(&self) -> TrafficMonitor {
+        self.traffic.clone()
+    }
+
     async fn start_inner(&self, request: StartExecution) -> Result<StartedExecution, GatewayError> {
         let StartExecution {
             client,
@@ -294,6 +331,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         self.start_inner_with_target(PendingStartExecution {
+            traffic: self.traffic.begin_execution(),
             client,
             target: ExecutionTarget::Model(public_model),
             operation,
@@ -313,6 +351,7 @@ impl DefaultExecutionService {
             metadata,
         } = request;
         self.start_inner_with_target(PendingStartExecution {
+            traffic: self.traffic.begin_execution(),
             client,
             target: ExecutionTarget::ProviderEndpoint(provider),
             operation,
@@ -325,9 +364,59 @@ impl DefaultExecutionService {
         &self,
         mut request: PendingStartExecution,
     ) -> Result<StartedExecution, GatewayError> {
+        if request.metadata.transport == ClientTransport::WebSocket {
+            // 连接可以跨越多次配置发布；每次生成必须重新冻结当前权限和限额。
+            let snapshot = self.snapshots.acquire().map_err(|_| {
+                GatewayError::new(
+                    GatewayErrorKind::NoAvailableProvider,
+                    "runtime configuration is temporarily unavailable",
+                )
+            })?;
+            let policy = snapshot
+                .client_policies()
+                .find(|policy| {
+                    policy.key_id() == request.client.policy.key_id()
+                        && constant_time_equal(
+                            policy.plaintext_key().expose_for_auth(),
+                            request.client.policy.plaintext_key().expose_for_auth(),
+                        )
+                        && policy.authorize().is_ok()
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    GatewayError::new(
+                        GatewayErrorKind::PolicyDenied,
+                        "client API key is no longer authorized",
+                    )
+                })?;
+            request.client = AuthenticatedClient { snapshot, policy };
+        }
         request.client.policy.authorize().map_err(|_| {
             GatewayError::new(GatewayErrorKind::PolicyDenied, "client API key is disabled")
         })?;
+        if request.client.policy.access_group().is_some() {
+            let requested_model = match &request.target {
+                ExecutionTarget::Model(model) => Some(model.clone()),
+                ExecutionTarget::ProviderEndpoint(provider) => {
+                    self.providers
+                        .request_observation(
+                            provider,
+                            &request.operation,
+                            request.client.policy.key_id(),
+                        )
+                        .requested_model
+                }
+            };
+            if requested_model
+                .as_ref()
+                .is_none_or(|model| !request.client.policy.allows_model(model.as_str()))
+            {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::PolicyDenied,
+                    "model is not allowed by the access group; an explicit authorized model is required",
+                ));
+            }
+        }
         let started_at = SystemTime::now();
         let deadline_at = started_at
             .checked_add(MODEL_REQUEST_DEADLINE)
@@ -335,25 +424,38 @@ impl DefaultExecutionService {
                 GatewayError::new(GatewayErrorKind::Internal, "system clock is invalid")
             })?;
         let request_id = new_request_id()?;
-        let routing_context = self
-            .route_context(request.client.policy.account_scope().provider_kinds())
-            .await?;
+        let routing_context = self.route_context(&request.client.policy).await;
         let account_scope = Arc::clone(request.client.policy.account_scope());
-        let plan = match &request.target {
+        let target = match &request.target {
+            ExecutionTarget::Model(model) => crate::routing::SourceRoutingTarget::Model(model),
             ExecutionTarget::ProviderEndpoint(provider) => {
-                request.client.snapshot.plan_provider_endpoint(
-                    provider,
-                    &request.operation,
-                    account_scope,
-                    &routing_context,
-                )
+                crate::routing::SourceRoutingTarget::ProviderEndpoint(provider)
             }
-            ExecutionTarget::Model(public_model) => request.client.snapshot.plan(
-                public_model,
+        };
+        let seed = request_id
+            .as_str()
+            .bytes()
+            .fold(0xcbf29ce484222325_u64, |seed, byte| {
+                (seed ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+            });
+        let plan = if let Some(group) = request.client.policy.access_group() {
+            let allowed = crate::routing::source::AllowedSources::for_access_group(group);
+            request.client.snapshot.plan_sources(
+                target,
                 &request.operation,
                 account_scope,
                 &routing_context,
-            ),
+                &allowed,
+                seed,
+            )
+        } else {
+            request.client.snapshot.plan_account_sources(
+                target,
+                &request.operation,
+                account_scope,
+                &routing_context,
+                seed,
+            )
         }
         .map_err(map_routing_error)?;
         let continuation = match request.metadata.previous_response_id.as_ref() {
@@ -414,14 +516,15 @@ impl DefaultExecutionService {
                         ));
                     }
                     Some(pin)
-                        if !plan
-                            .candidates()
-                            .iter()
-                            .any(|candidate| candidate.provider() == pin.provider()) =>
+                        if !plan.candidates().iter().any(|candidate| {
+                            candidate.provider() == pin.provider()
+                                && pin.matches_source(candidate.source())
+                                && candidate.account_scope().allows(pin.account())
+                        }) =>
                     {
                         return Err(GatewayError::new(
                             GatewayErrorKind::NoAvailableProvider,
-                            "continuation provider is not available",
+                            "continuation source is not available",
                         ));
                     }
                     Some(pin) => {
@@ -465,6 +568,7 @@ impl DefaultExecutionService {
         continuation: Option<ContinuationBinding>,
     ) -> Result<StartedExecution, GatewayError> {
         let PendingStartExecution {
+            mut traffic,
             client,
             target,
             operation,
@@ -472,10 +576,14 @@ impl DefaultExecutionService {
         } = request;
         let admission_request = ClientAdmissionRequest {
             model_request_id: request_id.clone(),
-            client_api_key_id: client.policy.key_id().clone(),
             lease_ttl: MODEL_REQUEST_DEADLINE,
-            limits: client.policy.limits(),
+            scopes: client.policy.admission_scopes(),
         };
+        let admission_scope_ids = admission_request
+            .scopes
+            .iter()
+            .map(|scope| scope.id.clone())
+            .collect();
         let admission_started_at = Instant::now();
         match self
             .admissions
@@ -494,14 +602,23 @@ impl DefaultExecutionService {
             ) => {
                 return Err(GatewayError::new(
                     GatewayErrorKind::RateLimited,
-                    "request exceeds client API key limits",
+                    "request exceeds downstream limits",
+                ));
+            }
+            ClientAdmissionDecision::Rejected(
+                ClientAdmissionRejection::GlobalRateLimited
+                | ClientAdmissionRejection::GlobalConcurrencyLimited,
+            ) => {
+                return Err(GatewayError::new(
+                    GatewayErrorKind::NoAvailableProvider,
+                    "gateway request capacity is currently exhausted",
                 ));
             }
         }
         let admission_decision_ms = duration_ms(admission_started_at.elapsed());
         let admission = AdmissionLease {
             port: Arc::clone(&self.admissions),
-            client_api_key_id: client.policy.key_id().clone(),
+            scope_ids: admission_scope_ids,
             model_request_id: request_id.clone(),
         };
         let observation = plan
@@ -518,6 +635,8 @@ impl DefaultExecutionService {
             id: request_id.clone(),
             client_api_key_id: Some(client.policy.key_id().clone()),
             client_api_key_ref: client.policy.key_id().clone(),
+            customer_ref: client.policy.customer().map(|customer| customer.id.clone()),
+            access_group_ref: client.policy.access_group().map(|group| group.id.clone()),
             config_revision: plan.config_revision(),
             routing: client.policy.account_scope().routing_snapshot(),
             protocol: metadata.protocol,
@@ -556,12 +675,14 @@ impl DefaultExecutionService {
                 return Err(gateway_error_from_engine(&error));
             }
         };
+        traffic.mark_executing();
         Ok(StartedExecution {
             request_id,
             created_at: started_at,
             stream: metadata.stream,
             session: Box::new(DefaultExecutionSession::new(
                 core,
+                traffic,
                 admission,
                 Arc::clone(&self.circuits),
                 Arc::clone(&self.continuation),
@@ -569,46 +690,73 @@ impl DefaultExecutionService {
         })
     }
 
-    async fn route_context(
-        &self,
-        provider_kinds: &BTreeSet<ProviderKind>,
-    ) -> Result<RoutingContext, GatewayError> {
-        let decisions = futures::future::join_all(provider_kinds.iter().map(|provider_kind| {
-            let circuits = Arc::clone(&self.circuits);
-            async move {
-                let decision = circuits.decision(provider_kind).fuse();
-                let timeout = Delay::new(COORDINATION_TIMEOUT).fuse();
-                pin_mut!(decision, timeout);
-                let decision = select_biased! {
-                    result = decision => Some(result),
-                    _ = timeout => None,
-                };
-                (provider_kind, decision)
-            }
+    async fn route_context(&self, policy: &ClientPolicy) -> RoutingContext {
+        let scopes: Vec<_> = if let Some(group) = policy.access_group() {
+            group
+                .pool_group_ids
+                .iter()
+                .cloned()
+                .map(SourceId::AccountPool)
+                .chain(group.channel_ids.iter().cloned().map(SourceId::Channel))
+                .map(ProviderCircuitScope::Source)
+                .collect()
+        } else {
+            policy
+                .account_scope()
+                .pool_group_ids()
+                .into_iter()
+                .map(SourceId::AccountPool)
+                .map(ProviderCircuitScope::Source)
+                .chain(
+                    policy
+                        .account_scope()
+                        .only_unpooled()
+                        .provider_kinds()
+                        .iter()
+                        .cloned()
+                        .map(ProviderCircuitScope::Provider),
+                )
+                .collect()
+        };
+        let mut remaining = scopes.len();
+        let mut decisions = futures::stream::iter(scopes.into_iter().map(|scope| async move {
+            let decision = self.circuits.decision(&scope).await;
+            (scope, decision)
         }))
-        .await;
-        let mut blocked_providers = BTreeSet::new();
-        for (provider_kind, decision) in decisions {
-            match decision {
-                Some(Ok(ProviderCircuitDecision::BlockedUntil(_))) => {
-                    blocked_providers.insert(provider_kind.clone());
+        .buffer_unordered(16);
+        // 所有健康读取共享一个等待预算，来源增多不会累积逐项超时。
+        let timeout = Delay::new(COORDINATION_TIMEOUT).fuse();
+        pin_mut!(timeout);
+        let mut context = RoutingContext::default();
+        while remaining > 0 {
+            let next = decisions.next().fuse();
+            pin_mut!(next);
+            let result = select_biased! {
+                result = next => result,
+                _ = timeout => {
+                    tracing::warn!(remaining, "来源 circuit 读取超时，未完成的可重建状态 fail-open");
+                    break;
                 }
-                Some(Err(error)) => tracing::warn!(
-                    provider = provider_kind.as_str(),
-                    %error,
-                    "Provider circuit 读取失败，按可重建协调状态 fail-open"
-                ),
-                None => tracing::warn!(
-                    provider = provider_kind.as_str(),
-                    "Provider circuit 读取超时，按可重建协调状态 fail-open"
-                ),
-                Some(Ok(ProviderCircuitDecision::Allow)) => {}
+            };
+            let Some((scope, decision)) = result else {
+                break;
+            };
+            remaining -= 1;
+            match decision {
+                Ok(ProviderCircuitDecision::BlockedUntil(_)) => match scope {
+                    ProviderCircuitScope::Provider(provider) => {
+                        context.blocked_providers.insert(provider);
+                    }
+                    ProviderCircuitScope::Source(source) => {
+                        context.blocked_sources.insert(source);
+                    }
+                },
+                Err(error) => tracing::warn!(%scope, %error,
+                    "来源 circuit 读取失败，按可重建协调状态 fail-open"),
+                Ok(ProviderCircuitDecision::Allow) => {}
             }
         }
-        Ok(RoutingContext {
-            required_provider: None,
-            blocked_providers,
-        })
+        context
     }
 
     async fn probe_inner(
@@ -641,11 +789,12 @@ impl DefaultExecutionService {
             ..RoutingContext::default()
         };
         let plan = snapshot
-            .plan(
-                &public_model,
+            .plan_account_sources(
+                crate::routing::SourceRoutingTarget::Model(&public_model),
                 &operation,
-                snapshot.all_account_scope(),
+                Arc::new(snapshot.all_account_scope().only_account(&account_id)),
                 &routing_context,
+                0,
             )
             .map_err(map_routing_error)?;
         let started_at = SystemTime::now();
@@ -661,6 +810,8 @@ impl DefaultExecutionService {
             id: request_id,
             client_api_key_id: None,
             client_api_key_ref: actor,
+            customer_ref: None,
+            access_group_ref: None,
             config_revision: plan.config_revision(),
             routing: crate::routing::AccountRoutingSnapshot::all(),
             protocol: "admin_connection_test".to_owned(),
@@ -748,7 +899,12 @@ impl DefaultExecutionService {
                     || provider_error.upstream_code().is_some()
                     || provider_error.client_visible_upstream_error().is_some()
                     || upstream_response.is_some();
-                let source = if has_upstream_facts {
+                let source = if provider_error.kind()
+                    == ProviderErrorKind::SourceCapacityUnavailable
+                    && !has_upstream_facts
+                {
+                    AccountProbeErrorSource::Gateway
+                } else if has_upstream_facts {
                     AccountProbeErrorSource::Upstream
                 } else {
                     AccountProbeErrorSource::Provider
@@ -875,21 +1031,70 @@ impl ExecutionService for DefaultExecutionService {
     }
 
     fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId> {
-        client
+        let mut models: BTreeSet<_> = client
             .snapshot
             .public_models_for_scope(client.policy.account_scope())
+            .into_iter()
+            .collect();
+        if let Some(group) = client.policy.access_group() {
+            let allowed = crate::routing::source::AllowedSources::new(
+                group
+                    .channel_ids
+                    .iter()
+                    .cloned()
+                    .map(crate::routing::source::SourceId::Channel),
+            );
+            models.extend(client.snapshot.public_models_for_channels(&allowed));
+        }
+        models
+            .into_iter()
+            .filter(|model| client.policy.allows_model(model.as_str()))
+            .collect()
     }
 
     fn public_model_profiles(&self, client: &AuthenticatedClient) -> Vec<PublicModelProfile> {
-        client
+        let mut profiles: std::collections::BTreeMap<_, _> = client
             .snapshot
             .public_model_profiles_for_scope(client.policy.account_scope())
+            .into_iter()
+            .map(|profile| (profile.model().clone(), profile))
+            .collect();
+        if let Some(group) = client.policy.access_group() {
+            let allowed = crate::routing::source::AllowedSources::new(
+                group
+                    .channel_ids
+                    .iter()
+                    .cloned()
+                    .map(crate::routing::source::SourceId::Channel),
+            );
+            for profile in client.snapshot.public_model_profiles_for_channels(&allowed) {
+                profiles.entry(profile.model().clone()).or_insert(profile);
+            }
+        }
+        profiles
+            .into_values()
+            .filter(|profile| client.policy.allows_model(profile.model().as_str()))
+            .collect()
     }
 
     fn contains_public_model(&self, client: &AuthenticatedClient, model: &PublicModelId) -> bool {
-        client
-            .snapshot
-            .contains_public_model_for_scope(model, client.policy.account_scope())
+        client.policy.allows_model(model.as_str())
+            && (client
+                .snapshot
+                .contains_public_model_for_scope(model, client.policy.account_scope())
+                || client.policy.access_group().is_some_and(|group| {
+                    let allowed = crate::routing::source::AllowedSources::new(
+                        group
+                            .channel_ids
+                            .iter()
+                            .cloned()
+                            .map(crate::routing::source::SourceId::Channel),
+                    );
+                    client
+                        .snapshot
+                        .public_models_for_channels(&allowed)
+                        .contains(model)
+                }))
     }
 
     fn start(
@@ -918,7 +1123,7 @@ impl AccountProbe for DefaultExecutionService {
 
 struct AdmissionLease {
     port: Arc<dyn ClientAdmissionPort>,
-    client_api_key_id: ClientApiKeyId,
+    scope_ids: Vec<AdmissionScopeId>,
     model_request_id: ModelRequestId,
 }
 
@@ -926,7 +1131,7 @@ impl AdmissionLease {
     async fn release(self) {
         if let Err(error) = self
             .port
-            .release(&self.client_api_key_id, &self.model_request_id)
+            .release(&self.scope_ids, &self.model_request_id)
             .await
         {
             tracing::warn!(%error, "Client admission 释放失败，依赖租约 TTL 收敛");
@@ -935,6 +1140,7 @@ impl AdmissionLease {
 }
 
 struct DefaultExecutionSession {
+    traffic: Option<TrafficLease>,
     core: Option<ResponseExecutionSession<dyn ExecutionStore>>,
     admission: Option<AdmissionLease>,
     circuits: Arc<dyn ProviderCircuitPort>,
@@ -946,12 +1152,14 @@ struct DefaultExecutionSession {
 impl DefaultExecutionSession {
     fn new(
         core: ResponseExecutionSession<dyn ExecutionStore>,
+        traffic: TrafficLease,
         admission: AdmissionLease,
         circuits: Arc<dyn ProviderCircuitPort>,
         continuation: Arc<dyn NativeContinuationPort>,
     ) -> Self {
         Self {
             core: Some(core),
+            traffic: Some(traffic),
             admission: Some(admission),
             circuits,
             continuation,
@@ -971,9 +1179,11 @@ impl DefaultExecutionSession {
             .core
             .as_ref()
             .is_some_and(ResponseExecutionSession::is_finalized)
-            && let Some(admission) = self.admission.take()
         {
-            admission.release().await;
+            drop(self.traffic.take());
+            if let Some(admission) = self.admission.take() {
+                admission.release().await;
+            }
         }
     }
 
@@ -1023,6 +1233,7 @@ impl DefaultExecutionSession {
             .get(self.observed_provider_outcomes..)
             .unwrap_or_default();
         publish_provider_attempt_outcomes(self.circuits.as_ref(), pending).await;
+        drop(self.traffic.take());
         if let Some(admission) = self.admission.take() {
             admission.release().await;
         }
@@ -1142,16 +1353,20 @@ async fn publish_provider_attempt_outcomes(
     outcomes: &[ProviderAttemptOutcome],
 ) {
     for outcome in outcomes {
+        let scope = match outcome.source() {
+            Some(source) => ProviderCircuitScope::Source(source.clone()),
+            None => ProviderCircuitScope::Provider(outcome.provider_kind().clone()),
+        };
         let result = match outcome.error_kind() {
-            None => circuits.observe_success(outcome.provider_kind()).await,
+            None => circuits.observe_success(&scope).await,
             Some(kind) if provider_failure_affects_circuit(kind) => {
-                circuits.observe_failure(outcome.provider_kind()).await
+                circuits.observe_failure(&scope).await
             }
             Some(_) => continue,
         };
         if let Err(error) = result {
             tracing::warn!(
-                provider = outcome.provider_kind().as_str(),
+                %scope,
                 %error,
                 "Provider circuit feedback 写入失败，数据面不受影响"
             );

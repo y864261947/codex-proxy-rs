@@ -124,6 +124,28 @@ fn provider_stream_should_release_owned_lease_on_drop() {
 }
 
 #[test]
+fn channel_stream_releases_its_lease_without_fabricating_an_account_identity() {
+    let released = Arc::new(AtomicBool::new(false));
+    let channel = gateway_core::identity::ChannelId::new("chan_lease").expect("channel");
+    let metadata = ProviderCallMetadata::for_channel(
+        ProviderKind::new("api_openai").expect("provider"),
+        Some(UpstreamModelId::new("test-model").expect("model")),
+        gateway_core::channel::ChannelBinding::new(
+            channel.clone(),
+            gateway_core::channel::ChannelRevision::new(1).expect("revision"),
+        ),
+        UpstreamTransport::new("http_sse").expect("transport"),
+    );
+    assert_eq!(metadata.channel_id(), Some(&channel));
+    assert!(metadata.provider_account_id().is_none());
+    let events: EventStream = Box::pin(stream::empty());
+    let stream = ProviderStream::new(metadata, events, DropLease(Arc::clone(&released)))
+        .with_account_feedback(Arc::new(AccountFeedbackStats::default()));
+    drop(stream);
+    assert!(released.load(Ordering::SeqCst));
+}
+
+#[test]
 fn provider_stream_should_report_common_account_success_and_first_output() {
     let feedback = Arc::new(AccountFeedbackStats::default());
     let provider = ProviderKind::new("openai").expect("valid provider");

@@ -23,6 +23,107 @@ const MIXED_GROUP: &str = "grp_00000000000000000000000000000001";
 const EMPTY_GROUP: &str = "grp_00000000000000000000000000000002";
 
 #[tokio::test]
+async fn pool_source_controls_are_atomic_and_description_edits_preserve_them() {
+    use gateway_admin::model::account_groups::UpdateAccountGroup;
+    use gateway_core::{
+        identity::QuotaScopeId,
+        routing::source::{SourceControls, SourcePreference},
+    };
+    use gateway_store::postgres::{PgRuntimeSnapshotRepository, RuntimeSnapshotRepository as _};
+    let Some(database) = TestDatabase::create("pool_source_controls").await else {
+        return;
+    };
+    sqlx::query(
+        "insert into upstream_quota_scopes (id, name) values ('quota_shared', 'Shared project')",
+    )
+    .execute(&database.pool)
+    .await
+    .expect("shared quota fixture");
+    let repo = PgAccountGroupRepository::new(database.pool.clone());
+    let controls = SourceControls::new(
+        SourcePreference::new(2, 3).expect("preference"),
+        RateLimits {
+            max_concurrency: 7,
+            requests_per_minute: 80,
+        },
+        Some(QuotaScopeId::new("quota_shared").expect("quota")),
+    )
+    .expect("controls");
+    let created = repo
+        .create_account_group(
+            NewAccountGroup {
+                id: group_id(MIXED_GROUP),
+                name: "Pool controls".to_owned(),
+                description: None,
+                color: group_color("#2563EBFF"),
+                source_controls: Some(controls.clone()),
+            },
+            &context("create-source-controls"),
+        )
+        .await
+        .expect("create");
+    assert_eq!(created.record.expect("record").source_controls, controls);
+    let snapshots = PgRuntimeSnapshotRepository::new(database.pool.clone());
+    let frozen = snapshots.load_runtime_snapshot().await.expect("snapshot");
+    assert_eq!(frozen.account_groups[0].source_controls, controls);
+    let update = |source_controls| UpdateAccountGroup {
+        id: group_id(MIXED_GROUP),
+        name: "Renamed pool".to_owned(),
+        description: None,
+        color: group_color("#2563EBFF"),
+        source_controls,
+    };
+    let renamed = repo
+        .update_account_group(update(None), &context("rename-source-controls"))
+        .await
+        .expect("rename");
+    assert_eq!(renamed.record.expect("record").source_controls, controls);
+    let before_revision = current_revision(&database.pool).await;
+    let before_audit = audit_count(&database.pool).await;
+    sqlx::query("alter table admin_audit_events add constraint reject_pool_controls_audit check (entity_kind <> 'account_group') not valid").execute(&database.pool).await.expect("reject audit");
+    assert!(
+        repo.update_account_group(
+            update(Some(SourceControls::default())),
+            &context("failed-source-controls")
+        )
+        .await
+        .is_err()
+    );
+    assert_eq!(current_revision(&database.pool).await, before_revision);
+    assert_eq!(audit_count(&database.pool).await, before_audit);
+    assert_eq!(
+        snapshots
+            .load_runtime_snapshot()
+            .await
+            .expect("unchanged snapshot")
+            .account_groups[0]
+            .source_controls,
+        controls
+    );
+    sqlx::query("alter table admin_audit_events drop constraint reject_pool_controls_audit")
+        .execute(&database.pool)
+        .await
+        .expect("restore audit");
+    repo.update_account_group(
+        update(Some(SourceControls::default())),
+        &context("clear-source-controls"),
+    )
+    .await
+    .expect("clear");
+    assert_eq!(
+        snapshots
+            .load_runtime_snapshot()
+            .await
+            .expect("new snapshot")
+            .account_groups[0]
+            .source_controls,
+        SourceControls::default()
+    );
+    assert_eq!(frozen.account_groups[0].source_controls, controls);
+    database.close().await;
+}
+
+#[tokio::test]
 async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multiplication() {
     let Some(database) = TestDatabase::create("account_group_aggregate").await else {
         return;
@@ -49,6 +150,7 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                source_controls: None,
                 id: mixed_group.clone(),
                 name: "Mixed Production".to_owned(),
                 description: Some("cross-provider".to_owned()),
@@ -61,6 +163,7 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                source_controls: None,
                 id: empty_group.clone(),
                 name: "Empty Pool".to_owned(),
                 description: None,
@@ -251,6 +354,7 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
     groups
         .create_account_group(
             NewAccountGroup {
+                source_controls: None,
                 id: group_id(EMPTY_GROUP),
                 name: "Statusless Costs".to_owned(),
                 description: None,
@@ -311,6 +415,8 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
 fn new_key(id: &str, group_ids: Vec<AccountGroupId>) -> NewClientKey {
     let marker = char::from(id.as_bytes().last().copied().unwrap_or(b'k'));
     NewClientKey {
+        customer_id: None,
+        access_group_id: None,
         id: client_key_id(id),
         name: id.to_owned(),
         label: None,

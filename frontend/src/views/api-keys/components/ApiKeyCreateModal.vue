@@ -2,7 +2,7 @@
 import type { ApiKeyFormValue } from '../composables/useApiKeyMutations'
 import type { AccountGroup } from '@/api'
 import { Copy, Upload } from '@lucide/vue'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
 import AccountGroupCheckboxGrid from '@/components/AccountGroupCheckboxGrid.vue'
 import BaseButton from '@/components/base/BaseButton.vue'
@@ -11,6 +11,7 @@ import BaseForm from '@/components/base/BaseForm/index.vue'
 import BaseIconButton from '@/components/base/BaseIconButton.vue'
 import BaseInput from '@/components/base/BaseInput.vue'
 import BaseModal from '@/components/base/BaseModal/index.vue'
+import DownstreamOwnerSelect from '@/components/DownstreamOwnerSelect.vue'
 
 const props = defineProps<{
   groups: AccountGroup[]
@@ -28,13 +29,15 @@ const open = defineModel<boolean>({ default: false })
 const createdOpen = defineModel<boolean>('createdOpen', { default: false })
 const form = defineModel<ApiKeyFormValue>('form', { required: true })
 const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key')
+const customerReady = ref(false)
+const accessReady = ref(false)
 </script>
 
 <template>
   <BaseModal
     v-model="open"
     :title="title"
-    description="设置调用方可用的账号分组、并发和每分钟请求上限"
+    description="设置调用方的权限、客户归属和单 Key 限额"
     tone="info"
     size="lg"
     :dismissible="!saving"
@@ -58,7 +61,18 @@ const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key'
         />
       </BaseFormItem>
 
-      <BaseFormItem label="分组">
+      <template v-if="!editing">
+        <BaseFormItem label="接入分组" description="选择后继承该组的模型白名单、来源权限与共享限额">
+          <DownstreamOwnerSelect v-model="form.accessGroupId" kind="accessGroup" :active="open" :disabled="saving" @ready="accessReady = $event" />
+        </BaseFormItem>
+        <BaseFormItem label="客户（可选）" description="同一客户的多个 Key 共享客户限额">
+          <DownstreamOwnerSelect v-model="form.customerId" kind="customer" :active="open" :disabled="saving" @ready="customerReady = $event" />
+        </BaseFormItem>
+      </template>
+      <p v-else-if="form.accessGroupId" class="m-0 text-cp-sm text-cp-text-secondary">
+        模型与来源权限由接入分组管理；可从 Key 列表修改接入分组或客户归属。
+      </p>
+      <BaseFormItem v-if="!form.accessGroupId" label="账号分组权限" description="兼容已有 Key 的授权方式；未勾选时使用全部账号">
         <AccountGroupCheckboxGrid
           v-model="form.groupIds"
           :groups="groups"
@@ -94,7 +108,7 @@ const title = computed(() => props.editing ? '编辑 API Key' : '创建 API Key'
       <BaseButton
         variant="primary"
         :loading="saving"
-        :disabled="!form.name.trim()"
+        :disabled="!form.name.trim() || (!editing && (!customerReady || !accessReady))"
         @click="emit('save')"
       >
         {{ editing ? '保存更改' : '创建' }}

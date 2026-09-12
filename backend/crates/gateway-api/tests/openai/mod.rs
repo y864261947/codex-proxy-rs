@@ -24,7 +24,7 @@ use gateway_core::engine::continuation::{
 };
 use gateway_core::engine::execution::{
     AuthenticatedClient, ClientApiKeyUsageSink, DefaultExecutionService, ExecutionService,
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
+    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort, ProviderCircuitScope,
 };
 use gateway_core::engine::provider::ProviderRegistry;
 use gateway_core::engine::{
@@ -53,7 +53,26 @@ pub(super) async fn api_router_with_worker_health(
     execution: Arc<dyn ExecutionService>,
     worker_health: Arc<dyn WorkerHealthSource>,
 ) -> axum::Router {
-    api_router_with_origins_and_worker_health(execution, Vec::new(), worker_health).await
+    api_router_with_origins_and_worker_health(
+        execution,
+        Vec::new(),
+        worker_health,
+        Default::default(),
+    )
+    .await
+}
+
+pub(super) async fn api_router_with_traffic(
+    execution: Arc<dyn ExecutionService>,
+    traffic: gateway_core::engine::traffic::TrafficMonitor,
+) -> axum::Router {
+    api_router_with_origins_and_worker_health(
+        execution,
+        Vec::new(),
+        Arc::new(EmptyWorkerHealth),
+        traffic,
+    )
+    .await
 }
 
 pub(super) async fn api_router_with_origins(
@@ -64,6 +83,7 @@ pub(super) async fn api_router_with_origins(
         execution,
         cors_allowed_origins,
         Arc::new(EmptyWorkerHealth),
+        Default::default(),
     )
     .await
 }
@@ -72,6 +92,7 @@ async fn api_router_with_origins_and_worker_health(
     execution: Arc<dyn ExecutionService>,
     cors_allowed_origins: Vec<String>,
     worker_health: Arc<dyn WorkerHealthSource>,
+    traffic: gateway_core::engine::traffic::TrafficMonitor,
 ) -> axum::Router {
     let admin = crate::admin::AdminTestFixture::new().await;
     gateway_api::initialize(
@@ -82,6 +103,7 @@ async fn api_router_with_origins_and_worker_health(
             request_id_header: "x-request-id".to_owned(),
         },
         execution,
+        traffic,
         admin.services,
         Vec::new(),
         worker_health,
@@ -103,7 +125,10 @@ pub(super) fn authenticated_client_for_provider(
         RuntimeSnapshotHandle::new(snapshot(plaintext, provider_name)),
         Arc::new(UnusedExecutionStore),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(IgnoredClientApiKeyUsage),
@@ -127,7 +152,10 @@ pub(super) fn authenticated_client_with_min_versions(
         RuntimeSnapshotHandle::new(snapshot),
         Arc::new(UnusedExecutionStore),
         ProviderRegistry::default(),
-        Arc::new(UnusedAdmissions),
+        (
+            Arc::new(UnusedAdmissions),
+            Arc::new(AllowedSourceAdmissions),
+        ),
         Arc::new(UnusedCircuits),
         Arc::new(UnusedContinuation),
         Arc::new(IgnoredClientApiKeyUsage),
@@ -275,7 +303,7 @@ impl ClientAdmissionPort for UnusedAdmissions {
 
     fn release<'a>(
         &'a self,
-        _: &'a ClientApiKeyId,
+        _: &'a [gateway_core::policy::AdmissionScopeId],
         _: &'a ModelRequestId,
     ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
@@ -294,21 +322,21 @@ struct UnusedCircuits;
 impl ProviderCircuitPort for UnusedCircuits {
     fn decision<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
     }
 
     fn observe_failure<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
     }
 
     fn observe_success<'a>(
         &'a self,
-        _: &'a ProviderKind,
+        _: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
     }
@@ -330,5 +358,24 @@ impl NativeContinuationPort for UnusedContinuation {
         _: NativeContinuationPin,
     ) -> BoxFuture<'a, Result<(), NativeContinuationStoreError>> {
         Box::pin(async { unreachable!("authentication fixture does not execute") })
+    }
+}
+
+#[derive(Default)]
+struct AllowedSourceAdmissions;
+impl gateway_core::engine::source_admission::SourceAdmissionPort for AllowedSourceAdmissions {
+    fn acquire(
+        &self,
+        _: gateway_core::engine::source_admission::SourceAdmissionRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<
+            Box<dyn gateway_core::engine::provider::ResourceLease>,
+            gateway_core::engine::source_admission::SourceAdmissionError,
+        >,
+    > {
+        Box::pin(async {
+            Ok(Box::new(()) as Box<dyn gateway_core::engine::provider::ResourceLease>)
+        })
     }
 }

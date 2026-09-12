@@ -24,6 +24,7 @@ export interface AccountGroupUsage {
 }
 
 export interface AccountGroup extends AccountGroupRef {
+  sourceControls: AccountGroupSourceControls
   description: string | null
   memberCount: number
   providerCounts: Record<string, number>
@@ -62,12 +63,14 @@ interface AccountGroupListParams {
 }
 
 interface AccountGroupCreateParam {
+  sourceControls?: AccountGroupSourceControls
   name: string
   description: string | null
   color: string
 }
 
 interface AccountGroupUpdateParam {
+  sourceControls?: AccountGroupSourceControls
   id: string
   name: string
   description: string | null
@@ -76,6 +79,14 @@ interface AccountGroupUpdateParam {
 
 interface AccountGroupIdParam {
   id: string
+}
+
+export interface AccountGroupSourceControls {
+  priority: number
+  weight: number
+  maxConcurrency: number
+  requestsPerMinute: number
+  quotaScopeId: string | null
 }
 
 export function getAccountGroups(data: AccountGroupListParams) {

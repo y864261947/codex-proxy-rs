@@ -215,6 +215,11 @@ pub const fn gateway_error_contract(
             "server_error",
             "no_available_provider",
         ),
+        GatewayErrorKind::SourceCapacityUnavailable => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "server_error",
+            "source_capacity_unavailable",
+        ),
         GatewayErrorKind::AccountCapacityUnavailable => (
             StatusCode::SERVICE_UNAVAILABLE,
             "server_error",

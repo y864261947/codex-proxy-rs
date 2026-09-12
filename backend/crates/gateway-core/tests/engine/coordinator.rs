@@ -618,6 +618,8 @@ fn model_request(operation: &Operation, deadline: SystemTime) -> NewModelRequest
         id: ModelRequestId::new("req_core_1").expect("request id"),
         client_api_key_id: Some(client_key.clone()),
         client_api_key_ref: client_key,
+        customer_ref: None,
+        access_group_ref: None,
         config_revision: ConfigRevision::new(1).expect("config revision"),
         routing: AccountRoutingSnapshot::all(),
         protocol: "openai".to_owned(),
@@ -636,6 +638,278 @@ fn model_request(operation: &Operation, deadline: SystemTime) -> NewModelRequest
         image_generation_requested: operation.image_generation_requested(),
         started_at: SystemTime::now(),
         deadline_at: deadline,
+    }
+}
+
+fn pool_source(index: u8) -> gateway_core::routing::source::SourceId {
+    gateway_core::routing::source::SourceId::AccountPool(
+        gateway_core::routing::AccountGroupId::new(format!("grp_{index:032x}")).expect("pool"),
+    )
+}
+
+fn pool_plan(operation: &Operation) -> RoutingPlan {
+    pool_plan_with_limits(operation, gateway_core::policy::RateLimits::unlimited())
+}
+
+fn pool_plan_with_limits(
+    operation: &Operation,
+    limits: gateway_core::policy::RateLimits,
+) -> RoutingPlan {
+    pool_plan_with_routing(operation, limits, None)
+}
+
+fn pool_plan_with_routing(
+    operation: &Operation,
+    limits: gateway_core::policy::RateLimits,
+    routing: Option<gateway_core::policy::AccessGroupRouting>,
+) -> RoutingPlan {
+    use gateway_core::routing::{
+        SourceRoutingTarget,
+        source::{AllowedSources, SourceId, SourcePolicy, SourcePreference},
+    };
+    let provider = ProviderKind::new("openai").expect("provider");
+    let sources = [pool_source(1), pool_source(2)];
+    let pools = sources
+        .iter()
+        .map(|source| match source {
+            SourceId::AccountPool(pool) => pool.clone(),
+            SourceId::Channel(_) => unreachable!("pool fixture"),
+        })
+        .collect::<Vec<_>>();
+    let directory = Arc::new(RuntimeAccountDirectory::new(
+        [
+            ("acct_one", BTreeSet::from([pools[0].clone()])),
+            ("acct_two", BTreeSet::from([pools[1].clone()])),
+            ("acct_shared", pools.into_iter().collect()),
+        ]
+        .into_iter()
+        .map(|(id, groups)| {
+            (
+                ProviderAccountId::new(id).expect("account"),
+                RuntimeAccount::new(provider.clone(), groups),
+            )
+        })
+        .collect(),
+    ));
+    let snapshot = RuntimeSnapshot::new(
+        ConfigRevision::new(1).expect("revision"),
+        AccountSelectionPolicy::new(
+            RotationStrategy::Smart,
+            NonZeroU32::new(2).expect("concurrency"),
+            Duration::from_millis(50),
+        ),
+        vec![provider.clone()],
+        vec![ProviderModel::new(
+            provider,
+            UpstreamModelId::new("gpt-5").expect("model"),
+            ModelCapabilities::new(BTreeSet::from([operation.kind()]), Some(32_000))
+                .with_upstream_feature_validation(),
+        )],
+        Vec::new(),
+    )
+    .expect("snapshot")
+    .with_account_directory(directory)
+    .with_source_policies(
+        sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                SourcePolicy::new(
+                    source.clone(),
+                    true,
+                    SourcePreference::new(u16::try_from(index + 1).expect("priority"), 1)
+                        .expect("preference"),
+                    limits,
+                    None,
+                )
+                .expect("source")
+                .with_name(format!("Pool {}", index + 1))
+                .expect("name")
+            })
+            .collect(),
+    )
+    .expect("policies");
+    let allowed = match routing {
+        Some(routing) => {
+            AllowedSources::for_access_group(&gateway_core::policy::AccessGroupPolicy {
+                routing,
+                id: gateway_core::policy::AccessGroupId::new("access_test").expect("group"),
+                enabled: true,
+                limits: gateway_core::policy::RateLimits::unlimited(),
+                allowed_models: BTreeSet::from(["gpt-5".to_owned()]),
+                pool_group_ids: sources
+                    .iter()
+                    .map(|source| match source {
+                        SourceId::AccountPool(id) => id.clone(),
+                        SourceId::Channel(_) => unreachable!(),
+                    })
+                    .collect(),
+                channel_ids: BTreeSet::new(),
+            })
+        }
+        None => AllowedSources::new(sources),
+    };
+    snapshot
+        .plan_sources(
+            SourceRoutingTarget::Model(&PublicModelId::new("gpt-5").expect("model")),
+            operation,
+            snapshot.all_account_scope(),
+            &RoutingContext::default(),
+            &allowed,
+            0,
+        )
+        .expect("pool routing")
+}
+
+#[test]
+fn pool_execution_freezes_selected_scope_and_continuation_source() {
+    for pinned in [false, true] {
+        let operation = generate_operation();
+        let route_plan = pool_plan(&operation);
+        let selected = pool_source(if pinned { 2 } else { 1 });
+        let continuation = pinned.then(|| {
+            ContinuationBinding::Pinned(
+                NativeContinuationPin::new(
+                    PreviousResponseId::new("previous"),
+                    PreviousResponseId::new("upstream"),
+                    ClientApiKeyId::new("key_client_1").expect("key"),
+                    ProviderKind::new("openai").expect("provider"),
+                    ProviderAccountId::new("acct_shared").expect("account"),
+                )
+                .with_source(selected.clone()),
+            )
+        });
+        let (coordinator, store, provider) = coordinator(vec![Script::Stream {
+            account_id: "acct_shared",
+            items: complete_stream(None),
+        }]);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            continuation,
+            CancellationToken::new(),
+        ))
+        .expect("start");
+        block_on(session.collect_uncommitted()).expect("result");
+        let pin = session
+            .native_continuation_pin(
+                &ProviderSessionState::new("openai", Map::new()).expect("state"),
+            )
+            .expect("pin");
+        assert_eq!(pin.source(), Some(&selected));
+        block_on(session.commit_downstream(Some(200))).expect("commit");
+        let contexts = provider.contexts.lock().expect("contexts");
+        assert_eq!(contexts.len(), 1);
+        let scope = contexts[0].account_scope().expect("selected account scope");
+        assert_eq!(
+            scope.allows(&ProviderAccountId::new("acct_one").expect("one")),
+            !pinned
+        );
+        assert_eq!(
+            scope.allows(&ProviderAccountId::new("acct_two").expect("two")),
+            pinned
+        );
+        assert!(scope.allows(&ProviderAccountId::new("acct_shared").expect("shared")));
+        assert_eq!(
+            store.state.lock().expect("state").attempts[0]
+                .source
+                .as_ref()
+                .map(|source| source.id()),
+            Some(&selected)
+        );
+    }
+}
+
+#[test]
+fn native_replay_cannot_advance_to_another_pool_when_original_pool_is_exhausted() {
+    let Operation::Generate(generate) = generate_operation() else {
+        panic!("generate")
+    };
+    let operation = Operation::Generate(generate.with_provider_session_state(
+        ProviderSessionState::new("openai", Map::new()).expect("state"),
+    ));
+    let route_plan = pool_plan(&operation);
+    let continuation = NativeContinuationPin::new(
+        PreviousResponseId::new("previous"),
+        PreviousResponseId::new("upstream"),
+        ClientApiKeyId::new("key_client_1").expect("key"),
+        ProviderKind::new("openai").expect("provider"),
+        ProviderAccountId::new("acct_shared").expect("account"),
+    )
+    .with_source(pool_source(1));
+    let (coordinator, _, provider) = coordinator(vec![
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        )),
+        Script::Error(ProviderError::new(
+            ProviderErrorKind::NoEligibleAccount,
+            UpstreamSendState::NotSent,
+        )),
+        Script::Stream {
+            account_id: "acct_two",
+            items: complete_stream(None),
+        },
+    ]);
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        route_plan,
+        None,
+        Some(ContinuationBinding::Pinned(continuation)),
+        CancellationToken::new(),
+    ))
+    .expect("start");
+    assert!(block_on(session.collect_uncommitted()).is_err());
+    let contexts = provider.contexts.lock().expect("contexts");
+    assert_eq!(
+        contexts.len(),
+        2,
+        "must not call another pool with the native transcript"
+    );
+    assert_eq!(
+        contexts[1].continuation_attempt(),
+        ContinuationAttempt::ReplayAny
+    );
+    assert!(contexts.iter().all(|context| {
+        !context
+            .account_scope()
+            .expect("scope")
+            .allows(&ProviderAccountId::new("acct_two").expect("outside original pool"))
+    }));
+}
+
+#[test]
+fn native_pin_rejects_unavailable_source_and_account_outside_its_source() {
+    for (source, account) in [
+        (pool_source(3), "acct_shared"),
+        (pool_source(2), "acct_one"),
+    ] {
+        let operation = generate_operation();
+        let route_plan = pool_plan(&operation);
+        let pin = NativeContinuationPin::new(
+            PreviousResponseId::new("previous"),
+            PreviousResponseId::new("upstream"),
+            ClientApiKeyId::new("key_client_1").expect("key"),
+            ProviderKind::new("openai").expect("provider"),
+            ProviderAccountId::new(account).expect("account"),
+        )
+        .with_source(source);
+        let (coordinator, _, provider) = coordinator(Vec::new());
+        let error = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            Some(ContinuationBinding::Pinned(pin)),
+            CancellationToken::new(),
+        ))
+        .err()
+        .expect("pin mismatch");
+        assert!(matches!(error, EngineError::ContinuationPinMismatch));
+        assert!(provider.contexts.lock().expect("contexts").is_empty());
     }
 }
 
@@ -663,7 +937,11 @@ fn coordinator_with_store(
     registry
         .register(provider.clone())
         .expect("register provider");
-    let engine = GatewayEngine::new(store.clone(), registry.build());
+    let engine = GatewayEngine::new(
+        store.clone(),
+        registry.build(),
+        Arc::new(super::execution::AllowedSourceAdmissions),
+    );
     (AttemptCoordinator::new(engine), store, provider)
 }
 
@@ -737,6 +1015,7 @@ fn success_updates_one_model_request_and_persists_usage() {
     assert_eq!(
         session.provider_attempt_outcomes(),
         &[ProviderAttemptOutcome::Succeeded {
+            source: None,
             provider_kind: ProviderKind::new("openai").expect("provider"),
         }]
     );
@@ -1973,6 +2252,7 @@ fn required_account_disables_account_retry_after_stream_creation() {
     assert_eq!(
         session.provider_attempt_outcomes(),
         &[ProviderAttemptOutcome::Failed {
+            source: None,
             provider_kind: ProviderKind::new("openai").expect("provider"),
             error_kind: ProviderErrorKind::Unavailable,
         }]
@@ -3297,6 +3577,7 @@ fn structural_event_before_replay_safe_failure_should_switch_account_before_comm
     assert_eq!(
         session.provider_attempt_outcomes(),
         &[ProviderAttemptOutcome::Failed {
+            source: None,
             provider_kind: ProviderKind::new("openai").expect("provider"),
             error_kind: ProviderErrorKind::Transport,
         }]
@@ -3469,4 +3750,346 @@ fn deadline_before_first_event_records_no_provider_circuit_failure() {
     assert_eq!(state.attempts.len(), 1);
     assert_eq!(state.finalizations[0].outcome, ExecutionOutcome::Failed);
     assert!(!state.finalizations[0].committed);
+}
+
+#[derive(Default)]
+struct RecordingSourceAdmissions {
+    active: Arc<std::sync::atomic::AtomicUsize>,
+    requests: Mutex<Vec<gateway_core::engine::source_admission::SourceAdmissionRequest>>,
+    rejected: BTreeSet<gateway_core::routing::source::SourceId>,
+    unavailable: bool,
+}
+
+struct RecordedSourceLease(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for RecordedSourceLease {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+impl gateway_core::engine::source_admission::SourceAdmissionPort for RecordingSourceAdmissions {
+    fn acquire(
+        &self,
+        request: gateway_core::engine::source_admission::SourceAdmissionRequest,
+    ) -> futures::future::BoxFuture<
+        '_,
+        Result<
+            Box<dyn gateway_core::engine::provider::ResourceLease>,
+            gateway_core::engine::source_admission::SourceAdmissionError,
+        >,
+    > {
+        Box::pin(async move {
+            let rejected = self.rejected.contains(&request.source);
+            self.requests.lock().expect("requests").push(request);
+            if self.unavailable {
+                return Err(
+                    gateway_core::engine::source_admission::SourceAdmissionError::Unavailable,
+                );
+            }
+            if rejected {
+                return Err(gateway_core::engine::source_admission::SourceAdmissionError::Capacity);
+            }
+            self.active
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(RecordedSourceLease(self.active.clone()))
+                as Box<dyn gateway_core::engine::provider::ResourceLease>)
+        })
+    }
+}
+
+fn coordinator_with_source_admissions(
+    scripts: Vec<Script>,
+    admissions: Arc<RecordingSourceAdmissions>,
+) -> (
+    AttemptCoordinator<FakeStore>,
+    Arc<FakeStore>,
+    Arc<ScriptedProvider>,
+) {
+    let store = Arc::new(FakeStore::default());
+    let provider = Arc::new(ScriptedProvider::new(scripts));
+    let registry =
+        ProviderRegistry::new([provider.clone() as Arc<dyn Provider>]).expect("registry");
+    let engine = GatewayEngine::new(store.clone(), registry, admissions);
+    (AttemptCoordinator::new(engine), store, provider)
+}
+
+#[test]
+fn full_source_skips_provider_and_next_source_releases_before_downstream_commit() {
+    let admissions = Arc::new(RecordingSourceAdmissions {
+        rejected: BTreeSet::from([pool_source(1)]),
+        ..Default::default()
+    });
+    let operation = generate_operation();
+    let limits = gateway_core::policy::RateLimits {
+        max_concurrency: 7,
+        requests_per_minute: 60,
+    };
+    let plan = pool_plan_with_limits(&operation, limits);
+    let deadline = SystemTime::now() + Duration::from_secs(30);
+    let (coordinator, store, provider) = coordinator_with_source_admissions(
+        vec![Script::Stream {
+            account_id: "acct_two",
+            items: complete_stream(None),
+        }],
+        admissions.clone(),
+    );
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, deadline),
+        operation,
+        plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("session");
+    block_on(session.collect_uncommitted()).expect("fallback succeeds");
+    let requests = admissions.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].source, pool_source(1));
+    assert_eq!(requests[1].source, pool_source(2));
+    assert_eq!(requests[1].limits, limits);
+    assert_eq!(requests[1].deadline, deadline);
+    assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+    assert_eq!(
+        admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(
+        !session.is_finalized(),
+        "upstream capacity releases independently of downstream commit"
+    );
+    let state = store.state.lock().expect("state");
+    assert_eq!(state.created, 1);
+    assert_eq!(state.attempts.len(), 1);
+    assert!(
+        session
+            .provider_attempt_outcomes()
+            .iter()
+            .all(|outcome| !matches!(outcome, ProviderAttemptOutcome::Failed { .. }))
+    );
+}
+
+#[test]
+fn source_lease_releases_on_prepare_failure_cancellation_and_session_drop() {
+    for ending in ["prepare_failure", "cancel", "drop"] {
+        let admissions = Arc::new(RecordingSourceAdmissions::default());
+        let operation = generate_operation();
+        let plan = pool_plan(&operation);
+        let script = if ending == "prepare_failure" {
+            Script::Error(ProviderError::new(
+                ProviderErrorKind::InvalidRequest,
+                UpstreamSendState::NotSent,
+            ))
+        } else {
+            Script::HangingStream {
+                account_id: "acct_one",
+                items: vec![Ok(GatewayEvent::Started(ResponseMeta::new(
+                    "response", "gpt-5",
+                )))],
+            }
+        };
+        let (coordinator, _, _) =
+            coordinator_with_source_admissions(vec![script], admissions.clone());
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("session");
+        if ending == "prepare_failure" {
+            assert!(block_on(session.collect_uncommitted()).is_err());
+        } else {
+            assert!(block_on(session.next_event()).expect("event").is_some());
+            assert_eq!(
+                admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+            if ending == "cancel" {
+                block_on(session.cancel_and_finalize()).expect("cancel");
+            } else {
+                drop(session);
+            }
+        }
+        assert_eq!(
+            admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "{ending}"
+        );
+    }
+}
+
+#[test]
+fn native_pin_cannot_escape_source_capacity_and_infrastructure_failure_sends_nothing() {
+    for unavailable in [false, true] {
+        let admissions = Arc::new(RecordingSourceAdmissions {
+            rejected: BTreeSet::from([pool_source(1)]),
+            unavailable,
+            ..Default::default()
+        });
+        let operation = generate_operation();
+        let plan = pool_plan(&operation);
+        let continuation = NativeContinuationPin::new(
+            PreviousResponseId::new("previous"),
+            PreviousResponseId::new("upstream"),
+            ClientApiKeyId::new("key_client_1").expect("key"),
+            ProviderKind::new("openai").expect("provider"),
+            ProviderAccountId::new("acct_shared").expect("account"),
+        )
+        .with_source(pool_source(1));
+        let (coordinator, store, provider) =
+            coordinator_with_source_admissions(Vec::new(), admissions.clone());
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            plan,
+            None,
+            Some(ContinuationBinding::Pinned(continuation)),
+            CancellationToken::new(),
+        ))
+        .expect("session");
+        let error = block_on(session.collect_uncommitted()).expect_err("source denied");
+        let error = gateway_error_from_engine(&error);
+        assert_eq!(
+            error.kind(),
+            if unavailable {
+                GatewayErrorKind::ProviderInfrastructureUnavailable
+            } else {
+                GatewayErrorKind::SourceCapacityUnavailable
+            }
+        );
+        assert_eq!(admissions.requests.lock().expect("requests").len(), 1);
+        assert!(provider.contexts.lock().expect("contexts").is_empty());
+        assert_eq!(store.state.lock().expect("state").created, 0);
+        assert!(session.provider_attempt_outcomes().is_empty());
+    }
+}
+
+#[test]
+fn mismatched_source_metadata_is_a_local_contract_error_and_releases_the_source_lease() {
+    let admissions = Arc::new(RecordingSourceAdmissions::default());
+    let operation = generate_operation();
+    let plan = pool_plan(&operation);
+    let (coordinator, _, provider) = coordinator_with_source_admissions(
+        vec![Script::Stream {
+            account_id: "acct_outside_all_pools",
+            items: complete_stream(None),
+        }],
+        admissions.clone(),
+    );
+    let mut session = block_on(coordinator.start(
+        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+        operation,
+        plan,
+        None,
+        None,
+        CancellationToken::new(),
+    ))
+    .expect("session");
+    let error = block_on(session.collect_uncommitted())
+        .expect_err("metadata violates frozen pool membership");
+    assert_eq!(
+        gateway_error_from_engine(&error).kind(),
+        GatewayErrorKind::Internal
+    );
+    assert!(session.provider_attempt_outcomes().is_empty());
+    assert_eq!(provider.contexts.lock().expect("contexts").len(), 1);
+    assert_eq!(
+        admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+}
+
+#[test]
+fn group_capacity_fallback_is_enforced_without_disabling_same_tier_or_fault_failover() {
+    use gateway_core::{
+        policy::{AccessGroupRouting, RateLimits},
+        routing::source::SourcePreferenceOverride,
+    };
+    for (allow_capacity_fallback, same_priority, failure) in [
+        (false, false, ProviderErrorKind::SourceCapacityUnavailable),
+        (true, false, ProviderErrorKind::SourceCapacityUnavailable),
+        (false, true, ProviderErrorKind::SourceCapacityUnavailable),
+        (false, false, ProviderErrorKind::AccountCapacityUnavailable),
+        (true, false, ProviderErrorKind::AccountCapacityUnavailable),
+        (
+            false,
+            false,
+            ProviderErrorKind::ProviderInfrastructureUnavailable,
+        ),
+    ] {
+        let operation = generate_operation();
+        let mut routing = AccessGroupRouting {
+            allow_capacity_fallback,
+            ..Default::default()
+        };
+        if same_priority {
+            routing.source_preferences.insert(
+                pool_source(2),
+                SourcePreferenceOverride::new(Some(1), None).expect("same tier"),
+            );
+        }
+        let plan = pool_plan_with_routing(&operation, RateLimits::unlimited(), Some(routing));
+        let first = plan.candidates()[0].source().expect("first").clone();
+        let second = plan.candidates()[1].source().expect("second").clone();
+        let source_capacity = failure == ProviderErrorKind::SourceCapacityUnavailable;
+        let admissions = Arc::new(RecordingSourceAdmissions {
+            rejected: if source_capacity {
+                BTreeSet::from([first])
+            } else {
+                BTreeSet::new()
+            },
+            ..Default::default()
+        });
+        let succeeds = allow_capacity_fallback
+            || same_priority
+            || failure == ProviderErrorKind::ProviderInfrastructureUnavailable;
+        let mut scripts = Vec::new();
+        if !source_capacity {
+            scripts.push(Script::Error(ProviderError::new(
+                failure,
+                UpstreamSendState::NotSent,
+            )));
+        }
+        if succeeds {
+            scripts.push(Script::Stream {
+                account_id: if second == pool_source(2) {
+                    "acct_two"
+                } else {
+                    "acct_one"
+                },
+                items: complete_stream(None),
+            });
+        }
+        let (coordinator, _, provider) =
+            coordinator_with_source_admissions(scripts, admissions.clone());
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            plan,
+            None,
+            None,
+            CancellationToken::new(),
+        ))
+        .expect("session");
+        let result = block_on(session.collect_uncommitted());
+        assert_eq!(
+            result.is_ok(),
+            succeeds,
+            "fallback={allow_capacity_fallback}, same={same_priority}, failure={failure:?}"
+        );
+        assert_eq!(
+            admissions.requests.lock().expect("requests").len(),
+            if succeeds { 2 } else { 1 }
+        );
+        assert_eq!(
+            provider.contexts.lock().expect("contexts").len(),
+            usize::from(!source_capacity) + usize::from(succeeds)
+        );
+        assert_eq!(
+            admissions.active.load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
 }

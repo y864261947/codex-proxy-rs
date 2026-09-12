@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { ApiKey } from '@/api'
 import { ref, watch } from 'vue'
 
 import BaseCard from '@/components/base/BaseCard.vue'
@@ -10,8 +11,10 @@ import BaseTable from '@/components/base/BaseTable/index.vue'
 import LastUsedAtCell from '@/components/LastUsedAtCell.vue'
 import { useAccountGroupCatalog } from '@/composables/useAccountGroupCatalog'
 import { usePageSelection } from '@/composables/usePageSelection'
+import ApiKeyAccessGroupModal from './components/ApiKeyAccessGroupModal.vue'
 import ApiKeyActions from './components/ApiKeyActions.vue'
 import ApiKeyCreateModal from './components/ApiKeyCreateModal.vue'
+import ApiKeyCustomerModal from './components/ApiKeyCustomerModal.vue'
 import ApiKeyFilters from './components/ApiKeyFilters.vue'
 import ApiKeyIdentityCell from './components/ApiKeyIdentityCell.vue'
 import ApiKeyPrefixCell from './components/ApiKeyPrefixCell.vue'
@@ -24,6 +27,18 @@ import { useApiKeyUse } from './composables/useApiKeyUse'
 import { apiKeyColumns } from './constants'
 
 const selectedIds = ref<Set<string>>(new Set())
+const customerKey = ref<ApiKey | null>(null)
+const customerOpen = ref(false)
+const accessKey = ref<ApiKey | null>(null)
+const accessOpen = ref(false)
+function assignAccessGroup(key: ApiKey) {
+  accessKey.value = key
+  accessOpen.value = true
+}
+function assignCustomer(key: ApiKey) {
+  customerKey.value = key
+  customerOpen.value = true
+}
 
 const {
   loading,
@@ -145,7 +160,12 @@ watch(
               />
             </template>
             <template #identity="{ row }">
-              <ApiKeyIdentityCell :api-key="row" />
+              <div class="grid min-w-0 gap-1">
+                <ApiKeyIdentityCell :api-key="row" />
+                <button type="button" class="max-w-full truncate text-left text-cp-xs text-cp-primary-text hover:underline focus-visible:outline-2 focus-visible:outline-cp-primary" :title="`设置 ${row.name} 的客户归属`" @click.stop="assignCustomer(row)">
+                  客户：{{ row.customer?.name || '未分配' }}{{ row.customer && !row.customer.enabled ? '（停用）' : '' }}
+                </button>
+              </div>
             </template>
             <template #prefix="{ row }">
               <ApiKeyPrefixCell
@@ -155,7 +175,9 @@ watch(
               />
             </template>
             <template #scope="{ row }">
-              <ApiKeyScopeCell :api-key="row" />
+              <button type="button" class="w-full rounded-cp hover:bg-cp-fill-quaternary focus-visible:outline-2 focus-visible:outline-cp-primary" :aria-label="`设置 ${row.name} 的接入分组`" @click.stop="assignAccessGroup(row)">
+                <ApiKeyScopeCell :api-key="row" />
+              </button>
             </template>
             <template #enabled="{ row }">
               <ApiKeyStatusBadge :api-key="row" />
@@ -200,6 +222,8 @@ watch(
       @save="requestSave"
       @import-ccs="importCreatedKeyToCcs"
     />
+    <ApiKeyCustomerModal v-model="customerOpen" :api-key="customerKey" @saved="loadApiKeys" />
+    <ApiKeyAccessGroupModal v-model="accessOpen" :api-key="accessKey" @saved="loadApiKeys" />
 
     <ApiKeyUseModal
       v-model="showUseKeyModal"

@@ -13,11 +13,10 @@ use gateway_core::engine::admission::{
     ClientAdmissionRequest, ClientAdmissionRestoreResult,
 };
 use gateway_core::engine::execution::{
-    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort,
+    ProviderCircuitDecision, ProviderCircuitError, ProviderCircuitPort, ProviderCircuitScope,
 };
 use gateway_core::lifecycle::CancellationToken;
-use gateway_core::policy::ClientApiKeyId;
-use gateway_core::routing::ProviderKind;
+use gateway_core::policy::AdmissionScopeId;
 use gateway_core::task::{DaemonTask, WorkerTaskError};
 use tokio::sync::{Mutex, mpsc};
 
@@ -86,11 +85,11 @@ impl ClientAdmissionPort for BufferedClientAdmissionPort {
 
     fn release<'a>(
         &'a self,
-        client_api_key_id: &'a ClientApiKeyId,
+        scope_ids: &'a [AdmissionScopeId],
         model_request_id: &'a ModelRequestId,
     ) -> BoxFuture<'a, Result<bool, ClientAdmissionError>> {
         let enqueued = self.enqueue(AdmissionRelease {
-            client_api_key_id: client_api_key_id.clone(),
+            scope_ids: scope_ids.to_vec(),
             model_request_id: model_request_id.clone(),
         });
         Box::pin(ready(Ok(enqueued)))
@@ -105,7 +104,7 @@ impl ClientAdmissionPort for BufferedClientAdmissionPort {
 }
 
 struct AdmissionRelease {
-    client_api_key_id: ClientApiKeyId,
+    scope_ids: Vec<AdmissionScopeId>,
     model_request_id: ModelRequestId,
 }
 
@@ -130,7 +129,7 @@ impl DaemonTask for ClientAdmissionReleaseWriter {
                 };
                 if let Err(error) = self
                     .inner
-                    .release(&release.client_api_key_id, &release.model_request_id)
+                    .release(&release.scope_ids, &release.model_request_id)
                     .await
                 {
                     tracing::warn!(%error, "Client admission 后台释放失败，依赖租约 TTL 收敛");
@@ -192,31 +191,31 @@ impl BufferedProviderCircuitPort {
 impl ProviderCircuitPort for BufferedProviderCircuitPort {
     fn decision<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<ProviderCircuitDecision, ProviderCircuitError>> {
-        self.inner.decision(provider_kind)
+        self.inner.decision(scope)
     }
 
     fn observe_failure<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        self.enqueue(CircuitFeedback::Failure(provider_kind.clone()));
+        self.enqueue(CircuitFeedback::Failure(scope.clone()));
         Box::pin(ready(Ok(())))
     }
 
     fn observe_success<'a>(
         &'a self,
-        provider_kind: &'a ProviderKind,
+        scope: &'a ProviderCircuitScope,
     ) -> BoxFuture<'a, Result<(), ProviderCircuitError>> {
-        self.enqueue(CircuitFeedback::Success(provider_kind.clone()));
+        self.enqueue(CircuitFeedback::Success(scope.clone()));
         Box::pin(ready(Ok(())))
     }
 }
 
 enum CircuitFeedback {
-    Failure(ProviderKind),
-    Success(ProviderKind),
+    Failure(ProviderCircuitScope),
+    Success(ProviderCircuitScope),
 }
 
 pub struct ProviderCircuitFeedbackWriter {

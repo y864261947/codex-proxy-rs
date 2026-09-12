@@ -144,7 +144,12 @@ where
             .map_or(Ok(0), |pin| {
                 plan.candidates()
                     .iter()
-                    .position(|candidate| candidate.provider() == pin.provider())
+                    .position(|candidate| {
+                        candidate.provider() == pin.provider()
+                            && pin.matches_source(candidate.source())
+                            && (account_selection.is_diagnostic()
+                                || candidate.account_scope().allows(pin.account()))
+                    })
                     .ok_or(EngineError::ContinuationPinMismatch)
             })?;
         let trace = TraceContext::new(request_id.as_str());
@@ -217,6 +222,7 @@ where
 }
 
 struct CurrentAttempt {
+    source: Option<crate::routing::source::SourceSnapshot>,
     stream: ProviderStream,
     metadata: ProviderCallMetadata,
     trigger: AttemptTrigger,
@@ -515,21 +521,23 @@ where
         if state.provider() != provider.as_str() {
             return None;
         }
-        let account = current.metadata.provider_account_id().clone();
+        let account = current.metadata.provider_account_id()?.clone();
         let response_id = self.observation.upstream_response_id.as_deref()?;
         let previous_response_id = PreviousResponseId::new(response_id.to_owned());
         let upstream_response_id = PreviousResponseId::new(response_id.to_owned());
-        Some(
-            NativeContinuationPin::new(
-                previous_response_id,
-                upstream_response_id,
-                self.client_api_key_ref.clone(),
-                provider,
-                account,
-            )
-            .with_scope(NativeContinuationScope::Persisted)
-            .with_session_state(state.clone()),
+        let mut pin = NativeContinuationPin::new(
+            previous_response_id,
+            upstream_response_id,
+            self.client_api_key_ref.clone(),
+            provider,
+            account,
         )
+        .with_scope(NativeContinuationScope::Persisted)
+        .with_session_state(state.clone());
+        if let Some(source) = &current.source {
+            pin = pin.with_source(source.id().clone());
+        }
+        Some(pin)
     }
 
     /// 请求取消；实际终态在下一次会话 poll 时由 Core 持久化。
@@ -624,6 +632,9 @@ where
                     }
                 }
                 PollBoundary::Item(None) => {
+                    if let Some(current) = self.current.as_mut() {
+                        current.stream.close();
+                    }
                     self.record_current_provider_success();
                     self.upstream_complete = true;
                     return Ok(PullOutcome::End);
@@ -704,7 +715,7 @@ where
                 pinned_account.clone(),
                 self.account_state_owner.clone(),
             )
-            .with_account_scope(Arc::clone(self.plan.account_scope())),
+            .with_account_scope(Arc::clone(candidate.account_scope())),
         }
         .with_credential_recovery_attempted(pinned_account.as_ref().is_some_and(|account| {
             self.credential_recovery_attempted_accounts
@@ -750,6 +761,7 @@ where
         );
         let provider_request = ProviderRequest::new(self.operation.clone(), candidate.clone());
         let stream = match poll_provider(
+            Arc::clone(self.engine.source_admissions()),
             provider,
             provider_request,
             context,
@@ -778,7 +790,8 @@ where
                     }
                     if matches!(
                         error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
+                        ProviderErrorKind::SourceCapacityUnavailable
+                            | ProviderErrorKind::AccountCapacityUnavailable
                             | ProviderErrorKind::NoEligibleAccount
                             | ProviderErrorKind::ProviderInfrastructureUnavailable
                     ) && error.send_state() == UpstreamSendState::NotSent
@@ -786,13 +799,14 @@ where
                             self.continuation_attempt,
                             ContinuationAttempt::None | ContinuationAttempt::ReplayAny
                         )
-                        && self.advance_provider_candidate()
+                        && self.advance_provider_candidate(error.kind())
                     {
                         return Ok(Some(PullOutcome::AttemptDiscarded));
                     }
                     if matches!(
                         error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
+                        ProviderErrorKind::SourceCapacityUnavailable
+                            | ProviderErrorKind::AccountCapacityUnavailable
                             | ProviderErrorKind::NoEligibleAccount
                     ) && let Some(last_failure) = self.last_retryable_failure.take()
                     {
@@ -811,12 +825,17 @@ where
                     }
                     if !(matches!(
                         error.kind(),
-                        ProviderErrorKind::AccountCapacityUnavailable
+                        ProviderErrorKind::SourceCapacityUnavailable
+                            | ProviderErrorKind::AccountCapacityUnavailable
                             | ProviderErrorKind::NoEligibleAccount
                             | ProviderErrorKind::ProviderInfrastructureUnavailable
                     ) && error.send_state() == UpstreamSendState::NotSent)
                     {
-                        self.record_provider_failure(candidate.provider().clone(), error.kind());
+                        self.record_provider_failure(
+                            candidate.provider().clone(),
+                            candidate.source().cloned(),
+                            error.kind(),
+                        );
                     }
                     self.finish_provider_error(&error).await?;
                     return Err(provider_engine_error(error));
@@ -824,7 +843,6 @@ where
             },
         };
         if !stream.metadata().confirms(&candidate) {
-            self.record_provider_failure(candidate.provider().clone(), ProviderErrorKind::Protocol);
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
                 "provider metadata did not match the frozen candidate",
@@ -845,16 +863,17 @@ where
 
         let metadata = stream.metadata().clone();
         attempt_trace.record("account.selected", json!({
-            "provider": metadata.provider().as_str(), "accountId": metadata.provider_account_id().as_str(),
+            "provider": metadata.provider().as_str(), "accountId": metadata.provider_account_id().map(|id| id.as_str()),
+            "channelId": metadata.channel_id().map(|id| id.as_str()),
             "transport": metadata.transport().as_str(),
             "selectionMs": metadata.selection_observation().map(|o| o.account_selection_wait_ms()),
         }));
         let selection_observation = metadata.selection_observation();
         let capacity = selection_observation.and_then(|observation| observation.capacity());
         if !self.account_selection.is_diagnostic()
-            && !candidate
-                .account_scope()
-                .allows(metadata.provider_account_id())
+            && metadata
+                .provider_account_id()
+                .is_some_and(|account| !candidate.account_scope().allows(account))
         {
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -875,7 +894,7 @@ where
         }
         if pinned_account
             .as_ref()
-            .is_some_and(|required| metadata.provider_account_id() != required)
+            .is_some_and(|required| metadata.provider_account_id() != Some(required))
         {
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -899,7 +918,10 @@ where
             .as_ref()
             .and_then(ContinuationBinding::pinned)
             && self.continuation_attempt == ContinuationAttempt::Native
-            && !pin.matches(metadata.provider(), metadata.provider_account_id())
+            && (!pin.matches_source(candidate.source())
+                || metadata
+                    .provider_account_id()
+                    .is_none_or(|account| !pin.matches(metadata.provider(), account)))
         {
             let error = GatewayError::new(
                 GatewayErrorKind::Internal,
@@ -918,19 +940,22 @@ where
             .await?;
             return Err(EngineError::ContinuationPinMismatch);
         }
-        if self.account_state_owner.is_none() {
+        if self.account_state_owner.is_none()
+            && let Some(account) = metadata.provider_account_id()
+        {
             self.account_state_owner = Some(ProviderAccountStateOwner::new(
                 metadata.provider().clone(),
-                metadata.provider_account_id().clone(),
+                account.clone(),
             ));
         }
         let attempt_record = AttemptRecord {
+            source: candidate.source_snapshot().cloned(),
             request_id: self.request_id.clone(),
             attempt_count: next_attempt,
             trigger,
             provider_kind: metadata.provider().clone(),
-            provider_account_id: Some(metadata.provider_account_id().clone()),
-            provider_account_ref: Some(metadata.provider_account_id().clone()),
+            provider_account_id: metadata.provider_account_id().cloned(),
+            provider_account_ref: metadata.provider_account_id().cloned(),
             upstream_model_id: metadata.upstream_model().cloned(),
             upstream_transport: metadata.transport().as_str().to_owned(),
             http_version: None,
@@ -970,6 +995,7 @@ where
             self.routing_attempts = self.routing_attempts.saturating_add(1);
         }
         self.current = Some(CurrentAttempt {
+            source: candidate.source_snapshot().cloned(),
             stream,
             metadata,
             trigger,
@@ -981,11 +1007,31 @@ where
         Ok(None)
     }
 
-    fn advance_provider_candidate(&mut self) -> bool {
+    fn advance_provider_candidate(&mut self, error: ProviderErrorKind) -> bool {
         let Some(next) = self.candidate_index.checked_add(1) else {
             return false;
         };
-        if next >= self.plan.candidates().len() {
+        let pinned_source = self
+            .continuation
+            .as_ref()
+            .and_then(ContinuationBinding::pinned)
+            .filter(|pin| pin.source().is_some());
+        let Some(next) = (next..self.plan.candidates().len()).find(|index| {
+            let candidate = &self.plan.candidates()[*index];
+            pinned_source.is_none_or(|pin| {
+                pin.provider() == candidate.provider() && pin.matches_source(candidate.source())
+            })
+        }) else {
+            return false;
+        };
+        if matches!(
+            error,
+            ProviderErrorKind::SourceCapacityUnavailable
+                | ProviderErrorKind::AccountCapacityUnavailable
+        ) && !self
+            .plan
+            .permits_capacity_fallback(self.candidate_index, next)
+        {
             return false;
         }
         self.candidate_index = next;
@@ -1056,7 +1102,11 @@ where
         record_trace_error(&self.trace.attempt(self.attempts), &error);
         let mut atomic_client_events = error.take_atomic_client_events();
         let current = self.current.take().ok_or(EngineError::NoActiveAttempt)?;
-        self.record_provider_failure(current.metadata.provider().clone(), error.kind());
+        self.record_provider_failure(
+            current.metadata.provider().clone(),
+            current.source.as_ref().map(|source| source.id().clone()),
+            error.kind(),
+        );
         // attempt_send_state 是本 attempt 自身的发送事实，驱动重试门；
         // 持久化与终态用请求级水位，二者不可混用（水位会把早先 attempt 的
         // sent 传染给本 attempt，从而错误放行/拦截重试）。
@@ -1083,7 +1133,9 @@ where
             attempt_send_state,
             provider_proved_replay_safe,
         );
-        let account_rotation_retry = self.account_selection.required_account().is_none()
+        let account_id = current.metadata.provider_account_id();
+        let account_rotation_retry = account_id.is_some()
+            && self.account_selection.required_account().is_none()
             && self.continuation_attempt == ContinuationAttempt::None
             && self.downstream_committed_at.is_none()
             && !self.delivery_pending
@@ -1111,8 +1163,10 @@ where
                 Some((AttemptTransport::Fallback, Duration::ZERO))
             }
             _ => None,
-        };
-        let ordinary_retry = self.account_selection.required_account().is_none()
+        }
+        .filter(|_| account_id.is_some());
+        let ordinary_retry = account_id.is_some()
+            && self.account_selection.required_account().is_none()
             && self.continuation_attempt == ContinuationAttempt::None
             && self.downstream_committed_at.is_none()
             && !self.delivery_pending
@@ -1125,9 +1179,11 @@ where
             && !self.delivery_pending
             && attempt_send_state != UpstreamSendState::Ambiguous
             && self.routing_attempts < self.plan.max_attempts().get()
-            && !self
-                .credential_recovery_attempted_accounts
-                .contains(current.metadata.provider_account_id());
+            && account_id.is_some_and(|account| {
+                !self
+                    .credential_recovery_attempted_accounts
+                    .contains(account)
+            });
         let retryable = continuation_retry
             || same_account_retry
             || ordinary_retry
@@ -1146,22 +1202,23 @@ where
             // 普通 clone 只保留稳定事实；原始 wire/HTTP response 由 request-local
             // 所有权保留到下一次 attempt 成功，或最终空选路时返回客户端。
             let persistence_error = self.request_persisted.then(|| error.clone());
-            if same_account_retry {
-                let account = current.metadata.provider_account_id().clone();
+            if same_account_retry && let Some(account) = account_id {
+                let account = account.clone();
                 self.credential_recovery_attempted_accounts
                     .insert(account.clone());
                 // 只钉住紧随其后的 replay attempt；replay 再遇可重试错误时，
                 // ordinary/continuation 重试门不受影响，仍可换号。
                 self.recovery_account = Some(account);
-            } else if let Some((transport, delay)) = transport_recovery {
+            } else if let Some((transport, delay)) = transport_recovery
+                && let Some(account) = account_id
+            {
                 self.transport_recovery = Some(PendingTransportRecovery {
-                    account: current.metadata.provider_account_id().clone(),
+                    account: account.clone(),
                     transport,
                     delay,
                 });
-            } else if !continuation_retry {
-                self.excluded_accounts
-                    .insert(current.metadata.provider_account_id().clone());
+            } else if !continuation_retry && let Some(account) = account_id {
+                self.excluded_accounts.insert(account.clone());
             }
             self.last_retryable_failure_events = atomic_client_events;
             self.last_retryable_failure = Some(error);
@@ -1172,11 +1229,12 @@ where
                     self.engine
                         .store()
                         .record_intermediate_failure(IntermediateFailure {
+                            source: current.source.clone(),
                             request_id: self.request_id.clone(),
                             attempt_index: current.index,
                             trigger: current.trigger,
                             provider_kind: current.metadata.provider().clone(),
-                            account_id: Some(current.metadata.provider_account_id().clone()),
+                            account_id: current.metadata.provider_account_id().cloned(),
                             upstream_model_id: current.metadata.upstream_model().cloned(),
                             upstream_status_code: current
                                 .response_observation
@@ -1230,6 +1288,9 @@ where
         send_state: UpstreamSendState,
         provider_proved_replay_safe: bool,
     ) -> bool {
+        let Some(account_id) = current.metadata.provider_account_id() else {
+            return false;
+        };
         if self.account_selection.required_account().is_some()
             || self.continuation_attempt == ContinuationAttempt::None
             || self.downstream_committed_at.is_some()
@@ -1248,7 +1309,7 @@ where
         match self.continuation_attempt {
             ContinuationAttempt::Native => match error.continuation_recovery_disposition() {
                 Some(ContinuationRecoveryDisposition::RetryExactConnection) => {
-                    self.recovery_account = Some(current.metadata.provider_account_id().clone());
+                    self.recovery_account = Some(account_id.clone());
                 }
                 Some(ContinuationRecoveryDisposition::ProviderReplayAllowed) => {
                     self.continuation_attempt = ContinuationAttempt::ReplayOwner;
@@ -1268,12 +1329,10 @@ where
             }
             ContinuationAttempt::ReplayOwner => {
                 self.continuation_attempt = ContinuationAttempt::ReplayAny;
-                self.excluded_accounts
-                    .insert(current.metadata.provider_account_id().clone());
+                self.excluded_accounts.insert(account_id.clone());
             }
             ContinuationAttempt::ReplayAny => {
-                self.excluded_accounts
-                    .insert(current.metadata.provider_account_id().clone());
+                self.excluded_accounts.insert(account_id.clone());
             }
             ContinuationAttempt::None => return false,
         }
@@ -1436,6 +1495,9 @@ where
     }
 
     async fn finish_interruption(&mut self, error: EngineError) -> Result<(), EngineError> {
+        if let Some(current) = self.current.as_mut() {
+            current.stream.close();
+        }
         let (outcome, gateway_error) = match error {
             EngineError::Cancelled => (
                 ExecutionOutcome::Cancelled,
@@ -1646,24 +1708,25 @@ where
     }
 
     fn record_current_provider_success(&mut self) {
-        let provider_kind = self
-            .current
-            .as_ref()
-            .map(|current| current.metadata.provider().clone());
-        if let Some(provider_kind) = provider_kind {
+        if let Some(current) = &self.current {
             self.provider_attempt_outcomes
-                .push(ProviderAttemptOutcome::Succeeded { provider_kind });
+                .push(ProviderAttemptOutcome::Succeeded {
+                    provider_kind: current.metadata.provider().clone(),
+                    source: current.source.as_ref().map(|source| source.id().clone()),
+                });
         }
     }
 
     fn record_provider_failure(
         &mut self,
         provider_kind: crate::identity::ProviderKind,
+        source: Option<crate::routing::source::SourceId>,
         error_kind: ProviderErrorKind,
     ) {
         self.provider_attempt_outcomes
             .push(ProviderAttemptOutcome::Failed {
                 provider_kind,
+                source,
                 error_kind,
             });
     }
@@ -1782,6 +1845,7 @@ async fn poll_retry_delay(
 }
 
 async fn poll_provider(
+    source_admissions: Arc<dyn super::source_admission::SourceAdmissionPort>,
     provider: Arc<dyn Provider>,
     request: ProviderRequest,
     context: AttemptContext,
@@ -1791,7 +1855,52 @@ async fn poll_provider(
     let Ok(remaining) = deadline.duration_since(SystemTime::now()) else {
         return ProviderBoundary::Deadline;
     };
-    let execution = provider.execute(request, context).fuse();
+    let execution = async move {
+        let lease = if let Some(source) = request.candidate().source() {
+            let controls = request.candidate().source_controls();
+            // 共享配额必须先解析为冻结配置，未解析的引用不能退化为不限额。
+            let quota = request.candidate().shared_quota();
+            if controls.quota_scope_id() != quota.map(crate::routing::source::QuotaScopePolicy::id)
+                || quota.is_some_and(|quota| !quota.enabled())
+            {
+                return Err(ProviderError::new(
+                    ProviderErrorKind::ProviderInfrastructureUnavailable,
+                    UpstreamSendState::NotSent,
+                ));
+            }
+            Some(
+                source_admissions
+                    .acquire(super::source_admission::SourceAdmissionRequest {
+                        source: source.clone(),
+                        limits: controls.limits(),
+                        shared_quota: quota.map(|quota| (quota.id().clone(), quota.limits())),
+                        deadline,
+                    })
+                    .await
+                    .map_err(|error| {
+                        ProviderError::new(
+                            match error {
+                                super::source_admission::SourceAdmissionError::Capacity => {
+                                    ProviderErrorKind::SourceCapacityUnavailable
+                                }
+                                super::source_admission::SourceAdmissionError::Unavailable => {
+                                    ProviderErrorKind::ProviderInfrastructureUnavailable
+                                }
+                            },
+                            UpstreamSendState::NotSent,
+                        )
+                    })?,
+            )
+        } else {
+            None
+        };
+        let stream = provider.execute(request, context).await?;
+        Ok(match lease {
+            Some(lease) => stream.with_additional_lease(lease),
+            None => stream,
+        })
+    }
+    .fuse();
     let cancelled = cancellation.cancelled().fuse();
     let timeout = Delay::new(remaining).fuse();
     pin_mut!(execution, cancelled, timeout);

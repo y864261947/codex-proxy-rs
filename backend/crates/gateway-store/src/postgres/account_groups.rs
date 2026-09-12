@@ -17,7 +17,15 @@ use gateway_admin::{
     },
     ports::store::{AccountGroupStore, AdminStoreError, AdminStoreResult},
 };
-use gateway_core::{account::AccountStatusFacts, routing::AccountGroupId};
+use gateway_core::{
+    account::AccountStatusFacts,
+    identity::QuotaScopeId,
+    policy::RateLimits,
+    routing::{
+        AccountGroupId,
+        source::{SourceControls, SourcePreference},
+    },
+};
 use sqlx::{PgPool, Postgres, QueryBuilder, Row as _, Transaction};
 
 use crate::{
@@ -233,7 +241,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             "create",
             "account_group",
             id.as_str(),
-            vec!["name".to_owned(), "description".to_owned()],
+            group_changed_fields(command.source_controls.is_some()),
         );
         let revision = self
             .mutate(audit, |transaction| {
@@ -250,6 +258,9 @@ impl AccountGroupStore for PgAccountGroupRepository {
                     .execute(&mut **transaction)
                     .await
                     .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
+                    if let Some(controls) = command.source_controls {
+                        write_source_controls(transaction, command.id.as_str(), &controls).await?;
+                    }
                     Ok(())
                 })
             })
@@ -273,7 +284,7 @@ impl AccountGroupStore for PgAccountGroupRepository {
             "update",
             "account_group",
             id.as_str(),
-            vec!["name".to_owned(), "description".to_owned()],
+            group_changed_fields(command.source_controls.is_some()),
         );
         let revision = self
             .mutate(audit, |transaction| {
@@ -290,7 +301,11 @@ impl AccountGroupStore for PgAccountGroupRepository {
                     .execute(&mut **transaction)
                     .await
                     .map_err(|error| map_group_write_error(error, command.id.as_str()))?;
-                    require_one(result.rows_affected(), command.id.as_str())
+                    require_one(result.rows_affected(), command.id.as_str())?;
+                    if let Some(controls) = command.source_controls {
+                        write_source_controls(transaction, command.id.as_str(), &controls).await?;
+                    }
+                    Ok(())
                 })
             })
             .await?;
@@ -383,9 +398,74 @@ impl AccountGroupStore for PgAccountGroupRepository {
     }
 }
 
+fn group_changed_fields(controls: bool) -> Vec<String> {
+    let mut fields = vec![
+        "name".to_owned(),
+        "description".to_owned(),
+        "color".to_owned(),
+    ];
+    if controls {
+        fields.push("source_controls".to_owned());
+    }
+    fields
+}
+
+async fn write_source_controls(
+    transaction: &mut Transaction<'_, Postgres>,
+    id: &str,
+    controls: &SourceControls,
+) -> StoreResult<()> {
+    sqlx::query("update account_groups set source_priority=$2, source_weight=$3, max_concurrency=$4, requests_per_minute=$5, quota_scope_id=$6 where id=$1")
+        .bind(id).bind(i32::from(controls.preference().priority())).bind(i32::from(controls.preference().weight()))
+        .bind(i64::try_from(controls.limits().max_concurrency).map_err(|_| invalid("source concurrency overflow"))?)
+        .bind(i64::try_from(controls.limits().requests_per_minute).map_err(|_| invalid("source RPM overflow"))?)
+        .bind(controls.quota_scope_id().map(QuotaScopeId::as_str))
+        .execute(&mut **transaction).await.map_err(|error| map_group_write_error(error, id))?;
+    Ok(())
+}
+
+pub(super) fn source_controls_from_row(row: &sqlx::postgres::PgRow) -> StoreResult<SourceControls> {
+    let priority = u16::try_from(
+        row.try_get::<i32, _>("source_priority")
+            .map_err(|_| invalid("source priority"))?,
+    )
+    .map_err(|_| invalid("source priority"))?;
+    let weight = u16::try_from(
+        row.try_get::<i32, _>("source_weight")
+            .map_err(|_| invalid("source weight"))?,
+    )
+    .map_err(|_| invalid("source weight"))?;
+    let max_concurrency = u64::try_from(
+        row.try_get::<i64, _>("max_concurrency")
+            .map_err(|_| invalid("source concurrency"))?,
+    )
+    .map_err(|_| invalid("source concurrency"))?;
+    let requests_per_minute = u64::try_from(
+        row.try_get::<i64, _>("requests_per_minute")
+            .map_err(|_| invalid("source RPM"))?,
+    )
+    .map_err(|_| invalid("source RPM"))?;
+    let quota_scope_id = row
+        .try_get::<Option<String>, _>("quota_scope_id")
+        .map_err(|_| invalid("quota scope"))?
+        .map(QuotaScopeId::new)
+        .transpose()
+        .map_err(|_| invalid("quota scope"))?;
+    SourceControls::new(
+        SourcePreference::new(priority, weight).map_err(|_| invalid("source preference"))?,
+        RateLimits {
+            max_concurrency,
+            requests_per_minute,
+        },
+        quota_scope_id,
+    )
+    .map_err(|_| invalid("source controls"))
+}
+
 fn group_select() -> QueryBuilder<Postgres> {
     QueryBuilder::new(
         "select g.id, g.name, g.description, g.color, g.enabled, g.created_at, g.updated_at,
+                g.source_priority, g.source_weight, g.max_concurrency, g.requests_per_minute, g.quota_scope_id,
                 coalesce(members.member_count, 0)::bigint as member_count,
                 coalesce(keys.client_key_count, 0)::bigint as client_key_count,
                 coalesce(members.provider_counts, '{}'::jsonb) as provider_counts
@@ -462,6 +542,7 @@ fn group_record(row: &sqlx::postgres::PgRow) -> StoreResult<AccountGroupRecord> 
     let provider_counts = serde_json::from_value::<BTreeMap<String, u64>>(provider_counts)
         .map_err(|_| invalid("invalid provider counts"))?;
     Ok(AccountGroupRecord {
+        source_controls: source_controls_from_row(row)?,
         id: AccountGroupId::new(
             row.try_get::<String, _>("id")
                 .map_err(|_| invalid("invalid id"))?,

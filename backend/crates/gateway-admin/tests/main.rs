@@ -20,6 +20,7 @@ use gateway_admin::{
 };
 
 mod backup;
+mod discovery;
 mod model;
 mod use_case;
 

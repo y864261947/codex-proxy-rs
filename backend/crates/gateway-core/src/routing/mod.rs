@@ -1,6 +1,7 @@
 //! Provider、模型目录、精确模型映射与请求级候选计划。
 
 pub mod snapshot;
+pub mod source;
 
 pub use crate::account::scope::{
     AccountGroupId, AccountRoutingScopeKind, AccountRoutingSnapshot, ClientRoutingScope,
@@ -15,6 +16,7 @@ use std::num::{NonZeroU32, NonZeroU64};
 use std::sync::Arc;
 
 use crate::account::AccountSelectionPolicy;
+use crate::channel::ChannelBinding;
 use crate::operation::{CapabilityRequirements, Feature, OperationKind};
 use crate::validation::{IdentifierError, RoutingError, validate_text};
 
@@ -365,6 +367,26 @@ impl PublicModelProfile {
 
 impl ModelCapabilities {
     #[must_use]
+    pub fn operations(&self) -> &BTreeSet<OperationKind> {
+        &self.operations
+    }
+
+    #[must_use]
+    pub fn features(&self) -> &BTreeMap<Feature, SupportLevel> {
+        &self.features
+    }
+
+    #[must_use]
+    pub const fn max_output_tokens(&self) -> Option<u64> {
+        self.max_output_tokens
+    }
+
+    #[must_use]
+    pub const fn upstream_validates_features(&self) -> bool {
+        self.upstream_validates_features
+    }
+
+    #[must_use]
     pub fn new(operations: BTreeSet<OperationKind>, max_output_tokens: Option<u64>) -> Self {
         Self {
             operations,
@@ -429,6 +451,7 @@ impl ModelCapabilities {
 /// 一个 Provider 实时发现的上游模型能力。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModel {
+    channel: Option<ChannelBinding>,
     provider: ProviderKind,
     upstream_model: UpstreamModelId,
     capabilities: ModelCapabilities,
@@ -443,11 +466,23 @@ impl ProviderModel {
         capabilities: ModelCapabilities,
     ) -> Self {
         Self {
+            channel: None,
             provider,
             upstream_model,
             capabilities,
             presentation: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_channel(mut self, channel: ChannelBinding) -> Self {
+        self.channel = Some(channel);
+        self
+    }
+
+    #[must_use]
+    pub const fn channel_binding(&self) -> Option<&ChannelBinding> {
+        self.channel.as_ref()
     }
 
     #[must_use]
@@ -478,11 +513,23 @@ pub struct RoutingContext {
     /// 管理端 connection test 显式限制的 Provider；普通请求留空。
     pub required_provider: Option<ProviderKind>,
     pub blocked_providers: BTreeSet<ProviderKind>,
+    pub blocked_sources: BTreeSet<source::SourceId>,
+}
+
+/// 统一来源计划仍保留模型端点与 Provider 自有端点的能力边界。
+#[derive(Debug, Clone, Copy)]
+pub enum SourceRoutingTarget<'a> {
+    Model(&'a PublicModelId),
+    ProviderEndpoint(&'a ProviderKind),
 }
 
 /// 已绑定 Provider 的请求候选；模型端点携带真实上游模型，原生端点不虚构模型。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCandidate {
+    channel: Option<ChannelBinding>,
+    source: Option<source::SourceSnapshot>,
+    source_controls: source::SourceControls,
+    shared_quota: Option<source::QuotaScopePolicy>,
     provider: ProviderKind,
     upstream_model: Option<UpstreamModelId>,
     emulated_features: BTreeSet<Feature>,
@@ -490,6 +537,48 @@ pub struct ProviderCandidate {
 }
 
 impl ProviderCandidate {
+    /// None 仅用于迁入来源配置之前的既有账号集合路径。
+    #[must_use]
+    pub fn source(&self) -> Option<&source::SourceId> {
+        self.source.as_ref().map(source::SourceSnapshot::id)
+    }
+
+    #[must_use]
+    pub fn with_source(mut self, source: source::SourceId) -> Self {
+        self.channel = None;
+        self.source = Some(source::SourceSnapshot::unnamed(source));
+        self
+    }
+
+    #[must_use]
+    pub fn with_channel(mut self, channel: ChannelBinding) -> Self {
+        self.source = Some(source::SourceSnapshot::unnamed(source::SourceId::Channel(
+            channel.id().clone(),
+        )));
+        self.channel = Some(channel);
+        self
+    }
+
+    #[must_use]
+    pub const fn channel_binding(&self) -> Option<&ChannelBinding> {
+        self.channel.as_ref()
+    }
+
+    #[must_use]
+    pub const fn source_snapshot(&self) -> Option<&source::SourceSnapshot> {
+        self.source.as_ref()
+    }
+
+    #[must_use]
+    pub const fn source_controls(&self) -> &source::SourceControls {
+        &self.source_controls
+    }
+
+    #[must_use]
+    pub const fn shared_quota(&self) -> Option<&source::QuotaScopePolicy> {
+        self.shared_quota.as_ref()
+    }
+
     #[must_use]
     pub const fn provider(&self) -> &ProviderKind {
         &self.provider
@@ -514,6 +603,7 @@ impl ProviderCandidate {
 /// 一次请求冻结的 Provider 尝试顺序。
 #[derive(Debug, Clone)]
 pub struct RoutingPlan {
+    allow_capacity_fallback: bool,
     config_revision: ConfigRevision,
     account_selection_policy: AccountSelectionPolicy,
     operation: OperationKind,
@@ -523,6 +613,19 @@ pub struct RoutingPlan {
 }
 
 impl RoutingPlan {
+    #[must_use]
+    pub fn permits_capacity_fallback(&self, current: usize, next: usize) -> bool {
+        self.allow_capacity_fallback
+            || self
+                .candidates
+                .get(current)
+                .zip(self.candidates.get(next))
+                .is_some_and(|(current, next)| {
+                    next.source_controls().preference().priority()
+                        <= current.source_controls().preference().priority()
+                })
+    }
+
     #[must_use]
     pub const fn config_revision(&self) -> ConfigRevision {
         self.config_revision
