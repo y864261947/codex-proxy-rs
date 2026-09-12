@@ -6,8 +6,9 @@ use gateway_admin::{
     model::{
         AdminErrorKind, MutationActor, MutationContext, Revision,
         channels::{
-            ChannelChange, ChannelFields, ChannelListQuery, ChannelModelPreview, ChannelPage,
-            NewChannel, UpdateChannel,
+            ChannelChange, ChannelDiscoveryComparisonQuery, ChannelDiscoveryPage,
+            ChannelDiscoveryPair, ChannelDiscoveryQuery, ChannelFields, ChannelListQuery,
+            ChannelModelPreview, ChannelPage, NewChannel, UpdateChannel,
         },
         provider_credentials::ProviderDocument,
     },
@@ -31,6 +32,18 @@ use super::{AdminHarness, UnavailableStore, unavailable};
 
 #[async_trait]
 impl ChannelStore for UnavailableStore {
+    async fn load_discovery_pair(
+        &self,
+        _: ChannelDiscoveryComparisonQuery,
+    ) -> AdminStoreResult<Option<ChannelDiscoveryPair>> {
+        Err(unavailable("channel"))
+    }
+    async fn list_model_discoveries(
+        &self,
+        _: ChannelDiscoveryQuery,
+    ) -> AdminStoreResult<ChannelDiscoveryPage> {
+        Err(unavailable("channel"))
+    }
     async fn reserve_model_discovery(
         &self,
         _: &ChannelId,
@@ -75,11 +88,73 @@ struct ChannelState {
     commits: u64,
     reject: bool,
     generation: u64,
-    discovery: Option<ChannelModelPreview>,
+    discoveries: Vec<ChannelModelPreview>,
 }
 
 #[async_trait]
 impl ChannelStore for MemoryChannels {
+    async fn load_discovery_pair(
+        &self,
+        query: ChannelDiscoveryComparisonQuery,
+    ) -> AdminStoreResult<Option<ChannelDiscoveryPair>> {
+        let state = self.state.lock().expect("state");
+        if state.reject {
+            return Err(unavailable("channel"));
+        }
+        let find = |generation| {
+            state
+                .discoveries
+                .iter()
+                .find(|item| item.id == query.id && item.generation == generation)
+                .cloned()
+        };
+        Ok(find(query.base_generation)
+            .zip(find(query.target_generation))
+            .map(|(base, target)| ChannelDiscoveryPair { base, target }))
+    }
+    async fn list_model_discoveries(
+        &self,
+        query: ChannelDiscoveryQuery,
+    ) -> AdminStoreResult<ChannelDiscoveryPage> {
+        let state = self.state.lock().expect("state");
+        if state.reject {
+            return Err(unavailable("channel"));
+        }
+        if !state
+            .stored
+            .as_ref()
+            .is_some_and(|stored| stored.id == query.id)
+        {
+            return Err(AdminStoreError::new(
+                AdminStoreErrorKind::NotFound,
+                "channel",
+                "missing",
+            ));
+        }
+        let mut items: Vec<_> = state
+            .discoveries
+            .iter()
+            .rev()
+            .filter(|item| {
+                query
+                    .before_generation
+                    .is_none_or(|before| item.generation < before)
+            })
+            .take(usize::from(query.page_size.get()) + 1)
+            .cloned()
+            .collect();
+        let has_more = items.len() > usize::from(query.page_size.get());
+        items.truncate(usize::from(query.page_size.get()));
+        let next_before_generation = if has_more {
+            items.last().map(|item| item.generation)
+        } else {
+            None
+        };
+        Ok(ChannelDiscoveryPage {
+            items,
+            next_before_generation,
+        })
+    }
     async fn reserve_model_discovery(
         &self,
         id: &ChannelId,
@@ -106,14 +181,14 @@ impl ChannelStore for MemoryChannels {
             .as_ref()
             .is_some_and(|stored| stored.id == preview.id && stored.revision == preview.revision)
             || state
-                .discovery
-                .as_ref()
+                .discoveries
+                .last()
                 .is_some_and(|old| old.generation >= preview.generation)
         {
             return Err(discovery_conflict());
         }
         preview.validate().expect("valid snapshot");
-        state.discovery = Some(preview.clone());
+        state.discoveries.push(preview.clone());
         Ok(())
     }
     async fn load_model_discovery(
@@ -131,7 +206,7 @@ impl ChannelStore for MemoryChannels {
                 "missing",
             ));
         }
-        Ok(state.discovery.clone())
+        Ok(state.discoveries.last().cloned())
     }
     async fn list_channels(&self, _: ChannelListQuery) -> AdminStoreResult<ChannelPage> {
         Err(unavailable("unused list"))
@@ -214,7 +289,7 @@ impl ChannelStore for MemoryChannels {
                     ));
                 }
                 state.stored = None;
-                state.discovery = None;
+                state.discoveries.clear();
             }
         }
         state.commits += 1;
@@ -396,8 +471,52 @@ async fn discovery_persists_only_success_without_changing_config_and_rejects_sta
             .last_model_discovery(&created.id)
             .await
             .expect("old success not overwritten"),
-        Some(preview)
+        Some(preview.clone())
     );
+    let newer = service
+        .discover_models(&created.id, rev(2))
+        .await
+        .expect("next success");
+    let calls = provider.calls.load(Ordering::SeqCst);
+    let mut query = ChannelDiscoveryQuery {
+        id: created.id,
+        before_generation: None,
+        page_size: gateway_admin::model::PageSize::new(1).expect("size"),
+    };
+    let page = service
+        .model_discovery_history(query.clone())
+        .await
+        .expect("newest page");
+    assert_eq!(page.items, vec![newer.clone()]);
+    assert_eq!(page.next_before_generation, Some(newer.generation));
+    query.before_generation = page.next_before_generation;
+    let page = service
+        .model_discovery_history(query.clone())
+        .await
+        .expect("older page");
+    assert_eq!(page.items, vec![preview]);
+    assert_eq!(page.next_before_generation, None);
+    query.before_generation = Some(0);
+    assert_eq!(
+        service
+            .model_discovery_history(query.clone())
+            .await
+            .expect_err("invalid before store")
+            .kind(),
+        AdminErrorKind::Invalid
+    );
+    query.before_generation = None;
+    store.state.lock().expect("state").reject = true;
+    assert_eq!(
+        service
+            .model_discovery_history(query)
+            .await
+            .expect_err("not empty on failure")
+            .kind(),
+        AdminErrorKind::Unavailable
+    );
+    assert_eq!(provider.calls.load(Ordering::SeqCst), calls);
+    assert_eq!(store.state.lock().expect("state").commits, 1);
 }
 impl ChannelProviderAdmin for TestProvider {
     fn provider_kind(&self) -> &ProviderKind {
@@ -425,6 +544,74 @@ impl ChannelProviderAdmin for TestProvider {
     ) -> Result<ProviderDocument, ProviderAdminError> {
         Ok(document(json!({"hasSecret": true})))
     }
+}
+
+#[tokio::test]
+async fn comparison_reads_saved_pairs_without_credentials_and_rejects_missing_or_failed_reads() {
+    let base = ChannelModelPreview {
+        id: ChannelId::new("chan_compare").expect("id"),
+        revision: rev(1),
+        generation: 9007199254740993,
+        fetched_at: chrono::Utc::now(),
+        added: vec!["new-model".to_owned()],
+        missing: vec!["configured".to_owned()],
+        unchanged: vec![],
+    };
+    let mut target = base.clone();
+    target.generation += 1;
+    let store = Arc::new(MemoryChannels::default());
+    store.state.lock().expect("state").discoveries = vec![base.clone(), target.clone()];
+    let services = AdminHarness::new()
+        .channels(store.clone(), Arc::new(TestProvider { kind: kind() }))
+        .build()
+        .await;
+    let mut query = ChannelDiscoveryComparisonQuery {
+        id: base.id,
+        base_generation: base.generation,
+        target_generation: target.generation,
+    };
+    let comparison = services
+        .channels()
+        .compare_model_discoveries(query.clone())
+        .await
+        .expect("local comparison");
+    assert!(comparison.appeared.is_empty() && comparison.disappeared.is_empty());
+    assert_eq!(comparison.unchanged, ["new-model"]);
+    query.target_generation += 1;
+    assert_eq!(
+        services
+            .channels()
+            .compare_model_discoveries(query.clone())
+            .await
+            .expect_err("missing record")
+            .kind(),
+        AdminErrorKind::NotFound
+    );
+    query.target_generation = query.base_generation;
+    assert_eq!(
+        services
+            .channels()
+            .compare_model_discoveries(query.clone())
+            .await
+            .expect_err("invalid order")
+            .kind(),
+        AdminErrorKind::Invalid
+    );
+    query.target_generation = target.generation;
+    store.state.lock().expect("state").reject = true;
+    assert_eq!(
+        services
+            .channels()
+            .compare_model_discoveries(query)
+            .await
+            .expect_err("failure is not no changes")
+            .kind(),
+        AdminErrorKind::Unavailable
+    );
+    let state = store.state.lock().expect("state");
+    assert_eq!(state.commits, 0);
+    assert_eq!(state.generation, 0);
+    assert_eq!(state.discoveries.len(), 2);
 }
 
 #[derive(Default)]

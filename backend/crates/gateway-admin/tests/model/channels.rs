@@ -44,3 +44,100 @@ fn discovery_snapshot_validation_rejects_corrupt_partitions_and_unbounded_ids() 
         .validate()
         .expect("empty upstream with configured missing model");
 }
+
+#[test]
+fn discovery_history_bounds_page_size_and_cursor_without_losing_precision() {
+    use gateway_admin::model::{PageSize, channels::ChannelDiscoveryQuery};
+    let mut query = ChannelDiscoveryQuery {
+        id: preview().id,
+        page_size: PageSize::new(50).expect("size"),
+        before_generation: Some(9007199254740993),
+    };
+    query.validate().expect("large cursor");
+    for cursor in [0, u64::MAX] {
+        query.before_generation = Some(cursor);
+        assert!(query.validate().is_err());
+    }
+    query.before_generation = None;
+    query.page_size = PageSize::new(51).expect("generic size");
+    assert!(query.validate().is_err());
+}
+
+#[test]
+fn discovery_comparison_uses_observed_sets_not_configuration_partitions_or_timestamps() {
+    use gateway_admin::model::channels::ChannelDiscoveryPair;
+    let mut base = preview();
+    base.added = vec!["a".to_owned()];
+    base.unchanged = vec!["b".to_owned()];
+    base.missing = vec!["configured-only".to_owned()];
+    let mut target = base.clone();
+    target.generation = 2;
+    target.revision = ChannelRevision::new(2).expect("revision");
+    target.fetched_at -= chrono::Duration::seconds(1);
+    target.added = vec!["b".to_owned(), "c".to_owned()];
+    target.unchanged.clear();
+    target.missing = vec!["a".to_owned(), "configured-only".to_owned()];
+    let comparison = ChannelDiscoveryPair {
+        base: base.clone(),
+        target,
+    }
+    .compare()
+    .expect("compare across versions");
+    assert_eq!(comparison.appeared, ["c"]);
+    assert_eq!(comparison.disappeared, ["a"]);
+    assert_eq!(comparison.unchanged, ["b"]);
+    let mut target = base.clone();
+    target.generation = 2;
+    std::mem::swap(&mut target.added, &mut target.unchanged);
+    let comparison = ChannelDiscoveryPair { base, target }
+        .compare()
+        .expect("configuration-only change");
+    assert!(comparison.appeared.is_empty());
+    assert!(comparison.disappeared.is_empty());
+    assert_eq!(comparison.unchanged, ["a", "b"]);
+}
+
+#[test]
+fn discovery_comparison_handles_empty_sets_and_rejects_invalid_identity_or_order() {
+    use gateway_admin::model::channels::ChannelDiscoveryPair;
+    let base = preview();
+    let mut target = base.clone();
+    target.generation = 2;
+    target.added.clear();
+    target.unchanged.clear();
+    let comparison = ChannelDiscoveryPair {
+        base: base.clone(),
+        target: target.clone(),
+    }
+    .compare()
+    .expect("empty target");
+    assert_eq!(comparison.disappeared, ["new", "old"]);
+    assert!(comparison.appeared.is_empty());
+    let mut empty_base = target.clone();
+    empty_base.generation = 1;
+    let comparison = ChannelDiscoveryPair {
+        base: empty_base,
+        target: target.clone(),
+    }
+    .compare()
+    .expect("both empty");
+    assert!(
+        comparison.appeared.is_empty()
+            && comparison.disappeared.is_empty()
+            && comparison.unchanged.is_empty()
+    );
+    for generation in [0, 1, u64::MAX] {
+        target.generation = generation;
+        assert!(
+            ChannelDiscoveryPair {
+                base: base.clone(),
+                target: target.clone()
+            }
+            .compare()
+            .is_err()
+        );
+    }
+    target.generation = 2;
+    target.id = ChannelId::new("chan_other").expect("id");
+    assert!(ChannelDiscoveryPair { base, target }.compare().is_err());
+}

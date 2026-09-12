@@ -41,6 +41,30 @@ export interface ChannelModelPreview {
   missing: string[]
   unchanged: string[]
 }
+export interface ChannelDiscoveryPage {
+  items: ChannelModelPreview[]
+  nextBeforeGeneration: string | null
+}
+export interface ChannelDiscoveryReference {
+  generation: string
+  connectionRevision: string
+  fetchedAt: string
+}
+export interface ChannelDiscoveryComparison {
+  id: string
+  base: ChannelDiscoveryReference
+  target: ChannelDiscoveryReference
+  sameConnectionRevision: boolean
+  appeared: string[]
+  disappeared: string[]
+  unchanged: string[]
+}
+export function compareChannelModelDiscoveries(id: string, baseGeneration: string, targetGeneration: string, signal?: AbortSignal) {
+  return request<ChannelDiscoveryComparison>({ url: '/api/admin/channels/model-discoveries/compare', params: { id, baseGeneration, targetGeneration }, signal })
+}
+export function getChannelModelDiscoveries(id: string, beforeGeneration?: string, signal?: AbortSignal) {
+  return request<ChannelDiscoveryPage>({ url: '/api/admin/channels/model-discoveries', params: { id, beforeGeneration, pageSize: 10 }, signal })
+}
 export function getChannelModelDiscovery(id: string, signal?: AbortSignal) {
   return request<ChannelModelPreview | null>({ url: '/api/admin/channels/model-discovery', params: { id }, signal })
 }

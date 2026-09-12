@@ -63,6 +63,108 @@ pub struct NewChannel {
 }
 
 #[derive(Debug, Clone)]
+pub struct ChannelDiscoveryQuery {
+    pub id: ChannelId,
+    pub before_generation: Option<u64>,
+    pub page_size: PageSize,
+}
+
+impl ChannelDiscoveryQuery {
+    pub fn validate(&self) -> Result<(), AdminError> {
+        if self.page_size.get() > 50
+            || self
+                .before_generation
+                .is_some_and(|value| value == 0 || value > i64::MAX as u64)
+        {
+            return Err(AdminError::invalid("发现历史分页参数不合法"));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelDiscoveryPage {
+    pub items: Vec<ChannelModelPreview>,
+    pub next_before_generation: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelDiscoveryComparisonQuery {
+    pub id: ChannelId,
+    pub base_generation: u64,
+    pub target_generation: u64,
+}
+
+impl ChannelDiscoveryComparisonQuery {
+    pub fn validate(&self) -> Result<(), AdminError> {
+        if self.base_generation == 0
+            || self.base_generation >= self.target_generation
+            || self.target_generation > i64::MAX as u64
+        {
+            return Err(AdminError::invalid(
+                "请选择同一渠道中序号递增的两条不同记录",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelDiscoveryPair {
+    pub base: ChannelModelPreview,
+    pub target: ChannelModelPreview,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelDiscoveryComparison {
+    pub records: ChannelDiscoveryPair,
+    pub appeared: Vec<String>,
+    pub disappeared: Vec<String>,
+    pub unchanged: Vec<String>,
+}
+
+impl ChannelDiscoveryPair {
+    pub fn compare(self) -> Result<ChannelDiscoveryComparison, AdminError> {
+        self.base.validate()?;
+        self.target.validate()?;
+        if self.base.id != self.target.id {
+            return Err(AdminError::invalid("不能比较不同渠道的发现记录"));
+        }
+        ChannelDiscoveryComparisonQuery {
+            id: self.base.id.clone(),
+            base_generation: self.base.generation,
+            target_generation: self.target.generation,
+        }
+        .validate()?;
+        let base: BTreeSet<_> = self.base.added.iter().chain(&self.base.unchanged).collect();
+        let target: BTreeSet<_> = self
+            .target
+            .added
+            .iter()
+            .chain(&self.target.unchanged)
+            .collect();
+        let appeared = target
+            .difference(&base)
+            .map(|value| value.to_string())
+            .collect();
+        let disappeared = base
+            .difference(&target)
+            .map(|value| value.to_string())
+            .collect();
+        let unchanged = base
+            .intersection(&target)
+            .map(|value| value.to_string())
+            .collect();
+        Ok(ChannelDiscoveryComparison {
+            records: self,
+            appeared,
+            disappeared,
+            unchanged,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct UpdateChannel {
     pub id: ChannelId,
     pub expected_revision: ChannelRevision,

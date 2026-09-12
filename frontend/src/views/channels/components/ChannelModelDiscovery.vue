@@ -6,6 +6,7 @@ import { discoverChannelModels, getChannelModelDiscovery } from '@/api'
 import BaseButton from '@/components/base/BaseButton.vue'
 import BaseCheckbox from '@/components/base/BaseCheckbox.vue'
 import { errorMessage } from '@/utils/async'
+import ChannelDiscoveryHistory from './ChannelDiscoveryHistory.vue'
 
 const props = defineProps<{ channel: Channel, disabled: boolean, models: string[] }>()
 const emit = defineEmits<{ append: [models: string[]] }>()
@@ -146,5 +147,6 @@ function append() {
         每个渠道最多配置 1000 个模型
       </p>
     </template>
+    <ChannelDiscoveryHistory :channel="channel" :latest-generation="preview?.generation" />
   </section>
 </template>

@@ -85,6 +85,59 @@ struct IdQuery {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiscoveryHistoryQuery {
+    id: String,
+    before_generation: Option<String>,
+    page_size: Option<u16>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryHistoryView {
+    items: Vec<DiscoveryView>,
+    next_before_generation: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct DiscoveryComparisonQuery {
+    id: String,
+    base_generation: String,
+    target_generation: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryReferenceView {
+    generation: String,
+    connection_revision: String,
+    fetched_at: DateTime<Utc>,
+}
+
+impl From<&gateway_admin::model::channels::ChannelModelPreview> for DiscoveryReferenceView {
+    fn from(preview: &gateway_admin::model::channels::ChannelModelPreview) -> Self {
+        Self {
+            generation: preview.generation.to_string(),
+            connection_revision: preview.revision.get().to_string(),
+            fetched_at: preview.fetched_at,
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryComparisonView {
+    id: String,
+    base: DiscoveryReferenceView,
+    target: DiscoveryReferenceView,
+    same_connection_revision: bool,
+    appeared: Vec<String>,
+    disappeared: Vec<String>,
+    unchanged: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VersionedChannelRequest {
     id: String,
     expected_revision: String,
@@ -187,6 +240,14 @@ where
         .route("/api/admin/channels/providers", get(providers::<S>))
         .route("/api/admin/channels/connection", get(connection::<S>))
         .route(
+            "/api/admin/channels/model-discoveries/compare",
+            get(compare_model_discoveries::<S>),
+        )
+        .route(
+            "/api/admin/channels/model-discoveries",
+            get(model_discovery_history::<S>),
+        )
+        .route(
             "/api/admin/channels/model-discovery",
             get(last_model_discovery::<S>),
         )
@@ -260,6 +321,38 @@ where
     ))
 }
 
+async fn model_discovery_history<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<DiscoveryHistoryQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let before_generation = query
+        .before_generation
+        .map(discovery_generation)
+        .transpose()?;
+    let page = state
+        .admin_services()
+        .channels()
+        .model_discovery_history(gateway_admin::model::channels::ChannelDiscoveryQuery {
+            id: channel_id(query.id)?,
+            before_generation,
+            page_size: PageSize::new(query.page_size.unwrap_or(20))
+                .map_err(|_| AdminError::bad_request("分页参数不合法"))?,
+        })
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(DiscoveryHistoryView {
+            items: page.items.into_iter().map(DiscoveryView::from).collect(),
+            next_before_generation: page.next_before_generation.map(|value| value.to_string()),
+        }),
+    ))
+}
+
 async fn list<S>(
     _auth: AdminAuth,
     State(state): State<S>,
@@ -289,6 +382,49 @@ where
             items: page.items.into_iter().map(ChannelView::from).collect(),
             total: page.total,
             config_revision: page.config_revision.get(),
+        }),
+    ))
+}
+
+fn discovery_generation(value: String) -> Result<u64, AdminError> {
+    value
+        .parse::<u64>()
+        .ok()
+        .filter(|parsed| parsed.to_string() == value)
+        .ok_or_else(|| AdminError::bad_request("发现序号必须为十进制正整数字符串"))
+}
+
+async fn compare_model_discoveries<S>(
+    _auth: AdminAuth,
+    State(state): State<S>,
+    AdminQuery(query): AdminQuery<DiscoveryComparisonQuery>,
+) -> Result<impl IntoResponse, AdminError>
+where
+    S: AdminSessionState + Send + Sync,
+{
+    let comparison = state
+        .admin_services()
+        .channels()
+        .compare_model_discoveries(
+            gateway_admin::model::channels::ChannelDiscoveryComparisonQuery {
+                id: channel_id(query.id)?,
+                base_generation: discovery_generation(query.base_generation)?,
+                target_generation: discovery_generation(query.target_generation)?,
+            },
+        )
+        .await
+        .map_err(map_admin_service_error)?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(DiscoveryComparisonView {
+            id: comparison.records.base.id.to_string(),
+            base: DiscoveryReferenceView::from(&comparison.records.base),
+            target: DiscoveryReferenceView::from(&comparison.records.target),
+            same_connection_revision: comparison.records.base.revision
+                == comparison.records.target.revision,
+            appeared: comparison.appeared,
+            disappeared: comparison.disappeared,
+            unchanged: comparison.unchanged,
         }),
     ))
 }

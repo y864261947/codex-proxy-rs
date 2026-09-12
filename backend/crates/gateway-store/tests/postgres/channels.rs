@@ -1,7 +1,10 @@
 use gateway_admin::{
     model::{
         MutationActor, MutationContext, PageSize,
-        channels::{ChannelChange, ChannelFields, ChannelListQuery, ChannelModelPreview},
+        channels::{
+            ChannelChange, ChannelDiscoveryComparisonQuery, ChannelDiscoveryQuery, ChannelFields,
+            ChannelListQuery, ChannelModelPreview,
+        },
     },
     ports::store::{AdminStoreErrorKind, ChannelStore},
 };
@@ -230,6 +233,223 @@ async fn concurrent_discovery_saves_keep_the_highest_query_generation() {
         repo.load_model_discovery(&id()).await.expect("latest"),
         Some(second)
     );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn discovery_history_migration_preserves_latest_and_pages_by_channel_and_generation() {
+    let Some(db) = TestDatabase::create("discovery_history").await else {
+        return;
+    };
+    let repo = PgChannelRepository::new(db.pool.clone());
+    let mut channel_fields = fields();
+    channel_fields.quota_scope_id = None;
+    repo.change_channel(
+        ChannelChange::Create {
+            id: id(),
+            provider: provider(),
+            fields: channel_fields.clone(),
+            config: config("fixture-only"),
+        },
+        &context(),
+    )
+    .await
+    .expect("create");
+    let mut history_query = ChannelDiscoveryQuery {
+        id: id(),
+        before_generation: None,
+        page_size: PageSize::new(1).expect("size"),
+    };
+    assert!(
+        repo.list_model_discoveries(history_query.clone())
+            .await
+            .expect("no history")
+            .items
+            .is_empty()
+    );
+    sqlx::raw_sql("alter table channel_model_discoveries drop constraint channel_model_discoveries_pkey, add primary key (channel_id)")
+        .execute(&db.pool).await.expect("restore prior schema in isolated fixture");
+    let first = discovery(
+        repo.reserve_model_discovery(&id(), revision(1))
+            .await
+            .expect("first generation"),
+        1,
+    );
+    repo.save_model_discovery(&first)
+        .await
+        .expect("single legacy record");
+    sqlx::raw_sql(include_str!(
+        "../../../../migrations/0012_channel_model_discovery_history.sql"
+    ))
+    .execute(&db.pool)
+    .await
+    .expect("upgrade preserves record");
+    assert_eq!(
+        repo.load_model_discovery(&id()).await.expect("preserved"),
+        Some(first.clone())
+    );
+    let second = discovery(
+        repo.reserve_model_discovery(&id(), revision(1))
+            .await
+            .expect("second generation"),
+        1,
+    );
+    repo.save_model_discovery(&second)
+        .await
+        .expect("append same version");
+    let first_page = repo
+        .list_model_discoveries(history_query.clone())
+        .await
+        .expect("first page");
+    assert_eq!(first_page.items, vec![second.clone()]);
+    assert_eq!(first_page.next_before_generation, Some(second.generation));
+    repo.change_channel(
+        ChannelChange::Update {
+            id: id(),
+            expected_revision: revision(1),
+            fields: channel_fields.clone(),
+            replacement_config: Some(config("rotated-fixture")),
+        },
+        &context(),
+    )
+    .await
+    .expect("new revision");
+    let third = discovery(
+        repo.reserve_model_discovery(&id(), revision(2))
+            .await
+            .expect("third generation"),
+        2,
+    );
+    repo.save_model_discovery(&third)
+        .await
+        .expect("insert between page reads");
+    history_query.before_generation = first_page.next_before_generation;
+    let older = repo
+        .list_model_discoveries(history_query.clone())
+        .await
+        .expect("older page");
+    assert_eq!(older.items, vec![first.clone()]);
+    assert_eq!(older.next_before_generation, None);
+    history_query.before_generation = Some(first.generation);
+    assert!(
+        repo.list_model_discoveries(history_query.clone())
+            .await
+            .expect("end of history")
+            .items
+            .is_empty()
+    );
+    assert_eq!(
+        repo.load_model_discovery(&id()).await.expect("latest"),
+        Some(third.clone())
+    );
+
+    let other = ChannelId::new("chan_other").expect("other");
+    channel_fields.name = "Other channel".to_owned();
+    repo.change_channel(
+        ChannelChange::Create {
+            id: other.clone(),
+            provider: provider(),
+            fields: channel_fields,
+            config: config("other-fixture"),
+        },
+        &context(),
+    )
+    .await
+    .expect("other channel");
+    let mut other_record = discovery(
+        repo.reserve_model_discovery(&other, revision(1))
+            .await
+            .expect("other generation"),
+        1,
+    );
+    other_record.id = other.clone();
+    repo.save_model_discovery(&other_record)
+        .await
+        .expect("other history");
+    history_query.before_generation = None;
+    history_query.page_size = PageSize::new(50).expect("size");
+    let all = repo
+        .list_model_discoveries(history_query.clone())
+        .await
+        .expect("only this channel");
+    assert_eq!(all.items, vec![third, second, first]);
+    assert_eq!(all.next_before_generation, None);
+    let comparison_query = ChannelDiscoveryComparisonQuery {
+        id: id(),
+        base_generation: all.items[2].generation,
+        target_generation: all.items[0].generation,
+    };
+    let pair = repo
+        .load_discovery_pair(comparison_query.clone())
+        .await
+        .expect("load exact pair")
+        .expect("pair");
+    assert_eq!(pair.base, all.items[2]);
+    assert_eq!(pair.target, all.items[0]);
+    assert_ne!(pair.base.revision, pair.target.revision);
+    let mut cross_channel = comparison_query.clone();
+    cross_channel.target_generation = other_record.generation;
+    assert!(
+        repo.load_discovery_pair(cross_channel)
+            .await
+            .expect("cannot read other channel record")
+            .is_none()
+    );
+    let rejected = discovery(
+        repo.reserve_model_discovery(&id(), revision(2))
+            .await
+            .expect("next generation"),
+        2,
+    );
+    sqlx::query("alter table channel_model_discoveries add constraint reject_history_write check (generation < 0) not valid")
+        .execute(&db.pool).await.expect("simulate write failure");
+    assert!(repo.save_model_discovery(&rejected).await.is_err());
+    assert_eq!(
+        repo.list_model_discoveries(history_query.clone())
+            .await
+            .expect("all history retained")
+            .items,
+        all.items
+    );
+    sqlx::query("alter table channel_model_discoveries drop constraint reject_history_write")
+        .execute(&db.pool)
+        .await
+        .expect("recover writes");
+    repo.change_channel(
+        ChannelChange::Delete {
+            id: id(),
+            expected_revision: revision(2),
+        },
+        &context(),
+    )
+    .await
+    .expect("delete channel");
+    assert_eq!(
+        repo.list_model_discoveries(history_query.clone())
+            .await
+            .expect_err("deleted channel")
+            .kind(),
+        AdminStoreErrorKind::NotFound
+    );
+    history_query.id = other;
+    assert!(
+        repo.load_discovery_pair(comparison_query)
+            .await
+            .expect("deleted comparison")
+            .is_none()
+    );
+    assert_eq!(
+        repo.list_model_discoveries(history_query)
+            .await
+            .expect("other retained")
+            .items,
+        vec![other_record]
+    );
+    let count: i64 = sqlx::query_scalar("select count(*) from channel_model_discoveries")
+        .fetch_one(&db.pool)
+        .await
+        .expect("cascade all versions");
+    assert_eq!(count, 1);
     db.close().await;
 }
 

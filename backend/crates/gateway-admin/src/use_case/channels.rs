@@ -24,6 +24,14 @@ use crate::{
 
 #[async_trait]
 pub trait ChannelService: Send + Sync {
+    async fn compare_model_discoveries(
+        &self,
+        query: crate::model::channels::ChannelDiscoveryComparisonQuery,
+    ) -> Result<crate::model::channels::ChannelDiscoveryComparison, AdminError>;
+    async fn model_discovery_history(
+        &self,
+        query: crate::model::channels::ChannelDiscoveryQuery,
+    ) -> Result<crate::model::channels::ChannelDiscoveryPage, AdminError>;
     async fn last_model_discovery(
         &self,
         id: &ChannelId,
@@ -95,6 +103,36 @@ impl DefaultChannelService {
 
 #[async_trait]
 impl ChannelService for DefaultChannelService {
+    async fn compare_model_discoveries(
+        &self,
+        query: crate::model::channels::ChannelDiscoveryComparisonQuery,
+    ) -> Result<crate::model::channels::ChannelDiscoveryComparison, AdminError> {
+        query.validate()?;
+        let records = self
+            .store
+            .load_discovery_pair(query.clone())
+            .await
+            .map_err(|error| map_store_error(error, "channel"))?
+            .ok_or_else(|| AdminError::not_found("渠道或选中的发现记录不存在，请刷新历史"))?;
+        if records.base.id != query.id
+            || records.target.id != query.id
+            || records.base.generation != query.base_generation
+            || records.target.generation != query.target_generation
+        {
+            return Err(AdminError::internal("发现记录与查询不匹配"));
+        }
+        records.compare()
+    }
+    async fn model_discovery_history(
+        &self,
+        query: crate::model::channels::ChannelDiscoveryQuery,
+    ) -> Result<crate::model::channels::ChannelDiscoveryPage, AdminError> {
+        query.validate()?;
+        self.store
+            .list_model_discoveries(query)
+            .await
+            .map_err(|error| map_store_error(error, "channel"))
+    }
     async fn last_model_discovery(
         &self,
         id: &ChannelId,
