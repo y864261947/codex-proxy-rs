@@ -86,6 +86,14 @@ pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
 
 #[async_trait]
 pub trait ChannelStore: Send + Sync {
+    async fn claim_due_model_discovery(
+        &self,
+    ) -> AdminStoreResult<Option<crate::model::channels::ChannelDiscoveryClaim>>;
+    async fn finish_scheduled_model_discovery(
+        &self,
+        claim: &crate::model::channels::ChannelDiscoveryClaim,
+        succeeded: bool,
+    ) -> AdminStoreResult<()>;
     async fn load_discovery_pair(
         &self,
         query: crate::model::channels::ChannelDiscoveryComparisonQuery,

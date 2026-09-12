@@ -42,6 +42,39 @@ impl PgChannelRepository {
 
 #[async_trait]
 impl ChannelStore for PgChannelRepository {
+    async fn claim_due_model_discovery(
+        &self,
+    ) -> AdminStoreResult<Option<gateway_admin::model::channels::ChannelDiscoveryClaim>> {
+        let row = sqlx::query("with due as (select id from upstream_channels where enabled and provider_kind='openai_api' and discovery_interval_minutes is not null and discovery_next_due_at <= now() order by discovery_next_due_at,id for update skip locked limit 1) update upstream_channels channel set discovery_next_due_at=now()+make_interval(mins => channel.discovery_interval_minutes), discovery_attempt=nextval('channel_model_discovery_generation'), discovery_attempted_at=now(), discovery_completed_at=null, discovery_succeeded=null from due where channel.id=due.id returning channel.id, channel.connection_revision, channel.discovery_attempt")
+            .fetch_optional(&self.pool).await.map_err(sql_error)?;
+        row.map(|row| {
+            Ok(gateway_admin::model::channels::ChannelDiscoveryClaim {
+                id: ChannelId::new(row.try_get::<String, _>("id").map_err(sql_error)?)
+                    .map_err(|_| invalid())?,
+                revision: ChannelRevision::new(unsigned(
+                    row.try_get("connection_revision").map_err(sql_error)?,
+                )?)
+                .map_err(|_| invalid())?,
+                attempt: unsigned(row.try_get("discovery_attempt").map_err(sql_error)?)?,
+            })
+        })
+        .transpose()
+    }
+
+    async fn finish_scheduled_model_discovery(
+        &self,
+        claim: &gateway_admin::model::channels::ChannelDiscoveryClaim,
+        succeeded: bool,
+    ) -> AdminStoreResult<()> {
+        let result = sqlx::query("update upstream_channels set discovery_completed_at=now(), discovery_succeeded=$4 where id=$1 and connection_revision=$2 and discovery_attempt=$3 and discovery_completed_at is null and enabled and discovery_interval_minutes is not null")
+            .bind(claim.id.as_str()).bind(signed(claim.revision.get())?).bind(signed(claim.attempt)?).bind(succeeded)
+            .execute(&self.pool).await.map_err(sql_error)?;
+        if result.rows_affected() != 1 {
+            return Err(stale_discovery());
+        }
+        Ok(())
+    }
+
     async fn load_discovery_pair(
         &self,
         query: ChannelDiscoveryComparisonQuery,
@@ -161,7 +194,7 @@ impl ChannelStore for PgChannelRepository {
                 .map_err(sql_error)?;
         let total: i64 = sqlx::query_scalar("select count(*) from upstream_channels where ($1::text is null or strpos(lower(name), lower($1)) > 0) and ($2::text is null or provider_kind = $2)")
             .bind(&query.search).bind(query.provider.as_ref().map(ProviderKind::as_str)).fetch_one(&mut *tx).await.map_err(sql_error)?;
-        let rows = sqlx::query("select id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, connection_revision, created_at, updated_at from upstream_channels where ($1::text is null or strpos(lower(name), lower($1)) > 0) and ($2::text is null or provider_kind = $2) order by created_at desc, id desc limit $3 offset $4")
+        let rows = sqlx::query("select id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, connection_revision, created_at, updated_at, discovery_interval_minutes, discovery_next_due_at, discovery_attempted_at, discovery_completed_at, discovery_succeeded from upstream_channels where ($1::text is null or strpos(lower(name), lower($1)) > 0) and ($2::text is null or provider_kind = $2) order by created_at desc, id desc limit $3 offset $4")
             .bind(query.search).bind(query.provider.as_ref().map(ProviderKind::as_str)).bind(i64::from(query.page_size.get())).bind(i64::from(query.page - 1) * i64::from(query.page_size.get()))
             .fetch_all(&mut *tx).await.map_err(sql_error)?;
         let items = rows
@@ -197,6 +230,7 @@ impl ChannelStore for PgChannelRepository {
                     "requests_per_minute",
                     "quota_scope_id",
                     "connection",
+                    "discovery_interval_minutes",
                 ],
             ),
             ChannelChange::Update {
@@ -211,6 +245,7 @@ impl ChannelStore for PgChannelRepository {
                     "max_concurrency",
                     "requests_per_minute",
                     "quota_scope_id",
+                    "discovery_interval_minutes",
                 ];
                 if replacement_config.is_some() {
                     fields.push("connection");
@@ -231,14 +266,14 @@ impl ChannelStore for PgChannelRepository {
             .await
             .map_err(|error| admin_store_error("channel", error))?;
         let changed = match change {
-            ChannelChange::Create { id, provider, fields, config } => sqlx::query("insert into upstream_channels (id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, provider_config_json) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+            ChannelChange::Create { id, provider, fields, config } => sqlx::query("insert into upstream_channels (id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, provider_config_json, discovery_interval_minutes, discovery_next_due_at) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,case when $12::integer is not null then now()+make_interval(mins => $12) end)")
                 .bind(id.as_str()).bind(provider.as_str()).bind(fields.name).bind(fields.note).bind(fields.enabled)
                 .bind(i32::from(fields.preference.priority())).bind(i32::from(fields.preference.weight())).bind(signed(fields.limits.max_concurrency)?).bind(signed(fields.limits.requests_per_minute)?)
-                .bind(fields.quota_scope_id.as_ref().map(QuotaScopeId::as_str)).bind(Value::Object(config.into_inner())).execute(&mut *tx).await,
-            ChannelChange::Update { id, expected_revision, fields, replacement_config } => sqlx::query("update upstream_channels set name=$3, note=$4, enabled=$5, priority=$6, weight=$7, max_concurrency=$8, requests_per_minute=$9, quota_scope_id=$10, provider_config_json=coalesce($11,provider_config_json), connection_revision=connection_revision+1, updated_at=now() where id=$1 and connection_revision=$2")
+                .bind(fields.quota_scope_id.as_ref().map(QuotaScopeId::as_str)).bind(Value::Object(config.into_inner())).bind(fields.discovery_interval_minutes.map(i32::from)).execute(&mut *tx).await,
+            ChannelChange::Update { id, expected_revision, fields, replacement_config } => sqlx::query("update upstream_channels set name=$3, note=$4, enabled=$5, priority=$6, weight=$7, max_concurrency=$8, requests_per_minute=$9, quota_scope_id=$10, provider_config_json=coalesce($11,provider_config_json), connection_revision=connection_revision+1, updated_at=now(), discovery_interval_minutes=$12, discovery_next_due_at=case when $12::integer is not null then now()+make_interval(mins => $12) end, discovery_attempt=null, discovery_attempted_at=null, discovery_completed_at=null, discovery_succeeded=null where id=$1 and connection_revision=$2")
                 .bind(id.as_str()).bind(signed(expected_revision.get())?).bind(fields.name).bind(fields.note).bind(fields.enabled)
                 .bind(i32::from(fields.preference.priority())).bind(i32::from(fields.preference.weight())).bind(signed(fields.limits.max_concurrency)?).bind(signed(fields.limits.requests_per_minute)?)
-                .bind(fields.quota_scope_id.as_ref().map(QuotaScopeId::as_str)).bind(replacement_config.map(|config| Value::Object(config.into_inner()))).execute(&mut *tx).await,
+                .bind(fields.quota_scope_id.as_ref().map(QuotaScopeId::as_str)).bind(replacement_config.map(|config| Value::Object(config.into_inner()))).bind(fields.discovery_interval_minutes.map(i32::from)).execute(&mut *tx).await,
             ChannelChange::Delete { id, expected_revision } => sqlx::query("delete from upstream_channels where id=$1 and connection_revision=$2")
                 .bind(id.as_str()).bind(signed(expected_revision.get())?).execute(&mut *tx).await,
         }.map_err(sql_error)?;
@@ -309,6 +344,12 @@ pub(super) fn public_record(row: &PgRow) -> AdminStoreResult<ChannelRecord> {
         name: row.try_get("name").map_err(sql_error)?,
         note: row.try_get("note").map_err(sql_error)?,
         enabled: row.try_get("enabled").map_err(sql_error)?,
+        discovery_interval_minutes: row
+            .try_get::<Option<i32>, _>("discovery_interval_minutes")
+            .map_err(sql_error)?
+            .map(u16::try_from)
+            .transpose()
+            .map_err(|_| invalid())?,
         preference: SourcePreference::new(
             u16::try_from(row.try_get::<i32, _>("priority").map_err(sql_error)?)
                 .map_err(|_| invalid())?,
@@ -342,6 +383,12 @@ pub(super) fn public_record(row: &PgRow) -> AdminStoreResult<ChannelRecord> {
         .map_err(|_| invalid())?,
         created_at: row.try_get("created_at").map_err(sql_error)?,
         updated_at: row.try_get("updated_at").map_err(sql_error)?,
+        discovery_schedule: gateway_admin::model::channels::ChannelDiscoverySchedule {
+            next_due_at: row.try_get("discovery_next_due_at").map_err(sql_error)?,
+            attempted_at: row.try_get("discovery_attempted_at").map_err(sql_error)?,
+            completed_at: row.try_get("discovery_completed_at").map_err(sql_error)?,
+            succeeded: row.try_get("discovery_succeeded").map_err(sql_error)?,
+        },
     })
 }
 

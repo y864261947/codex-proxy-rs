@@ -4,6 +4,7 @@ export interface ChannelFields {
   name: string
   note: string | null
   enabled: boolean
+  discoveryIntervalMinutes: number | null
   priority: number
   weight: number
   maxConcurrency: number
@@ -11,6 +12,12 @@ export interface ChannelFields {
   quotaScopeId: string | null
 }
 export interface Channel extends ChannelFields {
+  discoverySchedule: {
+    nextDueAt: string | null
+    attemptedAt: string | null
+    completedAt: string | null
+    succeeded: boolean | null
+  }
   id: string
   provider: string
   connectionRevision: string

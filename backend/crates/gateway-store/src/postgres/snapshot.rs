@@ -262,7 +262,7 @@ async fn load_channels(
             source::{SourceId, SourcePolicy},
         },
     };
-    let rows = sqlx::query("select id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, connection_revision, created_at, updated_at from upstream_channels order by id")
+    let rows = sqlx::query("select id, provider_kind, name, note, enabled, priority, weight, max_concurrency, requests_per_minute, quota_scope_id, connection_revision, created_at, updated_at, discovery_interval_minutes, discovery_next_due_at, discovery_attempted_at, discovery_completed_at, discovery_succeeded from upstream_channels order by id")
         .fetch_all(&mut **transaction).await.map_err(|_| postgres_unavailable("load channel snapshot"))?;
     rows.iter()
         .map(|row| {

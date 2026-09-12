@@ -20,6 +20,29 @@ async fn channel_snapshot_freezes_public_policy_and_revision_without_reading_cre
     assert_eq!(channel.policy().limits().max_concurrency, 4);
     assert!(channel.policy().enabled());
     assert!(!format!("{snapshot:?}").contains("sensitive-test-token"));
+    sqlx::query("update upstream_channels set discovery_interval_minutes=5,discovery_next_due_at=now()-interval '1 second' where id='chan_snapshot'").execute(&database.pool).await.expect("schedule fixture");
+    let channels = gateway_store::postgres::PgChannelRepository::new(database.pool.clone());
+    let claim = gateway_admin::ports::store::ChannelStore::claim_due_model_discovery(&channels)
+        .await
+        .expect("claim")
+        .expect("due");
+    gateway_admin::ports::store::ChannelStore::finish_scheduled_model_discovery(
+        &channels, &claim, false,
+    )
+    .await
+    .expect("observation");
+    let observed = repository
+        .load_runtime_snapshot()
+        .await
+        .expect("snapshot with schedule observation");
+    assert_eq!(
+        observed.channels[0].binding().revision(),
+        channel.binding().revision()
+    );
+    assert_eq!(
+        observed.channels[0].policy().limits(),
+        channel.policy().limits()
+    );
     sqlx::query("update upstream_channels set enabled=false,connection_revision=2,max_concurrency=1,name='Renamed' where id='chan_snapshot'").execute(&database.pool).await.expect("change");
     let next = repository
         .load_runtime_snapshot()

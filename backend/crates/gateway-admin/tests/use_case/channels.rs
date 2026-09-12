@@ -32,6 +32,26 @@ use super::{AdminHarness, UnavailableStore, unavailable};
 
 #[async_trait]
 impl ChannelStore for UnavailableStore {
+    async fn claim_due_model_discovery(
+        &self,
+    ) -> AdminStoreResult<Option<gateway_admin::model::channels::ChannelDiscoveryClaim>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
+    async fn finish_scheduled_model_discovery(
+        &self,
+        _: &gateway_admin::model::channels::ChannelDiscoveryClaim,
+        _: bool,
+    ) -> AdminStoreResult<()> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
     async fn load_discovery_pair(
         &self,
         _: ChannelDiscoveryComparisonQuery,
@@ -93,6 +113,26 @@ struct ChannelState {
 
 #[async_trait]
 impl ChannelStore for MemoryChannels {
+    async fn claim_due_model_discovery(
+        &self,
+    ) -> AdminStoreResult<Option<gateway_admin::model::channels::ChannelDiscoveryClaim>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
+    async fn finish_scheduled_model_discovery(
+        &self,
+        _: &gateway_admin::model::channels::ChannelDiscoveryClaim,
+        _: bool,
+    ) -> AdminStoreResult<()> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
     async fn load_discovery_pair(
         &self,
         query: ChannelDiscoveryComparisonQuery,
@@ -635,6 +675,7 @@ fn kind() -> ProviderKind {
 }
 fn fields() -> ChannelFields {
     ChannelFields {
+        discovery_interval_minutes: None,
         name: "A channel".to_owned(),
         note: None,
         enabled: true,
@@ -782,9 +823,12 @@ async fn channel_service_rejects_unknown_adapters_and_invalid_fields_without_per
     let service = services.channels();
     let mut invalid_fields = fields();
     invalid_fields.name.clear();
+    let mut invalid_interval = fields();
+    invalid_interval.discovery_interval_minutes = Some(4);
     for (provider, fields) in [
         (ProviderKind::new("unregistered").expect("kind"), fields()),
         (kind(), invalid_fields),
+        (kind(), invalid_interval),
     ] {
         assert_eq!(
             service

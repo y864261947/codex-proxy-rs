@@ -195,10 +195,17 @@ pub struct ChannelFields {
     pub preference: SourcePreference,
     pub limits: RateLimits,
     pub quota_scope_id: Option<QuotaScopeId>,
+    pub discovery_interval_minutes: Option<u16>,
 }
 
 impl ChannelFields {
     pub fn validate(&self, id: &ChannelId) -> Result<(), AdminError> {
+        if self
+            .discovery_interval_minutes
+            .is_some_and(|minutes| !(5..=1440).contains(&minutes))
+        {
+            return Err(AdminError::invalid("定时发现间隔必须为 5–1440 分钟"));
+        }
         SourcePolicy::new(
             SourceId::Channel(id.clone()),
             self.enabled,
@@ -226,6 +233,22 @@ pub struct ChannelRecord {
     pub connection_revision: ChannelRevision,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub discovery_schedule: ChannelDiscoverySchedule,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelDiscoverySchedule {
+    pub next_due_at: Option<DateTime<Utc>>,
+    pub attempted_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub succeeded: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelDiscoveryClaim {
+    pub id: ChannelId,
+    pub revision: ChannelRevision,
+    pub attempt: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

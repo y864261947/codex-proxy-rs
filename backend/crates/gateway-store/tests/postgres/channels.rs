@@ -456,6 +456,282 @@ async fn discovery_history_migration_preserves_latest_and_pages_by_channel_and_g
 fn id() -> ChannelId {
     ChannelId::new("chan_test").expect("channel")
 }
+
+#[tokio::test]
+async fn scheduled_discovery_is_opt_in_bounded_and_fenced_without_mutating_config() {
+    let Some(db) = TestDatabase::create("channel_schedule").await else {
+        return;
+    };
+    let repo = PgChannelRepository::new(db.pool.clone());
+    let mut settings = fields();
+    settings.quota_scope_id = None;
+    repo.change_channel(
+        ChannelChange::Create {
+            id: id(),
+            provider: provider(),
+            fields: settings.clone(),
+            config: config("schedule-secret"),
+        },
+        &context(),
+    )
+    .await
+    .expect("create disabled schedule");
+    assert!(
+        repo.claim_due_model_discovery()
+            .await
+            .expect("default off")
+            .is_none()
+    );
+    assert!(
+        repo.list_channels(query()).await.expect("list").items[0]
+            .discovery_schedule
+            .next_due_at
+            .is_none()
+    );
+    settings.discovery_interval_minutes = Some(5);
+    let configured = repo
+        .change_channel(
+            ChannelChange::Update {
+                id: id(),
+                expected_revision: revision(1),
+                fields: settings.clone(),
+                replacement_config: None,
+            },
+            &context(),
+        )
+        .await
+        .expect("opt in");
+    assert!(
+        repo.claim_due_model_discovery()
+            .await
+            .expect("not yet due")
+            .is_none()
+    );
+    sqlx::query("update upstream_channels set discovery_next_due_at=now()-interval '1 day'")
+        .execute(&db.pool)
+        .await
+        .expect("due");
+    let (first, competing) = tokio::join!(
+        repo.claim_due_model_discovery(),
+        repo.claim_due_model_discovery()
+    );
+    let claims = [first.expect("claim"), competing.expect("competing claim")]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    assert_eq!(claims.len(), 1);
+    let claim = &claims[0];
+    assert_eq!(claim.revision, revision(2));
+    let reopened = PgChannelRepository::new(db.pool.clone());
+    assert!(
+        reopened
+            .claim_due_model_discovery()
+            .await
+            .expect("no catchup after restart")
+            .is_none()
+    );
+    let page = repo.list_channels(query()).await.expect("status");
+    assert_eq!(page.config_revision, configured);
+    assert!(page.items[0].discovery_schedule.attempted_at.is_some());
+    assert!(page.items[0].discovery_schedule.completed_at.is_none());
+    assert_eq!(page.items[0].discovery_schedule.succeeded, None);
+    assert!(
+        page.items[0]
+            .discovery_schedule
+            .next_due_at
+            .expect("next due")
+            > chrono::Utc::now()
+    );
+    assert!(!format!("{page:?}").contains("schedule-secret"));
+    let generation = repo
+        .reserve_model_discovery(&id(), claim.revision)
+        .await
+        .expect("generation");
+    let success = discovery(generation, 2);
+    repo.save_model_discovery(&success)
+        .await
+        .expect("save success");
+    repo.finish_scheduled_model_discovery(claim, true)
+        .await
+        .expect("confirm success");
+    assert_eq!(
+        repo.finish_scheduled_model_discovery(claim, false)
+            .await
+            .expect_err("duplicate finish fenced")
+            .kind(),
+        AdminStoreErrorKind::StaleRevision
+    );
+    sqlx::query("update upstream_channels set discovery_next_due_at=now()-interval '1 second'")
+        .execute(&db.pool)
+        .await
+        .expect("next interval");
+    let retry = repo
+        .claim_due_model_discovery()
+        .await
+        .expect("claim")
+        .expect("due");
+    assert!(retry.attempt > claim.attempt);
+    assert!(
+        repo.finish_scheduled_model_discovery(claim, true)
+            .await
+            .is_err()
+    );
+    repo.finish_scheduled_model_discovery(&retry, false)
+        .await
+        .expect("failed attempt");
+    assert_eq!(
+        repo.load_model_discovery(&id())
+            .await
+            .expect("success retained"),
+        Some(success)
+    );
+    assert_eq!(
+        repo.list_channels(query())
+            .await
+            .expect("failed status")
+            .items[0]
+            .discovery_schedule
+            .succeeded,
+        Some(false)
+    );
+    let audits: i64 = sqlx::query_scalar("select count(*) from admin_audit_events")
+        .fetch_one(&db.pool)
+        .await
+        .expect("audit count");
+    assert_eq!(audits, 2);
+    let audited: bool = sqlx::query_scalar("select bool_and('discovery_interval_minutes' = any(changed_fields)) from admin_audit_events").fetch_one(&db.pool).await.expect("schedule audited");
+    assert!(audited);
+    assert_eq!(
+        repo.list_channels(query())
+            .await
+            .expect("unchanged config")
+            .config_revision,
+        configured
+    );
+    settings.enabled = false;
+    repo.change_channel(
+        ChannelChange::Update {
+            id: id(),
+            expected_revision: revision(2),
+            fields: settings,
+            replacement_config: None,
+        },
+        &context(),
+    )
+    .await
+    .expect("disable channel");
+    sqlx::query("update upstream_channels set discovery_next_due_at=now()-interval '1 second'")
+        .execute(&db.pool)
+        .await
+        .expect("due disabled channel");
+    assert!(
+        repo.claim_due_model_discovery()
+            .await
+            .expect("paused")
+            .is_none()
+    );
+    assert!(
+        repo.finish_scheduled_model_discovery(&retry, true)
+            .await
+            .is_err()
+    );
+    assert!(
+        repo.save_model_discovery(&discovery(generation + 100, 2))
+            .await
+            .is_err()
+    );
+    db.close().await;
+}
+
+#[tokio::test]
+async fn invalid_schedule_rolls_back_and_disabling_clears_due_state() {
+    let Some(db) = TestDatabase::create("channel_schedule_validation").await else {
+        return;
+    };
+    let repo = PgChannelRepository::new(db.pool.clone());
+    let mut settings = fields();
+    settings.quota_scope_id = None;
+    settings.discovery_interval_minutes = Some(1440);
+    repo.change_channel(
+        ChannelChange::Create {
+            id: id(),
+            provider: provider(),
+            fields: settings.clone(),
+            config: config("secret"),
+        },
+        &context(),
+    )
+    .await
+    .expect("maximum interval");
+    for minutes in [0, 4, 1441, u16::MAX] {
+        settings.discovery_interval_minutes = Some(minutes);
+        assert_eq!(
+            repo.change_channel(
+                ChannelChange::Update {
+                    id: id(),
+                    expected_revision: revision(1),
+                    fields: settings.clone(),
+                    replacement_config: None,
+                },
+                &context()
+            )
+            .await
+            .expect_err("invalid interval")
+            .kind(),
+            AdminStoreErrorKind::Invalid
+        );
+    }
+    assert!(
+        sqlx::query("update upstream_channels set discovery_interval_minutes=1")
+            .execute(&db.pool)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        repo.list_channels(query())
+            .await
+            .expect("not modified")
+            .items[0]
+            .connection_revision,
+        revision(1)
+    );
+    sqlx::query("update upstream_channels set discovery_next_due_at=now()-interval '1 second'")
+        .execute(&db.pool)
+        .await
+        .expect("due");
+    let claim = repo
+        .claim_due_model_discovery()
+        .await
+        .expect("claim")
+        .expect("due");
+    settings.discovery_interval_minutes = None;
+    repo.change_channel(
+        ChannelChange::Update {
+            id: id(),
+            expected_revision: revision(1),
+            fields: settings,
+            replacement_config: None,
+        },
+        &context(),
+    )
+    .await
+    .expect("disable schedule");
+    assert!(
+        repo.finish_scheduled_model_discovery(&claim, true)
+            .await
+            .is_err()
+    );
+    let status = &repo.list_channels(query()).await.expect("disabled").items[0].discovery_schedule;
+    assert!(status.next_due_at.is_none());
+    assert!(status.attempted_at.is_none());
+    assert!(
+        repo.claim_due_model_discovery()
+            .await
+            .expect("off")
+            .is_none()
+    );
+    db.close().await;
+}
 fn provider() -> ProviderKind {
     ProviderKind::new("openai_api").expect("provider")
 }
@@ -471,6 +747,7 @@ fn config(secret: &str) -> ProviderChannelConfig {
 }
 fn fields() -> ChannelFields {
     ChannelFields {
+        discovery_interval_minutes: None,
         name: "100% Channel".to_owned(),
         note: Some("admin note".to_owned()),
         enabled: true,

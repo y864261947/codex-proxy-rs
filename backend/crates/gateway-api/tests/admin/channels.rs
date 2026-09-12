@@ -12,7 +12,7 @@ use gateway_admin::{
             ChannelPage,
         },
     },
-    ports::store::{AdminStoreResult, ChannelStore},
+    ports::store::{AdminStoreError, AdminStoreErrorKind, AdminStoreResult, ChannelStore},
 };
 use gateway_core::{
     channel::{ChannelRevision, StoredChannel},
@@ -27,6 +27,26 @@ struct DiscoveryReadStore(Vec<ChannelModelPreview>);
 
 #[async_trait]
 impl ChannelStore for DiscoveryReadStore {
+    async fn claim_due_model_discovery(
+        &self,
+    ) -> AdminStoreResult<Option<gateway_admin::model::channels::ChannelDiscoveryClaim>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
+    async fn finish_scheduled_model_discovery(
+        &self,
+        _: &gateway_admin::model::channels::ChannelDiscoveryClaim,
+        _: bool,
+    ) -> AdminStoreResult<()> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
     async fn load_discovery_pair(
         &self,
         query: ChannelDiscoveryComparisonQuery,
@@ -87,7 +107,41 @@ impl ChannelStore for DiscoveryReadStore {
         Ok(self.0.first().cloned())
     }
     async fn list_channels(&self, _: ChannelListQuery) -> AdminStoreResult<ChannelPage> {
-        Err(unavailable("unused"))
+        use gateway_admin::model::channels::{
+            ChannelDiscoverySchedule, ChannelFields, ChannelRecord,
+        };
+        let now = chrono::Utc::now();
+        Ok(ChannelPage {
+            items: vec![ChannelRecord {
+                id: ChannelId::new("chan_schedule").expect("id"),
+                provider: gateway_core::identity::ProviderKind::new("openai_api")
+                    .expect("provider"),
+                fields: ChannelFields {
+                    name: "Scheduled channel".to_owned(),
+                    note: None,
+                    enabled: true,
+                    preference: gateway_core::policy::SourcePreference::new(1, 1)
+                        .expect("preference"),
+                    limits: gateway_core::policy::RateLimits {
+                        max_concurrency: 0,
+                        requests_per_minute: 0,
+                    },
+                    quota_scope_id: None,
+                    discovery_interval_minutes: Some(60),
+                },
+                connection_revision: ChannelRevision::new(9007199254740993).expect("revision"),
+                created_at: now,
+                updated_at: now,
+                discovery_schedule: ChannelDiscoverySchedule {
+                    next_due_at: Some(now + chrono::TimeDelta::minutes(60)),
+                    attempted_at: Some(now),
+                    completed_at: None,
+                    succeeded: None,
+                },
+            }],
+            total: 1,
+            config_revision: Revision::new(1).expect("revision"),
+        })
     }
     async fn load_channel_for_edit(
         &self,
@@ -102,6 +156,41 @@ impl ChannelStore for DiscoveryReadStore {
     ) -> AdminStoreResult<Revision> {
         panic!("GET must not change config")
     }
+}
+
+#[tokio::test]
+async fn channel_list_exposes_schedule_without_claiming_work_or_reading_credentials() {
+    let fixture =
+        AdminTestFixture::with_channel_store(std::sync::Arc::new(DiscoveryReadStore(Vec::new())))
+            .await;
+    fixture.auth.insert_session("valid-session");
+    let response = gateway_api::admin::router::<AdminTestState>()
+        .with_state(fixture.state())
+        .oneshot(
+            Request::builder()
+                .uri("/api/admin/channels?page=1&pageSize=20")
+                .header("x-request-id", "schedule-read")
+                .header(header::COOKIE, "cpr_admin_session=valid-session")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let bytes = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .expect("body");
+    let body: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+    let channel = &body["data"]["items"][0];
+    assert_eq!(channel["connectionRevision"], "9007199254740993");
+    assert_eq!(channel["discoveryIntervalMinutes"], 60);
+    assert!(channel["discoverySchedule"]["attemptedAt"].is_string());
+    assert!(channel["discoverySchedule"]["nextDueAt"].is_string());
+    assert!(channel["discoverySchedule"]["completedAt"].is_null());
+    assert!(channel["discoverySchedule"]["succeeded"].is_null());
+    assert!(channel.get("config").is_none());
+    assert!(channel.get("apiKey").is_none());
 }
 
 #[tokio::test]
@@ -297,6 +386,26 @@ async fn discovery_history_rejects_invalid_queries_and_does_not_hide_store_failu
 
 #[async_trait]
 impl ChannelStore for UnusedStore {
+    async fn claim_due_model_discovery(
+        &self,
+    ) -> AdminStoreResult<Option<gateway_admin::model::channels::ChannelDiscoveryClaim>> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
+    async fn finish_scheduled_model_discovery(
+        &self,
+        _: &gateway_admin::model::channels::ChannelDiscoveryClaim,
+        _: bool,
+    ) -> AdminStoreResult<()> {
+        Err(AdminStoreError::new(
+            AdminStoreErrorKind::Unavailable,
+            "channel",
+            "unused schedule",
+        ))
+    }
     async fn load_discovery_pair(
         &self,
         _: ChannelDiscoveryComparisonQuery,
@@ -494,12 +603,18 @@ async fn channel_update_requires_explicit_revision_and_keeps_provider_identity_i
     numeric["expectedRevision"] = json!(1);
     let mut priority = valid.clone();
     priority["priority"] = json!(0);
+    let mut invalid_interval = valid.clone();
+    invalid_interval["discoveryIntervalMinutes"] = json!(4);
+    let mut too_long = valid.clone();
+    too_long["discoveryIntervalMinutes"] = json!(1441);
     for (body, expected) in [
         (missing, StatusCode::BAD_REQUEST),
         (changed, StatusCode::BAD_REQUEST),
         (invalid, StatusCode::BAD_REQUEST),
         (numeric, StatusCode::UNPROCESSABLE_ENTITY),
         (priority, StatusCode::BAD_REQUEST),
+        (invalid_interval, StatusCode::BAD_REQUEST),
+        (too_long, StatusCode::BAD_REQUEST),
         (valid, StatusCode::SERVICE_UNAVAILABLE),
     ] {
         let response = gateway_api::admin::router::<AdminTestState>()

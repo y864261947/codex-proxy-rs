@@ -33,6 +33,7 @@ const columns = defineTableColumns<Channel>([
 ])
 const open = ref(false)
 const deleteOpen = ref(false)
+const scheduleConfirmOpen = ref(false)
 const editing = ref<Channel | null>(null)
 const deleting = ref<Channel | null>(null)
 const saving = ref(false)
@@ -60,7 +61,7 @@ let editSequence = 0
 const lifetime = new AbortController()
 
 function defaults(): ChannelFields {
-  return { name: '', note: '', enabled: true, priority: 1, weight: 1, maxConcurrency: 0, requestsPerMinute: 0, quotaScopeId: null }
+  return { name: '', note: '', enabled: true, discoveryIntervalMinutes: null, priority: 1, weight: 1, maxConcurrency: 0, requestsPerMinute: 0, quotaScopeId: null }
 }
 const models = computed(() => modelText.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean))
 const urlValid = computed(() => {
@@ -73,6 +74,7 @@ const urlValid = computed(() => {
 const valid = computed(() => quotaReady.value && !connectionLoading.value && !connectionError.value && !providersError.value
   && providers.value.includes('openai_api') && (!editing.value || editing.value.provider === 'openai_api')
   && !!form.value.name.trim() && urlValid.value
+  && (form.value.discoveryIntervalMinutes === null || (Number.isInteger(form.value.discoveryIntervalMinutes) && form.value.discoveryIntervalMinutes >= 5 && form.value.discoveryIntervalMinutes <= 1440))
   && models.value.length > 0 && models.value.length <= 1000 && new Set(models.value).size === models.value.length
   && (apiKey.value ? /^[\x21-\x7E]+$/.test(apiKey.value) && apiKey.value.length <= 16384 : !!editing.value && hasApiKey.value)
   && [organization.value, project.value].every(value => !value || /^[\w-]{1,256}$/.test(value))
@@ -129,7 +131,7 @@ function edit(channel: Channel | null) {
   if (saving.value)
     return
   editing.value = channel
-  form.value = channel ? { name: channel.name, note: channel.note || '', enabled: channel.enabled, priority: channel.priority, weight: channel.weight, maxConcurrency: channel.maxConcurrency, requestsPerMinute: channel.requestsPerMinute, quotaScopeId: channel.quotaScopeId } : defaults()
+  form.value = channel ? { name: channel.name, note: channel.note || '', enabled: channel.enabled, discoveryIntervalMinutes: channel.discoveryIntervalMinutes, priority: channel.priority, weight: channel.weight, maxConcurrency: channel.maxConcurrency, requestsPerMinute: channel.requestsPerMinute, quotaScopeId: channel.quotaScopeId } : defaults()
   baseUrl.value = channel ? '' : 'https://api.openai.com/v1'
   apiKey.value = ''
   modelText.value = ''
@@ -141,6 +143,14 @@ function edit(channel: Channel | null) {
   open.value = true
   if (channel)
     void loadConnection(channel)
+}
+
+function requestSave() {
+  if (!valid.value || saving.value)
+    return
+  if (form.value.discoveryIntervalMinutes !== null && (form.value.discoveryIntervalMinutes !== editing.value?.discoveryIntervalMinutes || (form.value.enabled && !editing.value?.enabled)))
+    scheduleConfirmOpen.value = true
+  else void save()
 }
 
 async function save() {
@@ -156,6 +166,7 @@ async function save() {
       await updateChannel({ ...data, id: editing.value.id, expectedRevision: editing.value.connectionRevision, config })
     else await createChannel({ ...data, provider: 'openai_api', config })
     open.value = false
+    scheduleConfirmOpen.value = false
     apiKey.value = ''
     toast.success('渠道已保存')
     await load()
@@ -238,6 +249,9 @@ onScopeDispose(() => {
           </template>
           <template #enabled="{ row }">
             <span :class="row.enabled ? 'text-cp-success' : 'text-cp-text-secondary'">{{ row.enabled ? '启用' : '停用' }}</span>
+            <div class="mt-1 text-cp-xs text-cp-text-secondary">
+              {{ row.discoveryIntervalMinutes === null ? '定时发现关闭' : row.enabled ? `每 ${row.discoveryIntervalMinutes} 分钟发现` : '定时发现暂停' }}
+            </div>
           </template>
           <template #preference="{ row }">
             {{ row.priority }} / {{ row.weight }}
@@ -284,6 +298,17 @@ onScopeDispose(() => {
           <BaseTextarea v-model="modelText" aria-label="模型 ID" :rows="4" :disabled="saving || connectionLoading || !!connectionError" />
           <ChannelModelDiscovery v-if="open && editing?.provider === 'openai_api'" :key="`${editing.id}:${editing.connectionRevision}`" :channel="editing" :disabled="discoveryDisabled" :models="models" @append="modelText = [...new Set([...models, ...$event])].join('\n')" />
         </BaseFormItem>
+        <BaseFormItem label="定时模型发现" class="sm:col-span-2" description="默认关闭。保存后后台只查询模型列表并保留发现历史，不自动增删配置，不发送对话。停用渠道时暂停；每次保存渠道后重新计时，不补跑错过的周期。">
+          <BaseSwitch :model-value="form.discoveryIntervalMinutes !== null" label="允许后台定时查询此上游" :show-label="true" :disabled="saving" @update:model-value="form.discoveryIntervalMinutes = $event ? 60 : null" />
+          <BaseNumberInput v-if="form.discoveryIntervalMinutes !== null" v-model="form.discoveryIntervalMinutes" class="mt-3" label="发现间隔（分钟）" :min="5" :max="1440" :disabled="saving" />
+          <div v-if="editing" class="mt-3 grid gap-1 text-cp-xs text-cp-text-secondary">
+            <span>已保存计划的状态（以列表最近读取为准，关闭后刷新列表可更新）：</span>
+            <span>下次到期：{{ editing.discoveryIntervalMinutes !== null && editing.enabled ? editing.discoverySchedule.nextDueAt || '尚未排期' : '未启用或已暂停' }}（实际执行可能排队延迟）</span>
+            <span>最近尝试：{{ editing.discoverySchedule.attemptedAt || '暂无' }}</span>
+            <span>结果：{{ editing.discoverySchedule.succeeded === true ? '已确认成功，结果已写入发现历史' : editing.discoverySchedule.attemptedAt ? '未确认成功；可能失败、中断或仍在执行，请查看发现历史' : '尚未执行' }}</span>
+            <span>关闭计划无法撤回已领取或已发送的查询；旧版本结果拒绝保存。历史记录不会自动清理。</span>
+          </div>
+        </BaseFormItem>
         <BaseFormItem label="Organization（可选）">
           <BaseInput v-model="organization" aria-label="Organization" :maxlength="256" :disabled="saving || connectionLoading || !!connectionError" />
         </BaseFormItem>
@@ -312,11 +337,12 @@ onScopeDispose(() => {
       <template #footer>
         <BaseButton variant="ghost" :disabled="saving" @click="open = false">
           取消
-        </BaseButton><BaseButton variant="primary" :loading="saving" :disabled="!valid" @click="save">
+        </BaseButton><BaseButton variant="primary" :loading="saving" :disabled="!valid" @click="requestSave">
           保存渠道
         </BaseButton>
       </template>
     </BaseModal>
+    <BaseConfirmModal v-model="scheduleConfirmOpen" title="保存并启用定时模型发现？" :description="`允许后台每 ${form.discoveryIntervalMinutes} 分钟使用已保存的凭据查询此上游模型列表；停用渠道期间暂停。不自动修改模型配置，不发起对话。保存后开始计时。`" :loading="saving" @confirm="save" />
     <BaseConfirmModal v-model="deleteOpen" title="删除渠道" :description="`删除 ${deleting?.name || ''}？历史请求记录会保留。`" destructive :loading="saving" @confirm="remove" />
   </div>
 </template>

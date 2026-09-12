@@ -48,6 +48,7 @@ struct ChannelRequest {
     name: String,
     note: Option<String>,
     enabled: bool,
+    discovery_interval_minutes: Option<u16>,
     priority: u16,
     weight: u16,
     max_concurrency: u64,
@@ -62,6 +63,7 @@ impl ChannelRequest {
             name: self.name,
             note: self.note,
             enabled: self.enabled,
+            discovery_interval_minutes: self.discovery_interval_minutes,
             preference: SourcePreference::new(self.priority, self.weight)
                 .map_err(|_| AdminError::bad_request("优先级和权重必须大于零"))?,
             limits: RateLimits {
@@ -151,6 +153,8 @@ struct ChannelView {
     name: String,
     note: Option<String>,
     enabled: bool,
+    discovery_interval_minutes: Option<u16>,
+    discovery_schedule: DiscoveryScheduleView,
     priority: u16,
     weight: u16,
     max_concurrency: u64,
@@ -169,6 +173,13 @@ impl From<ChannelRecord> for ChannelView {
             name: row.fields.name,
             note: row.fields.note,
             enabled: row.fields.enabled,
+            discovery_interval_minutes: row.fields.discovery_interval_minutes,
+            discovery_schedule: DiscoveryScheduleView {
+                next_due_at: row.discovery_schedule.next_due_at,
+                attempted_at: row.discovery_schedule.attempted_at,
+                completed_at: row.discovery_schedule.completed_at,
+                succeeded: row.discovery_schedule.succeeded,
+            },
             priority: row.fields.preference.priority(),
             weight: row.fields.preference.weight(),
             max_concurrency: row.fields.limits.max_concurrency,
@@ -179,6 +190,15 @@ impl From<ChannelRecord> for ChannelView {
             updated_at: row.updated_at,
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DiscoveryScheduleView {
+    next_due_at: Option<DateTime<Utc>>,
+    attempted_at: Option<DateTime<Utc>>,
+    completed_at: Option<DateTime<Utc>>,
+    succeeded: Option<bool>,
 }
 
 #[derive(Serialize)]

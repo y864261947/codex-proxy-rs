@@ -17,6 +17,7 @@ use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
 pub mod backup;
+pub mod discovery;
 pub mod model;
 pub mod ports;
 mod use_case;
@@ -260,7 +261,7 @@ impl AdminBundle {
         self.services.clone()
     }
 
-    /// 取出 Backup Worker 贡献；只能调用一次，与其它 Bundle 的贡献一并交给 Host。
+    /// 取出 Admin Worker 贡献；只能调用一次，与其它 Bundle 的贡献一并交给 Host。
     pub fn take_worker_contributions(&mut self) -> Vec<WorkerContribution> {
         std::mem::take(&mut self.worker_contributions)
     }
@@ -393,7 +394,10 @@ pub async fn initialize(
         )),
         backups,
     };
-    let worker_contributions = backup_worker_contribution(backup_task)?;
+    let mut worker_contributions = backup_worker_contribution(backup_task)?;
+    worker_contributions.push(
+        discovery::ChannelDiscoveryTask::new(store.channels(), services.clone()).contribution()?,
+    );
     Ok(AdminBundle {
         services,
         worker_contributions,
